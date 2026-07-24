@@ -30,7 +30,7 @@ test("searches and renders selected candidates as safe external links with right
     copy={{
       label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
       selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
-      openResult: "Open result", importFailed: "Import failed"
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported"
     }}
   />);
 
@@ -62,11 +62,37 @@ test("shows a safe error when search admission fails", async () => {
     copy={{
       label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
       selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
-      openResult: "Open result", importFailed: "Import failed"
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported"
     }}
   />);
   const user = userEvent.setup();
   await user.type(screen.getByPlaceholderText("Search for sources"), "film");
   await user.click(screen.getByRole("button", { name: "Search" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Search failed");
+});
+
+test("loads the exact Research session requested by a completed Leader Run", async () => {
+  const requests: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    requests.push(String(input));
+    return Response.json({ session: {
+      id: "dss_research", notebook_id: "nb_1", query: "film lighting", status: "ready",
+      summary: "Relevant material", candidates: []
+    } });
+  }));
+  render(<SourceDiscovery
+    notebookID="nb_1"
+    requestedSessionID="dss_research"
+    active
+    onExpandedChange={vi.fn()}
+    onImported={vi.fn()}
+    copy={{
+      label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
+      selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported"
+    }}
+  />);
+  expect(await screen.findByDisplayValue("film lighting")).toBeInTheDocument();
+  expect(requests).toContain("/api/v1/source-discovery-sessions/dss_research");
+  expect(requests).not.toContain("/api/v1/notebooks/nb_1/source-discovery-sessions/latest");
 });

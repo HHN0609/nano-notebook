@@ -1537,6 +1537,7 @@ h2 {
 .source-dialog--discovery {
   width: min(860px, calc(100vw - 32px));
   max-height: min(820px, calc(100vh - 32px));
+  overflow-y: auto;
 }
 
 .source-dialog .nn-button {
@@ -1628,7 +1629,7 @@ h2 {
 
 .source-discovery-results {
   display: flex;
-  max-height: min(390px, 46vh);
+  max-height: min(340px, 40vh);
   overflow-y: auto;
   flex-direction: column;
   border: 1px solid var(--border-subtle);
@@ -1637,7 +1638,7 @@ h2 {
 
 .source-discovery-result {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
+  grid-template-columns: 28px minmax(0, 1fr) 24px;
   align-items: center;
   gap: 16px;
   padding: 13px 16px;
@@ -1645,6 +1646,19 @@ h2 {
 }
 
 .source-discovery-result:last-child { border-bottom: 0; }
+
+.source-discovery-site-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  border-radius: 7px;
+  background: var(--muted);
+}
+
+.source-discovery-site-icon img { width: 20px; height: 20px; object-fit: contain; }
 
 .source-discovery-result-copy {
   display: grid;

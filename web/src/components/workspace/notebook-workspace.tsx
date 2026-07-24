@@ -26,8 +26,9 @@ type WorkspacePanelCopy = ChatPanelCopy & Omit<SourcePanelCopy, "title" | "addSo
 export function NotebookWorkspace({ notebookID, copy, canMaintainSources = true }: { notebookID: string; copy: WorkspacePanelCopy; canMaintainSources?: boolean }) {
   const chatController = usePrivateChat(notebookID, copy);
   const sourcesController = useNotebookSources(notebookID, copy.sourceUnavailableLabel, chatController.snapshot?.chat.id, chatController.snapshot?.source_ids);
+  const requestedDiscoverySessionID = chatController.snapshot?.runs.slice().reverse().find((run) => Boolean(run.discovery_session_id))?.discovery_session_id;
   const panels = {
-    sources: <SourcePanelContent notebookID={notebookID} originChatID={chatController.snapshot?.chat.id} controller={sourcesController} canMaintain={canMaintainSources} copy={{ ...copy, title: copy.sources, addSourcesLabel: copy.addSources, emptyTitle: copy.sourcesEmptyTitle, emptyBody: copy.sourcesEmptyBody, collapseLabel: copy.collapsePanel, comingSoonMessage: copy.comingSoon }} />,
+    sources: <SourcePanelContent notebookID={notebookID} originChatID={chatController.snapshot?.chat.id} requestedDiscoverySessionID={requestedDiscoverySessionID} controller={sourcesController} canMaintain={canMaintainSources} copy={{ ...copy, title: copy.sources, addSourcesLabel: copy.addSources, emptyTitle: copy.sourcesEmptyTitle, emptyBody: copy.sourcesEmptyBody, collapseLabel: copy.collapsePanel, comingSoonMessage: copy.comingSoon }} />,
     chat: <ChatPanelContent copy={copy} controller={chatController} selectedSourceCount={sourcesController.selectedSourceIDs.length} />,
     studio: <StudioPanelContent title={copy.studio} actions={copy.studioActions} betaLabel={copy.beta} emptyTitle={copy.studioEmptyTitle} emptyBody={copy.studioEmptyBody} addNoteLabel={copy.addNote} collapseLabel={copy.collapsePanel} comingSoonMessage={copy.comingSoon} />
   };

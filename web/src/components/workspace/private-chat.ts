@@ -22,6 +22,7 @@ export type AgentRun = {
   input_message_id: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   error_code?: string | null;
+  discovery_session_id?: string;
 };
 
 export type Citation = {

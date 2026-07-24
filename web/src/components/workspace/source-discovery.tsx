@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { MaterialSymbol } from "../icons/material-symbol";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
@@ -11,6 +12,7 @@ type DiscoveryCandidate = {
   canonical_url: string;
   display_url: string;
   snippet: string;
+  favicon_ref?: string;
   selected: boolean;
   status: "discovered" | "importing" | "imported" | "import_failed";
   source_id?: string;
@@ -38,11 +40,14 @@ export type SourceDiscoveryCopy = {
   noResults: string;
   openResult: string;
   importFailed: string;
+  retry: string;
+  imported: string;
 };
 
-export function SourceDiscovery({ notebookID, originChatID, active, copy, onExpandedChange, onImported }: {
+export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, active, copy, onExpandedChange, onImported }: {
   notebookID: string;
   originChatID?: string;
+  requestedSessionID?: string;
   active: boolean;
   copy: SourceDiscoveryCopy;
   onExpandedChange: (expanded: boolean) => void;
@@ -61,7 +66,10 @@ export function SourceDiscovery({ notebookID, originChatID, active, copy, onExpa
       return;
     }
     let cancelled = false;
-    void memberAPI(`/api/v1/notebooks/${notebookID}/source-discovery-sessions/latest`).then(async (response) => {
+    const path = requestedSessionID
+      ? `/api/v1/source-discovery-sessions/${requestedSessionID}`
+      : `/api/v1/notebooks/${notebookID}/source-discovery-sessions/latest`;
+    void memberAPI(path).then(async (response) => {
       if (cancelled || response.status === 204 || !response.ok) return;
       const payload = await response.json() as { session: DiscoverySession };
       if (!cancelled) {
@@ -70,7 +78,7 @@ export function SourceDiscovery({ notebookID, originChatID, active, copy, onExpa
       }
     });
     return () => { cancelled = true; };
-  }, [active, notebookID, onExpandedChange]);
+  }, [active, notebookID, onExpandedChange, requestedSessionID]);
 
   useEffect(() => {
     if (!active || session?.status !== "searching") return;
@@ -94,6 +102,25 @@ export function SourceDiscovery({ notebookID, originChatID, active, copy, onExpa
       });
       if (!response.ok) throw new Error(copy.failed);
       setSession(((await response.json()) as { session: DiscoverySession }).session);
+    } catch {
+      setError(copy.failed);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retrySearch() {
+    if (!session || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await memberAPI(`/api/v1/source-discovery-sessions/${session.id}/retry`, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID(), "X-CSRF-Token": csrfToken() }
+      });
+      if (!response.ok) throw new Error(copy.failed);
+      const payload = await response.json() as { session?: DiscoverySession };
+      if (payload.session) setSession(payload.session);
     } catch {
       setError(copy.failed);
     } finally {
@@ -152,7 +179,7 @@ export function SourceDiscovery({ notebookID, originChatID, active, copy, onExpa
     </form>
     {session?.status === "searching" ? <p className="source-discovery-status" role="status">{copy.searching}</p> : null}
     {error ? <p className="source-discovery-error" role="alert">{error}</p> : null}
-    {session?.status === "failed" ? <p className="source-discovery-error" role="alert">{copy.failed}</p> : null}
+    {session?.status === "failed" ? <div><p className="source-discovery-error" role="alert">{copy.failed}</p><Button variant="outline" disabled={busy} onClick={() => void retrySearch()}>{copy.retry}</Button></div> : null}
     {session?.status === "ready" && session.candidates.length === 0 ? <p className="source-discovery-status">{copy.noResults}</p> : null}
     {expanded ? <div className="source-discovery-expanded">
       {session.summary ? <p className="source-discovery-summary">{session.summary}</p> : null}
@@ -161,11 +188,15 @@ export function SourceDiscovery({ notebookID, originChatID, active, copy, onExpa
       </div>
       <div className="source-discovery-results">
         {session.candidates.map((candidate) => <article className="source-discovery-result" key={candidate.id}>
+          <span className="source-discovery-site-icon" aria-hidden="true">
+            {candidate.favicon_ref ? <img src={candidate.favicon_ref} alt="" /> : <MaterialSymbol name="language" size={18} />}
+          </span>
           <div className="source-discovery-result-copy">
             <a href={candidate.canonical_url} target="_blank" rel="noreferrer noopener" aria-label={`${candidate.title} · ${copy.openResult}`}>{candidate.title} ↗</a>
             <span>{candidate.display_url}</span>
             <p>{candidate.snippet}</p>
             {candidate.status === "import_failed" ? <small>{copy.importFailed}</small> : null}
+            {candidate.status === "imported" ? <small>{copy.imported}</small> : null}
           </div>
           <input
             className="source-discovery-checkbox"

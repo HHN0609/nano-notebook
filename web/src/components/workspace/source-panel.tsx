@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { IconButton } from "../icons/icon-button";
 import { MaterialSymbol } from "../icons/material-symbol";
@@ -77,16 +77,18 @@ export type SourcePanelCopy = {
   failureReasonLabels: Record<NonNullable<MemberSource["failure_reason"]>, string>;
 };
 
-export function SourcePanelContent({ copy, notebookID, originChatID, controller, canMaintain = true }: {
+export function SourcePanelContent({ copy, notebookID, originChatID, requestedDiscoverySessionID, controller, canMaintain = true }: {
   copy: SourcePanelCopy;
   notebookID: string;
   originChatID?: string;
+  requestedDiscoverySessionID?: string;
   controller: SourcesController;
   canMaintain?: boolean;
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [addOpen, setAddOpen] = useState(false);
   const [discoveryExpanded, setDiscoveryExpanded] = useState(false);
+	const [pinnedDiscoverySessionID, setPinnedDiscoverySessionID] = useState<string | undefined>(undefined);
   const [url, setURL] = useState("");
   const [addingURL, setAddingURL] = useState(false);
   const [uploads, setUploads] = useState<Array<{ id: string; title: string; state: "uploading" | "failed" }>>([]);
@@ -94,6 +96,14 @@ export function SourcePanelContent({ copy, notebookID, originChatID, controller,
   const [editingSource, setEditingSource] = useState<{ id: string; title: string } | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [removingSource, setRemovingSource] = useState<MemberSource | null>(null);
+  const openedDiscoverySessionID = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!requestedDiscoverySessionID || openedDiscoverySessionID.current === requestedDiscoverySessionID || !canMaintain) return;
+    openedDiscoverySessionID.current = requestedDiscoverySessionID;
+	setPinnedDiscoverySessionID(requestedDiscoverySessionID);
+    setAddOpen(true);
+  }, [canMaintain, requestedDiscoverySessionID]);
 
   async function addFiles(files: FileList | null) {
     if (!files?.length) return;
@@ -205,13 +215,14 @@ export function SourcePanelContent({ copy, notebookID, originChatID, controller,
         </div>
       )}
 
-      <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) setDiscoveryExpanded(false); }}>
+      <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) { setDiscoveryExpanded(false); setPinnedDiscoverySessionID(undefined); } }}>
         <DialogContent className={`source-dialog${discoveryExpanded ? " source-dialog--discovery" : ""}`} closeLabel={copy.closeLabel}>
           <DialogTitle>{copy.addDialogTitle}</DialogTitle>
           <DialogDescription>{copy.addDialogBody}</DialogDescription>
           <SourceDiscovery
             notebookID={notebookID}
             originChatID={originChatID}
+            requestedSessionID={pinnedDiscoverySessionID}
             active={addOpen}
             onExpandedChange={setDiscoveryExpanded}
             onImported={controller.refresh}
@@ -225,7 +236,9 @@ export function SourcePanelContent({ copy, notebookID, originChatID, controller,
               failed: copy.webSearchFailedLabel,
               noResults: copy.noSearchResultsLabel,
               openResult: copy.openSearchResultLabel,
-              importFailed: copy.sourceImportFailedLabel
+              importFailed: copy.sourceImportFailedLabel,
+              retry: copy.retryLabel,
+              imported: copy.readyLabel
             }}
           />
           <div className="source-dialog-divider" />
