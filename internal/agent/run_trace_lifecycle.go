@@ -17,6 +17,33 @@ type RunTerminalTrace struct {
 	AttemptNo  int
 }
 
+func RecordAttemptWaitingInTx(ctx context.Context, tx pgx.Tx, runID, jobID string, attemptNo int) error {
+	if tx == nil || runID == "" || jobID == "" || attemptNo < 1 {
+		return errors.New("waiting Attempt Trace is incomplete")
+	}
+	recorder, err := NewRunTraceRecorder(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	tracer, err := agentobs.NewTracer(agentobs.TracerConfig{Recorder: recorder, SemanticConventionVersion: TraceSemanticConventionVersion})
+	if err != nil {
+		return err
+	}
+	attemptSpan, err := recorder.SpanContextByIdentity(ctx, TraceAttemptStartIdentity(runID, attemptNo))
+	if err != nil {
+		return err
+	}
+	attemptContext := agentobs.ContextWithSpanContext(ctx, attemptSpan)
+	return tracer.EndSpan(attemptContext, agentobs.SpanEnd{
+		Name: TraceSpanJobAttempt, Status: agentobs.StatusOK,
+		Attributes: []agentobs.Attribute{
+			agentobs.String(TraceKeyJobID, jobID),
+			agentobs.Int64(TraceKeyAttemptNumber, int64(attemptNo)),
+			agentobs.String(TraceKeyRunStatus, "waiting"),
+		},
+	})
+}
+
 func RecordAttemptLeaseExpiredInTx(ctx context.Context, tx pgx.Tx, runID, jobID string, attemptNo int) error {
 	if tx == nil || runID == "" || jobID == "" || attemptNo < 1 {
 		return errors.New("Attempt lease-expiry Trace is incomplete")

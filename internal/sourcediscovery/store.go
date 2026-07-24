@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -113,6 +114,15 @@ type FailSearchCommand struct {
 	ErrorCode  string
 }
 
+type ResearchSessionCommand struct {
+	ID            string
+	NotebookID    string
+	UserID        string
+	OriginChatID  string
+	ResearchRunID string
+	Query         string
+}
+
 type CandidateImport struct {
 	CandidateID string
 	NotebookID  string
@@ -176,6 +186,48 @@ func (s *Store) CreateSession(ctx context.Context, command CreateSessionCommand)
 	}
 	created.Candidates = []Candidate{}
 	return created, nil
+}
+
+// EnsureResearchSession creates the private candidate workspace owned by a
+// Research child Run. Research performs its own bounded provider calls, so no
+// separate source_discovery_job is created.
+func (s *Store) EnsureResearchSession(ctx context.Context, command ResearchSessionCommand) (Session, error) {
+	query := strings.TrimSpace(command.Query)
+	if command.ID == "" || command.NotebookID == "" || command.UserID == "" || command.OriginChatID == "" ||
+		command.ResearchRunID == "" || query == "" || utf8.RuneCountInString(query) > 500 {
+		return Session{}, ErrInvalid
+	}
+	var sessionID string
+	err := s.db.QueryRow(ctx, `
+		select id from source_discovery_sessions where research_run_id=$1
+	`, command.ResearchRunID).Scan(&sessionID)
+	if err == nil {
+		return s.GetSession(ctx, sessionID)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Session{}, err
+	}
+	var allowed bool
+	if err := s.db.QueryRow(ctx, `
+		select exists(
+			select 1 from chat_chats c
+			join notebook_memberships m on m.notebook_id=c.notebook_id
+			where c.id=$1 and c.notebook_id=$2 and m.user_id=$3 and m.role in ('owner','editor')
+		)
+	`, command.OriginChatID, command.NotebookID, command.UserID).Scan(&allowed); err != nil {
+		return Session{}, err
+	}
+	if !allowed {
+		return Session{}, ErrForbidden
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into source_discovery_sessions(
+			id,notebook_id,user_id,origin_chat_id,origin,query,status,research_run_id
+		) values($1,$2,$3,$4,'research_agent',$5,'searching',$6)
+	`, command.ID, command.NotebookID, command.UserID, command.OriginChatID, query, command.ResearchRunID); err != nil {
+		return Session{}, err
+	}
+	return s.GetSession(ctx, command.ID)
 }
 
 func (s *Store) GetSession(ctx context.Context, sessionID string) (Session, error) {
@@ -350,23 +402,7 @@ func (s *Store) CompleteSearch(ctx context.Context, command CompleteSearchComman
 	} else if err != nil {
 		return err
 	}
-	canonical := make([]DiscoveredCandidate, 0, 10)
-	seen := make(map[string]struct{}, 10)
-	for _, candidate := range command.Candidates {
-		if len(canonical) == 10 {
-			break
-		}
-		canonicalURL, ok := canonicalURL(candidate.URL)
-		if !ok || strings.TrimSpace(candidate.ID) == "" || strings.TrimSpace(candidate.Title) == "" {
-			continue
-		}
-		if _, duplicate := seen[canonicalURL]; duplicate {
-			continue
-		}
-		seen[canonicalURL] = struct{}{}
-		candidate.URL = canonicalURL
-		canonical = append(canonical, candidate)
-	}
+	canonical := canonicalCandidates(command.Candidates)
 
 	result, err := s.db.Exec(ctx, `
 		update source_discovery_sessions
@@ -398,6 +434,142 @@ func (s *Store) CompleteSearch(ctx context.Context, command CompleteSearchComman
 		where id=$1 and session_id=$2 and status='running' and lease_token=$3::uuid
 	`, command.JobID, command.SessionID, command.LeaseToken)
 	return err
+}
+
+func (s *Store) CompleteResearchSession(ctx context.Context, researchRunID, summary string, candidates []DiscoveredCandidate) (string, error) {
+	if strings.TrimSpace(researchRunID) == "" {
+		return "", ErrInvalid
+	}
+	var sessionID, query string
+	if err := s.db.QueryRow(ctx, `
+		select id,query from source_discovery_sessions
+		where research_run_id=$1 and origin='research_agent' and status='searching'
+		for update
+	`, researchRunID).Scan(&sessionID, &query); errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrState
+	} else if err != nil {
+		return "", err
+	}
+	canonical := canonicalCandidates(candidates)
+	if strings.TrimSpace(summary) == "" {
+		summary = SummaryForQuery(query)
+	}
+	if _, err := s.db.Exec(ctx, `
+		update source_discovery_sessions
+		set status='ready',summary=nullif(trim($2),''),error_code=null,completed_at=now(),updated_at=now()
+		where id=$1
+	`, sessionID, summary); err != nil {
+		return "", err
+	}
+	if _, err := s.db.Exec(ctx, `delete from source_discovery_candidates where session_id=$1`, sessionID); err != nil {
+		return "", err
+	}
+	for ordinal, candidate := range canonical {
+		if _, err := s.db.Exec(ctx, `
+			insert into source_discovery_candidates(
+				id,session_id,ordinal,title,canonical_url,display_url,snippet,favicon_ref,selected,status
+			) values($1,$2,$3,$4,$5,$6,$7,$8,true,'discovered')
+		`, candidate.ID, sessionID, ordinal, strings.TrimSpace(candidate.Title), candidate.URL,
+			strings.TrimSpace(candidate.DisplayURL), strings.TrimSpace(candidate.Snippet), candidate.FaviconRef); err != nil {
+			return "", err
+		}
+	}
+	return sessionID, nil
+}
+
+func SummaryForQuery(query string) string {
+	query = truncateSummaryQuery(strings.TrimSpace(query), 500)
+	for _, current := range query {
+		if unicode.Is(unicode.Han, current) {
+			return "以下是与“" + query + "”相关的网页资料，请选择需要导入的内容。"
+		}
+	}
+	return "Relevant web material for “" + query + "”. Select what you want to import."
+}
+
+func truncateSummaryQuery(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) > limit {
+		runes = runes[:limit]
+	}
+	return string(runes)
+}
+
+func (s *Store) FailResearchSession(ctx context.Context, researchRunID, errorCode string) error {
+	if strings.TrimSpace(researchRunID) == "" || strings.TrimSpace(errorCode) == "" {
+		return ErrInvalid
+	}
+	result, err := s.db.Exec(ctx, `
+		update source_discovery_sessions
+		set status='failed',error_code=$2,completed_at=now(),updated_at=now()
+		where research_run_id=$1 and origin='research_agent' and status='searching'
+	`, researchRunID, errorCode)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrState
+	}
+	return nil
+}
+
+func (s *Store) RetryFailedSession(ctx context.Context, sessionID, jobID string) (Session, error) {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(jobID) == "" {
+		return Session{}, ErrInvalid
+	}
+	var notebookID string
+	if err := s.db.QueryRow(ctx, `select notebook_id from source_discovery_sessions where id=$1 for update`, sessionID).Scan(&notebookID); errors.Is(err, pgx.ErrNoRows) {
+		return Session{}, ErrNotFound
+	} else if err != nil {
+		return Session{}, err
+	}
+	if err := s.requireMaintain(ctx, notebookID); err != nil {
+		return Session{}, err
+	}
+	result, err := s.db.Exec(ctx, `
+		update source_discovery_sessions
+		set status='searching',summary=null,error_code=null,completed_at=null,updated_at=now()
+		where id=$1 and status='failed'
+	`, sessionID)
+	if err != nil {
+		return Session{}, err
+	}
+	if result.RowsAffected() != 1 {
+		return Session{}, ErrState
+	}
+	if _, err := s.db.Exec(ctx, `delete from source_discovery_candidates where session_id=$1`, sessionID); err != nil {
+		return Session{}, err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into source_discovery_jobs(id,session_id,status,attempt_no,available_at)
+		values($1,$2,'queued',0,now())
+		on conflict(session_id) do update set status='queued',attempt_no=0,available_at=now(),
+			lease_token=null,lease_expires_at=null,last_error_code=null,updated_at=now()
+	`, jobID, sessionID); err != nil {
+		return Session{}, err
+	}
+	return s.GetSession(ctx, sessionID)
+}
+
+func canonicalCandidates(candidates []DiscoveredCandidate) []DiscoveredCandidate {
+	canonical := make([]DiscoveredCandidate, 0, 10)
+	seen := make(map[string]struct{}, 10)
+	for _, candidate := range candidates {
+		if len(canonical) == 10 {
+			break
+		}
+		canonicalURL, ok := canonicalURL(candidate.URL)
+		if !ok || strings.TrimSpace(candidate.ID) == "" || strings.TrimSpace(candidate.Title) == "" {
+			continue
+		}
+		if _, duplicate := seen[canonicalURL]; duplicate {
+			continue
+		}
+		seen[canonicalURL] = struct{}{}
+		candidate.URL = canonicalURL
+		canonical = append(canonical, candidate)
+	}
+	return canonical
 }
 
 func (s *Store) FailSearch(ctx context.Context, command FailSearchCommand) error {

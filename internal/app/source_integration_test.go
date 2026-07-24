@@ -442,7 +442,7 @@ func TestSourceOwnerAPIListsRenamesRetriesAndRemoves(t *testing.T) {
 	}
 }
 
-func TestCreateURLSourceIsIdempotentButRepeatedURLCreatesANewSnapshot(t *testing.T) {
+func TestCreateURLSourceIsIdempotentAndRepeatedURLReusesNotebookSource(t *testing.T) {
 	api := newTestAPI(t)
 	owner, csrf := api.registerWithCSRF(t, "source-url-api@example.com")
 	notebookID := createSourceTestNotebook(t, api, owner, "source-url-api")
@@ -492,7 +492,7 @@ func TestCreateURLSourceIsIdempotentButRepeatedURLCreatesANewSnapshot(t *testing
 		t.Fatalf("replay Source=%+v calls=%d objects=%d", replayedBody.Source, remote.calls, objects.Len())
 	}
 	second := create("url-snapshot-2")
-	if second.Code != http.StatusCreated {
+	if second.Code != http.StatusOK {
 		t.Fatalf("second URL Source status=%d body=%s", second.Code, second.Body.String())
 	}
 	var secondBody struct {
@@ -501,7 +501,7 @@ func TestCreateURLSourceIsIdempotentButRepeatedURLCreatesANewSnapshot(t *testing
 		} `json:"source"`
 	}
 	decodeBody(t, second, &secondBody)
-	if secondBody.Source.ID == firstBody.Source.ID || remote.calls != 2 || objects.Len() != 2 {
+	if secondBody.Source.ID != firstBody.Source.ID || remote.calls != 1 || objects.Len() != 1 {
 		t.Fatalf("second Source=%+v first=%+v calls=%d objects=%d", secondBody.Source, firstBody.Source, remote.calls, objects.Len())
 	}
 }

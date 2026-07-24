@@ -39,10 +39,11 @@ type RunRef struct {
 }
 
 type RunSnapshot struct {
-	ID             string  `json:"id"`
-	InputMessageID string  `json:"input_message_id"`
-	Status         string  `json:"status"`
-	ErrorCode      *string `json:"error_code"`
+	ID                 string  `json:"id"`
+	InputMessageID     string  `json:"input_message_id"`
+	Status             string  `json:"status"`
+	ErrorCode          *string `json:"error_code"`
+	DiscoverySessionID *string `json:"discovery_session_id,omitempty"`
 }
 
 type AssistantMessageSnapshot struct {
@@ -88,7 +89,7 @@ func (s *Store) ByInputMessage(ctx context.Context, messageID string) (RunRef, e
 	err := s.db.QueryRow(ctx, `
 		select id, status
 		from agent_runs
-		where input_message_id = $1
+		where input_message_id = $1 and agent_role='leader'
 		order by created_at, id
 		limit 1`, messageID).Scan(&run.ID, &run.Status)
 	return run, err
@@ -99,7 +100,7 @@ func (s *Store) ActiveByUser(ctx context.Context, userID string) (RunRef, bool, 
 	err := s.db.QueryRow(ctx, `
 		select id, status
 		from agent_runs
-		where user_id = $1 and status in ('queued', 'running')`, userID).Scan(&run.ID, &run.Status)
+		where user_id = $1 and agent_role='leader' and status in ('queued', 'running')`, userID).Scan(&run.ID, &run.Status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunRef{}, false, nil
 	}
@@ -114,14 +115,14 @@ func (s *Store) ActiveByUser(ctx context.Context, userID string) (RunRef, bool, 
 // request-principal callers pass both user and/or Run identity.
 func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int, error) {
 	rows, err := s.db.Query(ctx, `
-		select r.id, j.id, j.attempt_no
+		select r.id, j.id, j.attempt_no, j.status
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
 		where r.status in ('queued', 'running')
-			and j.status in ('queued', 'running')
+			and j.status in ('queued', 'running', 'waiting')
 			and r.deadline_at <= now()
 			and ($1 = '' or r.user_id = $1)
-			and ($2 = '' or r.id = $2)
+			and ($2 = '' or r.id = $2 or r.parent_run_id = $2)
 		order by r.id
 		for update of r, j`, userID, runID)
 	if err != nil {
@@ -131,11 +132,12 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 		runID     string
 		jobID     string
 		attemptNo int
+		jobStatus string
 	}
 	overdue := make([]overdueRun, 0)
 	for rows.Next() {
 		var item overdueRun
-		if err := rows.Scan(&item.runID, &item.jobID, &item.attemptNo); err != nil {
+		if err := rows.Scan(&item.runID, &item.jobID, &item.attemptNo, &item.jobStatus); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -159,23 +161,34 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 			update agent_jobs
 			set status = 'failed', lease_token = null, lease_expires_at = null,
 				finished_at = now(), updated_at = now()
-			where id = $1 and status in ('queued', 'running')`, item.jobID)
+			where id = $1 and status in ('queued', 'running', 'waiting')`, item.jobID)
 		if err != nil {
 			return 0, err
 		}
 		if runTag.RowsAffected() != 1 || jobTag.RowsAffected() != 1 {
 			return 0, errors.New("deadline expiry did not transition Run and Job together")
 		}
+		if _, err := s.db.Exec(ctx, `
+			update source_discovery_sessions
+			set status='failed',error_code='research_deadline_exceeded',completed_at=now(),updated_at=now()
+			where research_run_id=$1 and status='searching'
+		`, item.runID); err != nil {
+			return 0, err
+		}
 		tx, ok := s.db.(pgx.Tx)
 		if !ok {
 			return 0, errors.New("deadline expiry requires a transaction")
+		}
+		terminalAttemptNo := item.attemptNo
+		if item.jobStatus == "waiting" {
+			terminalAttemptNo = 0
 		}
 		if err := RecordRunTerminalInTx(ctx, tx, item.runID, RunTerminalTrace{
 			CauseEvent: TraceEventDeadlineExpired,
 			RunStatus:  "failed",
 			SpanStatus: agentobs.StatusError,
 			ErrorCode:  "run_deadline_exceeded",
-			AttemptNo:  item.attemptNo,
+			AttemptNo:  terminalAttemptNo,
 		}); err != nil {
 			return 0, err
 		}
@@ -191,7 +204,7 @@ func (s *Store) ActiveForChat(ctx context.Context, userID, chatID string) (RunSn
 	err := s.db.QueryRow(ctx, `
 		select id, input_message_id, status, error_code
 		from agent_runs
-		where user_id = $1 and chat_id = $2 and status in ('queued', 'running')`, userID, chatID).
+		where user_id = $1 and chat_id = $2 and agent_role='leader' and status in ('queued', 'running')`, userID, chatID).
 		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunSnapshot{}, false, nil
@@ -206,10 +219,10 @@ func (s *Store) ProjectionForUser(ctx context.Context, userID, runID string) (Ru
 	var projection RunProjection
 	var outputMessageID *string
 	err := s.db.QueryRow(ctx, `
-		select id, input_message_id, status, error_code, output_message_id
+		select id, input_message_id, status, error_code, output_message_id, discovery_session_id
 		from agent_runs
-		where id = $1 and user_id = $2`, runID, userID).
-		Scan(&projection.Run.ID, &projection.Run.InputMessageID, &projection.Run.Status, &projection.Run.ErrorCode, &outputMessageID)
+		where id = $1 and user_id = $2 and agent_role='leader'`, runID, userID).
+		Scan(&projection.Run.ID, &projection.Run.InputMessageID, &projection.Run.Status, &projection.Run.ErrorCode, &outputMessageID, &projection.Run.DiscoverySessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunProjection{}, ErrRunNotFound
 	}
@@ -361,9 +374,9 @@ func (s *Store) CitationViewForUser(ctx context.Context, userID, citationID stri
 
 func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]RunSnapshot, error) {
 	rows, err := s.db.Query(ctx, `
-		select distinct on (input_message_id) id, input_message_id, status, error_code
+		select distinct on (input_message_id) id, input_message_id, status, error_code, discovery_session_id
 		from agent_runs
-		where user_id = $1 and chat_id = $2
+		where user_id = $1 and chat_id = $2 and agent_role='leader'
 		order by input_message_id, created_at desc, id desc`, userID, chatID)
 	if err != nil {
 		return nil, err
@@ -372,7 +385,7 @@ func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]Run
 	runs := make([]RunSnapshot, 0)
 	for rows.Next() {
 		var run RunSnapshot
-		if err := rows.Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode); err != nil {
+		if err := rows.Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &run.DiscoverySessionID); err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -384,13 +397,14 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 	var run RunSnapshot
 	var jobID string
 	var attemptNo int
+	var jobStatus string
 	err := s.db.QueryRow(ctx, `
-		select r.id, r.input_message_id, r.status, r.error_code, j.id, j.attempt_no
+		select r.id, r.input_message_id, r.status, r.error_code, j.id, j.attempt_no, j.status
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
-		where r.id = $1 and r.user_id = $2
+		where r.id = $1 and r.user_id = $2 and r.agent_role='leader'
 		for update of r, j`, runID, userID).
-		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &jobID, &attemptNo)
+		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &jobID, &attemptNo, &jobStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunSnapshot{}, ErrRunNotFound
 	}
@@ -403,6 +417,55 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 	if run.Status == "completed" || run.Status == "failed" {
 		return RunSnapshot{}, ErrRunNotCancellable
 	}
+	tx, ok := s.db.(pgx.Tx)
+	if !ok {
+		return RunSnapshot{}, errors.New("Run cancellation requires a transaction")
+	}
+	var childRunID, childJobID string
+	var childAttemptNo int
+	childErr := s.db.QueryRow(ctx, `
+		select child.id,child_job.id,child_job.attempt_no
+		from agent_runs child join agent_jobs child_job on child_job.run_id=child.id
+		where child.parent_run_id=$1 and child.agent_role='research'
+		for update of child,child_job
+	`, runID).Scan(&childRunID, &childJobID, &childAttemptNo)
+	if childErr != nil && !errors.Is(childErr, pgx.ErrNoRows) {
+		return RunSnapshot{}, childErr
+	}
+	if childErr == nil {
+		childRunTag, err := s.db.Exec(ctx, `
+			update agent_runs set status='cancelled',error_code=null,finished_at=now(),updated_at=now()
+			where id=$1 and status in ('queued','running')
+		`, childRunID)
+		if err != nil {
+			return RunSnapshot{}, err
+		}
+		if _, err := s.db.Exec(ctx, `
+			update agent_jobs set status='cancelled',lease_token=null,lease_expires_at=null,finished_at=now(),updated_at=now()
+			where id=$1 and status in ('queued','running')
+		`, childJobID); err != nil {
+			return RunSnapshot{}, err
+		}
+		if childRunTag.RowsAffected() == 1 {
+			if err := RecordRunTerminalInTx(ctx, tx, childRunID, RunTerminalTrace{
+				CauseEvent: TraceEventCancellation, RunStatus: "cancelled", SpanStatus: agentobs.StatusCancelled, AttemptNo: childAttemptNo,
+			}); err != nil {
+				return RunSnapshot{}, err
+			}
+		}
+		if _, err := s.db.Exec(ctx, `
+			update source_discovery_sessions set status='failed',error_code='research_cancelled',completed_at=now(),updated_at=now()
+			where research_run_id=$1 and status='searching'
+		`, childRunID); err != nil {
+			return RunSnapshot{}, err
+		}
+		if _, err := s.db.Exec(ctx, `
+			update agent_research_delegations set state='consumed',error_code=null,completed_at=coalesce(completed_at,now()),updated_at=now()
+			where parent_run_id=$1
+		`, runID); err != nil {
+			return RunSnapshot{}, err
+		}
+	}
 	runTag, err := s.db.Exec(ctx, `
 		update agent_runs
 		set status = 'cancelled', error_code = null, finished_at = now(), updated_at = now()
@@ -414,22 +477,22 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 		update agent_jobs
 		set status = 'cancelled', lease_token = null, lease_expires_at = null,
 			finished_at = now(), updated_at = now()
-		where id = $1 and status in ('queued', 'running')`, jobID)
+		where id = $1 and status in ('queued', 'running', 'waiting')`, jobID)
 	if err != nil {
 		return RunSnapshot{}, err
 	}
 	if runTag.RowsAffected() != 1 || jobTag.RowsAffected() != 1 {
 		return RunSnapshot{}, ErrRunNotCancellable
 	}
-	tx, ok := s.db.(pgx.Tx)
-	if !ok {
-		return RunSnapshot{}, errors.New("Run cancellation requires a transaction")
+	terminalAttemptNo := attemptNo
+	if jobStatus == "waiting" {
+		terminalAttemptNo = 0
 	}
 	if err := RecordRunTerminalInTx(ctx, tx, runID, RunTerminalTrace{
 		CauseEvent: TraceEventCancellation,
 		RunStatus:  "cancelled",
 		SpanStatus: agentobs.StatusCancelled,
-		AttemptNo:  attemptNo,
+		AttemptNo:  terminalAttemptNo,
 	}); err != nil {
 		return RunSnapshot{}, err
 	}
@@ -474,7 +537,7 @@ func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, reque
 	err = s.db.QueryRow(ctx, `
 		select input_message_id, chat_id, model, prompt_version, status
 		from agent_runs
-		where id = $1 and user_id = $2
+		where id = $1 and user_id = $2 and agent_role='leader'
 		for update`, sourceRunID, userID).
 		Scan(&inputMessageID, &chatID, &model, &promptVersion, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -490,9 +553,9 @@ func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, reque
 	var completed bool
 	err = s.db.QueryRow(ctx, `
 		select
-			(select id from agent_runs where input_message_id = $1 order by created_at desc, id desc limit 1),
+			(select id from agent_runs where input_message_id = $1 and agent_role='leader' order by created_at desc, id desc limit 1),
 			(select id from chat_messages where chat_id = $2 order by created_at desc, id desc limit 1),
-			exists(select 1 from agent_runs where input_message_id = $1 and status = 'completed')`,
+			exists(select 1 from agent_runs where input_message_id = $1 and agent_role='leader' and status = 'completed')`,
 		inputMessageID, chatID).Scan(&latestRunID, &latestMessageID, &completed)
 	if err != nil {
 		return RunSnapshot{}, false, err

@@ -260,6 +260,21 @@ func main() {
 		os.Exit(1)
 	}
 	controller := agent.NewController(runtime, modelClient, registry)
+	var searchProvider websearch.Provider = notConfiguredWebSearchProvider{}
+	if config.BraveSearchAPIKey != "" {
+		searchProvider, err = websearch.NewBraveProvider(websearch.BraveConfig{
+			APIKey:     config.BraveSearchAPIKey,
+			HTTPClient: &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+		})
+		if err != nil {
+			slog.Error("Brave Web Search Provider invalid", "error", err)
+			os.Exit(1)
+		}
+	}
+	leaderExecutor := agent.NewLeaderExecutor(
+		db.Pool(), controller, agent.NewModelLeaderRouter(modelClient),
+		agent.NewModelResearchPlanner(modelClient), searchProvider, agent.WithLeaderTraceSink(traceExporter),
+	)
 	mailSender := mailoutbox.NewSender(
 		mailoutbox.NewQueue(db.Pool(), config.MailLeaseDuration),
 		mailoutbox.NewSMTPMailer(config.MailSMTPAddr, config.MailFrom, config.MailSMTPTimeout),
@@ -267,7 +282,7 @@ func main() {
 	)
 	mailDone := make(chan error, 1)
 	go func() { mailDone <- mailSender.Run(ctx, config.MailPollInterval) }()
-	workerService := agentworker.NewServiceWithConcurrency(db.Pool(), jobs.NewQueueWithTraceSink(db.Pool(), traceExporter), controller, 5*time.Second, 210*time.Second, config.AgentInteractiveConcurrency)
+	workerService := agentworker.NewServiceWithConcurrency(db.Pool(), jobs.NewQueueWithTraceSink(db.Pool(), traceExporter), leaderExecutor, 5*time.Second, 210*time.Second, config.AgentInteractiveConcurrency)
 	workerDone := make(chan error, 1)
 	go func() {
 		err := workerService.Run(ctx)
@@ -312,17 +327,6 @@ func main() {
 	)
 	sourceProcessingDone := make(chan error, 1)
 	go func() { sourceProcessingDone <- sourceProcessingService.Run(ctx) }()
-	var searchProvider websearch.Provider = notConfiguredWebSearchProvider{}
-	if config.BraveSearchAPIKey != "" {
-		searchProvider, err = websearch.NewBraveProvider(websearch.BraveConfig{
-			APIKey:     config.BraveSearchAPIKey,
-			HTTPClient: &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
-		})
-		if err != nil {
-			slog.Error("Brave Web Search Provider invalid", "error", err)
-			os.Exit(1)
-		}
-	}
 	discoveryQueue := sourcediscovery.NewQueue(db.Pool(), config.SourceDiscoveryLease)
 	discoveryProcessor := sourcediscovery.NewProcessor(db.Pool(), discoveryQueue, searchProvider)
 	discoveryService := sourcediscovery.NewService(discoveryProcessor, config.SourceDiscoveryPoll)

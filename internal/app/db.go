@@ -817,6 +817,47 @@ alter table agent_runs add constraint agent_runs_agent_config_id_check check (ch
 alter table agent_runs add column if not exists selected_source_count integer not null default 0
 	check (selected_source_count between 0 and 50);
 
+alter table agent_runs add column if not exists agent_role text not null default 'leader';
+alter table agent_runs add column if not exists parent_run_id text references agent_runs(id) on delete cascade;
+alter table agent_runs add column if not exists discovery_session_id text references source_discovery_sessions(id) on delete set null;
+alter table agent_runs drop constraint if exists agent_runs_agent_role_check;
+alter table agent_runs add constraint agent_runs_agent_role_check check (agent_role in ('leader','research'));
+alter table agent_runs drop constraint if exists agent_runs_role_shape_check;
+alter table agent_runs add constraint agent_runs_role_shape_check check (
+	(agent_role='leader' and parent_run_id is null)
+	or (agent_role='research' and parent_run_id is not null and output_message_id is null)
+);
+
+create unique index if not exists agent_runs_one_research_child_idx
+	on agent_runs(parent_run_id) where agent_role='research';
+
+create table if not exists agent_run_routes (
+	run_id text primary key references agent_runs(id) on delete cascade,
+	route text not null check (route in ('continue_chat','delegate_research')),
+	created_at timestamptz not null default now()
+);
+
+create table if not exists agent_research_delegations (
+	parent_run_id text primary key references agent_runs(id) on delete cascade,
+	child_run_id text not null unique references agent_runs(id) on delete cascade,
+	state text not null check (state in ('waiting','ready','failed','consumed')),
+	discovery_session_id text references source_discovery_sessions(id) on delete set null,
+	expanded_queries jsonb not null default '[]'::jsonb check (jsonb_typeof(expanded_queries)='array'),
+	error_code text check (char_length(error_code) between 1 and 64),
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	completed_at timestamptz,
+	constraint agent_research_delegations_completion_check check (
+		(state='waiting' and discovery_session_id is null and error_code is null and completed_at is null)
+		or (state='ready' and discovery_session_id is not null and error_code is null and completed_at is not null)
+		or (state='failed' and error_code is not null and completed_at is not null)
+		or (state='consumed' and completed_at is not null)
+	)
+);
+
+create unique index if not exists source_discovery_sessions_research_run_idx
+	on source_discovery_sessions(research_run_id) where research_run_id is not null;
+
 -- A Run pins the exact authoritative Evidence and Retrieval projection that
 -- existed at admission. Source identities intentionally are not foreign keys:
 -- deletion must invalidate publication without erasing what the Run selected.
@@ -942,17 +983,20 @@ alter table chat_citations add constraint chat_citations_reference_kind_check ch
 create unique index if not exists chat_citations_source_reference_idx
 	on chat_citations(run_id, reference_ordinal) where reference_kind='source';
 
-create unique index if not exists agent_runs_one_active_per_user_idx
+drop index if exists agent_runs_one_active_per_user_idx;
+create unique index agent_runs_one_active_per_user_idx
 	on agent_runs(user_id)
-	where status in ('queued', 'running');
+	where agent_role='leader' and status in ('queued', 'running');
 
-create unique index if not exists agent_runs_one_active_per_input_idx
+drop index if exists agent_runs_one_active_per_input_idx;
+create unique index agent_runs_one_active_per_input_idx
 	on agent_runs(input_message_id)
-	where status in ('queued', 'running');
+	where agent_role='leader' and status in ('queued', 'running');
 
-create unique index if not exists agent_runs_one_completed_per_input_idx
+drop index if exists agent_runs_one_completed_per_input_idx;
+create unique index agent_runs_one_completed_per_input_idx
 	on agent_runs(input_message_id)
-	where status = 'completed';
+	where agent_role='leader' and status = 'completed';
 
 create index if not exists agent_runs_chat_recent_idx
 	on agent_runs(chat_id, created_at desc, id desc);
@@ -1270,7 +1314,7 @@ create table if not exists agent_jobs (
 	id text primary key,
 	kind text not null check (kind = 'agent_run'),
 	run_id text not null unique references agent_runs(id) on delete cascade,
-	status text not null check (status in ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+	status text not null check (status in ('queued', 'running', 'waiting', 'succeeded', 'failed', 'cancelled')),
 	attempt_no integer not null default 0,
 	lease_token uuid,
 	lease_expires_at timestamptz,
@@ -1279,8 +1323,9 @@ create table if not exists agent_jobs (
 	finished_at timestamptz,
 	updated_at timestamptz not null default now(),
 	constraint agent_jobs_execution_state_check check (
-		(status = 'queued' and attempt_no = 0 and lease_token is null and lease_expires_at is null)
+		(status = 'queued' and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
 		or (status = 'running' and attempt_no between 1 and 3 and lease_token is not null and lease_expires_at is not null)
+		or (status = 'waiting' and attempt_no between 1 and 3 and lease_token is null and lease_expires_at is null)
 		or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
 	)
 );
@@ -1327,10 +1372,11 @@ update agent_jobs
 	set status = 'queued', attempt_no = 0, started_at = null, updated_at = now()
 	where status = 'running' and lease_token is null;
 alter table agent_jobs add constraint agent_jobs_status_check
-	check (status in ('queued', 'running', 'succeeded', 'failed', 'cancelled'));
+	check (status in ('queued', 'running', 'waiting', 'succeeded', 'failed', 'cancelled'));
 alter table agent_jobs add constraint agent_jobs_execution_state_check check (
-	(status = 'queued' and attempt_no = 0 and lease_token is null and lease_expires_at is null)
+	(status = 'queued' and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
 	or (status = 'running' and attempt_no between 1 and 3 and lease_token is not null and lease_expires_at is not null)
+	or (status = 'waiting' and attempt_no between 1 and 3 and lease_token is null and lease_expires_at is null)
 	or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
 );
 
@@ -1427,6 +1473,8 @@ alter table source_discovery_sessions enable row level security;
 alter table source_discovery_candidates enable row level security;
 alter table source_discovery_jobs enable row level security;
 alter table agent_runs enable row level security;
+alter table agent_run_routes enable row level security;
+alter table agent_research_delegations enable row level security;
 alter table agent_run_evidence_set enable row level security;
 alter table agent_run_grounding_plans enable row level security;
 alter table agent_claim_support_records enable row level security;
@@ -1475,6 +1523,8 @@ grant select, insert, update, delete on
 	agent_jobs
 to nano_app;
 grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_app;
+grant select(parent_run_id,state,completed_at,error_code) on agent_research_delegations to nano_app;
+grant update(state,error_code,completed_at,updated_at) on agent_research_delegations to nano_app;
 grant select on retrieval_source_index_builds to nano_app;
 revoke update, delete on platform_capability_grants, platform_replay_access_audit from nano_app;
 revoke insert on platform_capability_grants from nano_app;
@@ -1513,6 +1563,7 @@ grant select, insert, update, delete on retrieval_index_versions, retrieval_eval
 grant select, insert, update, delete on retrieval_source_index_builds to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_worker;
+grant select, insert, update, delete on agent_run_routes, agent_research_delegations to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 grant select, insert, update, delete on chat_source_selections to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
@@ -2155,6 +2206,28 @@ create policy agent_runs_worker on agent_runs
 	for all to nano_worker
 	using (true)
 	with check (true);
+
+drop policy if exists agent_run_routes_worker on agent_run_routes;
+create policy agent_run_routes_worker on agent_run_routes
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists agent_research_delegations_worker on agent_research_delegations;
+create policy agent_research_delegations_worker on agent_research_delegations
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists agent_research_delegations_owner_update on agent_research_delegations;
+create policy agent_research_delegations_owner_update on agent_research_delegations
+	for update to nano_app
+	using (exists (
+		select 1 from agent_runs r
+		where r.id=agent_research_delegations.parent_run_id
+		  and r.user_id=nullif(current_setting('app.principal_id',true),'')
+	))
+	with check (exists (
+		select 1 from agent_runs r
+		where r.id=agent_research_delegations.parent_run_id
+		  and r.user_id=nullif(current_setting('app.principal_id',true),'')
+	));
 
 drop policy if exists agent_run_evidence_set_app on agent_run_evidence_set;
 create policy agent_run_evidence_set_app on agent_run_evidence_set

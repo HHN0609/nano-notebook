@@ -42,7 +42,7 @@ func (p *Processor) ProcessNext(ctx context.Context) (bool, error) {
 		}
 		if failErr := NewStore(tx).FailSearch(ctx, FailSearchCommand{
 			SessionID: lease.SessionID, JobID: lease.ID, LeaseToken: lease.LeaseToken,
-			ErrorCode: safeProviderError(err),
+			ErrorCode: SafeProviderError(err),
 		}); failErr != nil {
 			return true, failErr
 		}
@@ -64,14 +64,15 @@ func (p *Processor) ProcessNext(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	if err := NewStore(tx).CompleteSearch(ctx, CompleteSearchCommand{
-		SessionID: lease.SessionID, JobID: lease.ID, LeaseToken: lease.LeaseToken, Candidates: candidates,
+		SessionID: lease.SessionID, JobID: lease.ID, LeaseToken: lease.LeaseToken,
+		Summary: SummaryForQuery(lease.Query), Candidates: candidates,
 	}); err != nil {
 		return true, err
 	}
 	return true, tx.Commit(ctx)
 }
 
-func safeProviderError(err error) string {
+func SafeProviderError(err error) string {
 	switch {
 	case errors.Is(err, websearch.ErrNotConfigured):
 		return "discovery_not_configured"

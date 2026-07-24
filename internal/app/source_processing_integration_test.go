@@ -324,7 +324,7 @@ func TestHTMLSnapshotProcessorPublishesPrimaryEvidenceAndReady(t *testing.T) {
 	owner := api.register(t, "source-processing-html@example.com")
 	notebookID := createSourceTestNotebook(t, api, owner, "source-processing-html")
 	ownerID := sourceTestUserID(t, api, "source-processing-html@example.com")
-	payload := []byte(`<html><body><nav>Noise</nav><main><h1>Snapshot</h1><p>Primary web evidence.</p></main></body></html>`)
+	payload := []byte(`<html><body><nav>Noise</nav><main><h1>Snapshot</h1><p>Primary web evidence remains immutable, citable, and available for later grounded notebook answers.</p></main></body></html>`)
 	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_html", "srcjob_processing_html", source.FormatTXT, payload)
 	if _, err := api.db.Pool().Exec(context.Background(), `
 		update source_sources set format='html', media_type='text/html' where id='src_processing_html'
@@ -358,7 +358,7 @@ func TestHTMLSnapshotProcessorPublishesPrimaryEvidenceAndReady(t *testing.T) {
 	`).Scan(&state, &evidenceText, &coordinateKind); err != nil {
 		t.Fatal(err)
 	}
-	if state != source.StateReady || evidenceText != "Snapshot Primary web evidence." || coordinateKind != "html_block" {
+	if state != source.StateReady || evidenceText != "Snapshot Primary web evidence remains immutable, citable, and available for later grounded notebook answers." || coordinateKind != "html_block" {
 		t.Fatalf("state=%q evidence=%q coordinate=%q", state, evidenceText, coordinateKind)
 	}
 }

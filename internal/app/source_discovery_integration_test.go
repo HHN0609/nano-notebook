@@ -345,7 +345,7 @@ func TestSourceDiscoveryProcessorExecutesQueuedBraveCompatibleSearch(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.Status != sourcediscovery.StatusReady || len(session.Candidates) != 1 || session.Candidates[0].Title != "Film Guide" {
+	if session.Status != sourcediscovery.StatusReady || session.Summary == nil || *session.Summary == "" || len(session.Candidates) != 1 || session.Candidates[0].Title != "Film Guide" {
 		t.Fatalf("processed Session = %+v", session)
 	}
 }
@@ -464,6 +464,35 @@ func TestSourceDiscoveryCreateAndRestoreHTTP(t *testing.T) {
 	)
 	if viewerCreate.Code != http.StatusForbidden {
 		t.Fatalf("viewer create status = %d, body = %s", viewerCreate.Code, viewerCreate.Body.String())
+	}
+}
+
+func TestSourceDiscoveryFailedSessionCanBeRetried(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "discovery-retry@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "discovery-retry")
+	created := api.postJSONWithCookie(t, "/api/v1/notebooks/"+notebookID+"/source-discovery-sessions", map[string]any{"query": "film editing"}, owner, "")
+	var body struct {
+		Session sourcediscovery.Session `json:"session"`
+	}
+	decodeBody(t, created, &body)
+	if _, err := api.db.Pool().Exec(context.Background(), `update source_discovery_sessions set status='failed',error_code='discovery_timeout',completed_at=now() where id=$1`, body.Session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `update source_discovery_jobs set status='failed',last_error_code='discovery_timeout' where session_id=$1`, body.Session.ID); err != nil {
+		t.Fatal(err)
+	}
+	retried := api.postJSONWithCookie(t, "/api/v1/source-discovery-sessions/"+body.Session.ID+"/retry", map[string]any{}, owner, "retry-discovery")
+	if retried.Code != http.StatusAccepted {
+		t.Fatalf("retry status=%d body=%s", retried.Code, retried.Body.String())
+	}
+	replayed := api.postJSONWithCookie(t, "/api/v1/source-discovery-sessions/"+body.Session.ID+"/retry", map[string]any{}, owner, "retry-discovery")
+	if replayed.Code != http.StatusAccepted {
+		t.Fatalf("retry replay status=%d body=%s", replayed.Code, replayed.Body.String())
+	}
+	lease, ok, err := sourcediscovery.NewQueue(api.db.Pool(), 30*time.Second).Claim(context.Background())
+	if err != nil || !ok || lease.SessionID != body.Session.ID || lease.Query != "film editing" {
+		t.Fatalf("retry lease=%+v ok=%v err=%v", lease, ok, err)
 	}
 }
 
