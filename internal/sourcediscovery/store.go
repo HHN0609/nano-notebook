@@ -17,6 +17,9 @@ var (
 	ErrNotFound  = errors.New("Source Discovery session not found")
 	ErrForbidden = errors.New("Source Discovery requires Source maintenance permission")
 	ErrInvalid   = errors.New("invalid Source Discovery input")
+	ErrLeaseLost = errors.New("Source Discovery job lease lost")
+	ErrState     = errors.New("Source Discovery state conflict")
+	ErrCandidate = errors.New("invalid Source Discovery Candidate selection")
 )
 
 type Origin string
@@ -97,8 +100,23 @@ type DiscoveredCandidate struct {
 
 type CompleteSearchCommand struct {
 	SessionID  string
+	JobID      string
+	LeaseToken string
 	Summary    string
 	Candidates []DiscoveredCandidate
+}
+
+type FailSearchCommand struct {
+	SessionID  string
+	JobID      string
+	LeaseToken string
+	ErrorCode  string
+}
+
+type CandidateImport struct {
+	CandidateID string
+	NotebookID  string
+	URL         string
 }
 
 type DBTX interface {
@@ -203,9 +221,123 @@ func (s *Store) LatestSession(ctx context.Context, notebookID string) (Session, 
 	return s.GetSession(ctx, sessionID)
 }
 
+func (s *Store) ReplaceSelection(ctx context.Context, sessionID string, candidateIDs []string) (Session, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return Session{}, ErrInvalid
+	}
+	var status Status
+	if err := s.db.QueryRow(ctx, `
+		select status from source_discovery_sessions where id=$1 for update
+	`, sessionID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+		return Session{}, ErrNotFound
+	} else if err != nil {
+		return Session{}, err
+	}
+	if status != StatusReady {
+		return Session{}, ErrState
+	}
+	unique := make(map[string]struct{}, len(candidateIDs))
+	for _, candidateID := range candidateIDs {
+		candidateID = strings.TrimSpace(candidateID)
+		if candidateID == "" {
+			return Session{}, ErrCandidate
+		}
+		unique[candidateID] = struct{}{}
+	}
+	selected := make([]string, 0, len(unique))
+	for candidateID := range unique {
+		selected = append(selected, candidateID)
+	}
+	if len(selected) > 0 {
+		var validCount int
+		if err := s.db.QueryRow(ctx, `
+			select count(*) from source_discovery_candidates
+			where session_id=$1 and id=any($2::text[]) and status in ('discovered','import_failed')
+		`, sessionID, selected).Scan(&validCount); err != nil {
+			return Session{}, err
+		}
+		if validCount != len(selected) {
+			return Session{}, ErrCandidate
+		}
+	}
+	if _, err := s.db.Exec(ctx, `
+		update source_discovery_candidates set selected=false,updated_at=now() where session_id=$1
+	`, sessionID); err != nil {
+		return Session{}, err
+	}
+	if len(selected) > 0 {
+		if _, err := s.db.Exec(ctx, `
+			update source_discovery_candidates set selected=true,updated_at=now()
+			where session_id=$1 and id=any($2::text[])
+		`, sessionID, selected); err != nil {
+			return Session{}, err
+		}
+	}
+	return s.GetSession(ctx, sessionID)
+}
+
+func (s *Store) BeginCandidateImport(ctx context.Context, sessionID, candidateID string) (CandidateImport, error) {
+	var candidate CandidateImport
+	err := s.db.QueryRow(ctx, `
+		update source_discovery_candidates c
+		set status='importing',import_error_code=null,updated_at=now()
+		from source_discovery_sessions s
+		where c.id=$2 and c.session_id=$1 and c.session_id=s.id and c.selected=true
+		  and c.status in ('discovered','import_failed') and s.status='ready'
+		returning c.id,s.notebook_id,c.canonical_url
+	`, sessionID, candidateID).Scan(&candidate.CandidateID, &candidate.NotebookID, &candidate.URL)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CandidateImport{}, ErrCandidate
+	}
+	return candidate, err
+}
+
+func (s *Store) CompleteCandidateImport(ctx context.Context, sessionID, candidateID, sourceID string) error {
+	result, err := s.db.Exec(ctx, `
+		update source_discovery_candidates
+		set status='imported',source_id=$3,import_error_code=null,updated_at=now()
+		where session_id=$1 and id=$2 and status='importing'
+	`, sessionID, candidateID, sourceID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrState
+	}
+	return nil
+}
+
+func (s *Store) FailCandidateImport(ctx context.Context, sessionID, candidateID, errorCode string) error {
+	result, err := s.db.Exec(ctx, `
+		update source_discovery_candidates
+		set status='import_failed',source_id=null,import_error_code=$3,updated_at=now()
+		where session_id=$1 and id=$2 and status='importing'
+	`, sessionID, candidateID, errorCode)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrState
+	}
+	return nil
+}
+
 func (s *Store) CompleteSearch(ctx context.Context, command CompleteSearchCommand) error {
-	if strings.TrimSpace(command.SessionID) == "" {
+	if strings.TrimSpace(command.SessionID) == "" || strings.TrimSpace(command.JobID) == "" || strings.TrimSpace(command.LeaseToken) == "" {
 		return ErrInvalid
+	}
+	var leasedSessionID string
+	if err := s.db.QueryRow(ctx, `
+		select j.session_id
+		from source_discovery_jobs j
+		join source_discovery_sessions s on s.id=j.session_id
+		where j.id=$1 and j.session_id=$2 and j.status='running'
+		  and j.lease_token=$3::uuid and j.lease_expires_at > now() and s.status='searching'
+		for update of j,s
+	`, command.JobID, command.SessionID, command.LeaseToken).Scan(&leasedSessionID); errors.Is(err, pgx.ErrNoRows) {
+		return ErrLeaseLost
+	} else if err != nil {
+		return err
 	}
 	canonical := make([]DiscoveredCandidate, 0, 10)
 	seen := make(map[string]struct{}, 10)
@@ -252,9 +384,40 @@ func (s *Store) CompleteSearch(ctx context.Context, command CompleteSearchComman
 	_, err = s.db.Exec(ctx, `
 		update source_discovery_jobs
 		set status='succeeded',lease_token=null,lease_expires_at=null,last_error_code=null,updated_at=now()
-		where session_id=$1
-	`, command.SessionID)
+		where id=$1 and session_id=$2 and status='running' and lease_token=$3::uuid
+	`, command.JobID, command.SessionID, command.LeaseToken)
 	return err
+}
+
+func (s *Store) FailSearch(ctx context.Context, command FailSearchCommand) error {
+	if command.SessionID == "" || command.JobID == "" || command.LeaseToken == "" || command.ErrorCode == "" {
+		return ErrInvalid
+	}
+	result, err := s.db.Exec(ctx, `
+		update source_discovery_sessions s
+		set status='failed',error_code=$4,completed_at=now(),updated_at=now()
+		from source_discovery_jobs j
+		where s.id=$1 and j.id=$2 and j.session_id=s.id and s.status='searching'
+		  and j.status='running' and j.lease_token=$3::uuid and j.lease_expires_at > now()
+	`, command.SessionID, command.JobID, command.LeaseToken, command.ErrorCode)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	result, err = s.db.Exec(ctx, `
+		update source_discovery_jobs
+		set status='failed',lease_token=null,lease_expires_at=null,last_error_code=$4,updated_at=now()
+		where id=$2 and session_id=$1 and status='running' and lease_token=$3::uuid
+	`, command.SessionID, command.JobID, command.LeaseToken, command.ErrorCode)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	return nil
 }
 
 func canonicalURL(raw string) (string, bool) {

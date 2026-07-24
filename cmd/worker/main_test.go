@@ -176,6 +176,9 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_DOCUMENT_RENDER_MAX_OUTPUT_BYTES", "4194304")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_BYTES", "1048576")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_RUNES", "200000")
+	t.Setenv("NANO_BRAVE_SEARCH_API_KEY", "brave-search-secret")
+	t.Setenv("NANO_SOURCE_DISCOVERY_LEASE_DURATION", "35s")
+	t.Setenv("NANO_SOURCE_DISCOVERY_POLL_INTERVAL", "300ms")
 	t.Setenv("NANO_AGENT_INTERACTIVE_CONCURRENCY", "6")
 	t.Setenv("NANO_SOURCE_PROCESSING_CONCURRENCY", "4")
 	t.Setenv("NANO_REPLAY_KEY_ID", "replay-key-7")
@@ -224,7 +227,9 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.DocumentRenderMaxPages != 25 || config.DocumentRenderDPI != 144 || config.DocumentRenderMaxPixelsPerPage != 3_000_000 ||
 		config.DocumentRenderMaxOutputBytes != 4<<20 ||
 		config.SourceProcessingMaxBytes != 1048576 || config.SourceProcessingMaxRunes != 200000 ||
-		config.AgentInteractiveConcurrency != 6 || config.SourceProcessingConcurrency != 4 {
+		config.AgentInteractiveConcurrency != 6 || config.SourceProcessingConcurrency != 4 ||
+		config.BraveSearchAPIKey != "brave-search-secret" || config.SourceDiscoveryLease != 35*time.Second ||
+		config.SourceDiscoveryPoll != 300*time.Millisecond {
 		t.Fatalf("Source processing config = %#v", config)
 	}
 	if config.MailSMTPAddr != "mailpit.internal:1025" || config.MailFrom != "nano@example.test" ||

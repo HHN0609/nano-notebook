@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -101,27 +102,7 @@ func (s *Server) createURLSource(w http.ResponseWriter, r *http.Request, userID,
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.source_url_invalid")
 		return
 	}
-	admissionID, err := newOpaqueID("urladm")
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
-	sourceID, err := newOpaqueID("src")
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
-	requestDigest := sourceURLRequestHash(notebookID, requestURL)
-	var admission source.URLAdmission
-	var reused bool
-	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
-		var beginErr error
-		admission, reused, beginErr = source.NewStore(tx).BeginURLAdmission(r.Context(), source.BeginURLAdmissionCommand{
-			ID: admissionID, SourceID: sourceID, NotebookID: notebookID, IdempotencyKey: key,
-			RequestHash: requestDigest, RequestURL: requestURL,
-		})
-		return beginErr
-	})
+	created, reused, err := s.importURLSource(r.Context(), userID, notebookID, key, requestURL)
 	if errors.Is(err, source.ErrIdempotencyMismatch) {
 		writeError(w, r, http.StatusConflict, "idempotency_mismatch", "error.idempotency_mismatch")
 		return
@@ -134,63 +115,98 @@ func (s *Server) createURLSource(w http.ResponseWriter, r *http.Request, userID,
 		writeError(w, r, http.StatusNotFound, "not_found", "error.notebook_not_found")
 		return
 	}
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+	switch {
+	case errors.Is(err, fetcher.ErrUnsafeDestination):
+		writeError(w, r, http.StatusUnprocessableEntity, "unsafe_destination", "error.source_url_unsafe")
 		return
+	case errors.Is(err, fetcher.ErrResponseTooLarge):
+		writeError(w, r, http.StatusRequestEntityTooLarge, "source_too_large", "error.source_too_large")
+		return
+	case errors.Is(err, fetcher.ErrUnsupportedType):
+		writeError(w, r, http.StatusUnsupportedMediaType, "unsupported_source", "error.source_unsupported")
+		return
+	case errors.Is(err, errSourceInvalidSnapshot):
+		writeError(w, r, http.StatusBadGateway, "source_fetch_failed", "error.source_fetch_failed")
+		return
+	case errors.Is(err, errSourceObjectWrite):
+		writeError(w, r, http.StatusServiceUnavailable, "source_store_unavailable", "error.source_store_unavailable")
+		return
+	case errors.Is(err, source.ErrQuotaReached):
+		writeError(w, r, http.StatusConflict, "quota_reached", "error.source_quota")
+		return
+	case err != nil:
+		writeError(w, r, http.StatusBadGateway, "source_fetch_failed", "error.source_fetch_failed")
+		return
+	}
+	status := http.StatusCreated
+	if reused {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, map[string]any{"source": sourceForMember(created)})
+}
+
+var (
+	errSourceInvalidSnapshot = errors.New("invalid Source snapshot")
+	errSourceObjectWrite     = errors.New("Source snapshot object write failed")
+)
+
+func (s *Server) importURLSource(ctx context.Context, userID, notebookID, key, requestURL string) (source.Source, bool, error) {
+	admissionID, err := newOpaqueID("urladm")
+	if err != nil {
+		return source.Source{}, false, err
+	}
+	sourceID, err := newOpaqueID("src")
+	if err != nil {
+		return source.Source{}, false, err
+	}
+	requestDigest := sourceURLRequestHash(notebookID, requestURL)
+	var admission source.URLAdmission
+	var reused bool
+	err = s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		var beginErr error
+		admission, reused, beginErr = source.NewStore(tx).BeginURLAdmission(ctx, source.BeginURLAdmissionCommand{
+			ID: admissionID, SourceID: sourceID, NotebookID: notebookID, IdempotencyKey: key,
+			RequestHash: requestDigest, RequestURL: requestURL,
+		})
+		return beginErr
+	})
+	if err != nil {
+		return source.Source{}, false, err
 	}
 	if reused {
 		var existing source.Source
-		err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		err = s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
 			var lookupErr error
-			existing, lookupErr = source.NewStore(tx).SourceByID(r.Context(), admission.SourceID)
+			existing, lookupErr = source.NewStore(tx).SourceByID(ctx, admission.SourceID)
 			return lookupErr
 		})
-		if err != nil {
-			writeError(w, r, http.StatusNotFound, "not_found", "error.source_not_found")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"source": sourceForMember(existing)})
-		return
+		return existing, true, err
 	}
 
-	snapshot, err := s.cfg.SourceFetcher.Fetch(r.Context(), requestURL)
+	snapshot, err := s.cfg.SourceFetcher.Fetch(ctx, requestURL)
 	if err != nil {
-		s.failURLAdmission(r, userID, admission.ID, "fetch_failed")
-		switch {
-		case errors.Is(err, fetcher.ErrUnsafeDestination):
-			writeError(w, r, http.StatusUnprocessableEntity, "unsafe_destination", "error.source_url_unsafe")
-		case errors.Is(err, fetcher.ErrResponseTooLarge):
-			writeError(w, r, http.StatusRequestEntityTooLarge, "source_too_large", "error.source_too_large")
-		case errors.Is(err, fetcher.ErrUnsupportedType):
-			writeError(w, r, http.StatusUnsupportedMediaType, "unsupported_source", "error.source_unsupported")
-		default:
-			writeError(w, r, http.StatusBadGateway, "source_fetch_failed", "error.source_fetch_failed")
-		}
-		return
+		s.failURLAdmission(ctx, userID, admission.ID, "fetch_failed")
+		return source.Source{}, false, err
 	}
 	digest := sha256.Sum256(snapshot.Payload)
 	if len(snapshot.Payload) == 0 || int64(len(snapshot.Payload)) > 100*1024*1024 ||
 		!strings.EqualFold(snapshot.ContentSHA256, hex.EncodeToString(digest[:])) {
-		s.failURLAdmission(r, userID, admission.ID, "invalid_snapshot")
-		writeError(w, r, http.StatusBadGateway, "source_fetch_failed", "error.source_fetch_failed")
-		return
+		s.failURLAdmission(ctx, userID, admission.ID, "invalid_snapshot")
+		return source.Source{}, false, errSourceInvalidSnapshot
 	}
 	format, ok := source.FormatForMediaType(snapshot.MediaType)
 	if !ok {
-		s.failURLAdmission(r, userID, admission.ID, "unsupported_type")
-		writeError(w, r, http.StatusUnsupportedMediaType, "unsupported_source", "error.source_unsupported")
-		return
+		s.failURLAdmission(ctx, userID, admission.ID, "unsupported_type")
+		return source.Source{}, false, fetcher.ErrUnsupportedType
 	}
 	objectKey := "sources/" + admission.SourceID + "/original/" + strings.ToLower(snapshot.ContentSHA256)
-	if err := s.cfg.SourceSnapshots.Put(r.Context(), objectKey, snapshot.Payload); err != nil {
-		s.failURLAdmission(r, userID, admission.ID, "object_write_failed")
-		writeError(w, r, http.StatusServiceUnavailable, "source_store_unavailable", "error.source_store_unavailable")
-		return
+	if err := s.cfg.SourceSnapshots.Put(ctx, objectKey, snapshot.Payload); err != nil {
+		s.failURLAdmission(ctx, userID, admission.ID, "object_write_failed")
+		return source.Source{}, false, errSourceObjectWrite
 	}
 	jobID, err := newOpaqueID("srcjob")
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
+		return source.Source{}, false, err
 	}
 	parsedFinalURL, _ := url.Parse(snapshot.FinalURL)
 	title := parsedFinalURL.Hostname()
@@ -198,9 +214,9 @@ func (s *Server) createURLSource(w http.ResponseWriter, r *http.Request, userID,
 		title = "Web source"
 	}
 	var created source.Source
-	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+	err = s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
 		var finalizeErr error
-		created, _, finalizeErr = source.NewStore(tx).FinalizeURLAdmission(r.Context(), source.FinalizeURLAdmissionCommand{
+		created, _, finalizeErr = source.NewStore(tx).FinalizeURLAdmission(ctx, source.FinalizeURLAdmissionCommand{
 			AdmissionID: admission.ID, ProcessingJobID: jobID, Title: title, Format: format,
 			MediaType: snapshot.MediaType, ByteSize: int64(len(snapshot.Payload)),
 			ContentSHA256: strings.ToLower(snapshot.ContentSHA256), OriginalObjectKey: objectKey,
@@ -208,19 +224,7 @@ func (s *Server) createURLSource(w http.ResponseWriter, r *http.Request, userID,
 		})
 		return finalizeErr
 	})
-	if errors.Is(err, source.ErrQuotaReached) {
-		writeError(w, r, http.StatusConflict, "quota_reached", "error.source_quota")
-		return
-	}
-	if errors.Is(err, source.ErrNotFound) {
-		writeError(w, r, http.StatusNotFound, "not_found", "error.notebook_not_found")
-		return
-	}
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
-	writeJSON(w, http.StatusCreated, map[string]any{"source": sourceForMember(created)})
+	return created, false, err
 }
 
 func canonicalSourceURL(rawURL string) (string, error) {
@@ -242,9 +246,9 @@ func sourceURLRequestHash(notebookID, requestURL string) string {
 	return requestHash(canonical)
 }
 
-func (s *Server) failURLAdmission(r *http.Request, userID, admissionID, errorCode string) {
-	_ = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
-		return source.NewStore(tx).FailURLAdmission(r.Context(), admissionID, errorCode, time.Now().UTC().Truncate(time.Microsecond))
+func (s *Server) failURLAdmission(ctx context.Context, userID, admissionID, errorCode string) {
+	_ = s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		return source.NewStore(tx).FailURLAdmission(ctx, admissionID, errorCode, time.Now().UTC().Truncate(time.Microsecond))
 	})
 }
 

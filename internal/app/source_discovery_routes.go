@@ -1,10 +1,14 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
+	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
 	"github.com/jackc/pgx/v5"
 )
@@ -86,11 +90,21 @@ func (s *Server) sourceDiscoverySessionByID(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
 		return
 	}
-	sessionID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/source-discovery-sessions/"), "/")
-	if r.Method != http.MethodGet || sessionID == "" || strings.Contains(sessionID, "/") {
+	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/source-discovery-sessions/"), "/")
+	parts := strings.Split(remainder, "/")
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "selection" {
+		sourceDiscoverySelection(w, r, s, user.ID, parts[0])
+		return
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "imports" {
+		sourceDiscoveryImports(w, r, s, user.ID, parts[0])
+		return
+	}
+	if r.Method != http.MethodGet || len(parts) != 1 || parts[0] == "" {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
 		return
 	}
+	sessionID := parts[0]
 	var session sourcediscovery.Session
 	err := s.db.WithRequestPrincipal(r.Context(), user.ID, func(tx pgx.Tx) error {
 		var readErr error
@@ -106,4 +120,138 @@ func (s *Server) sourceDiscoverySessionByID(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"session": session})
+}
+
+type discoveryImportOutcome struct {
+	CandidateID string  `json:"candidate_id"`
+	Status      string  `json:"status"`
+	SourceID    *string `json:"source_id,omitempty"`
+	ErrorCode   *string `json:"error_code,omitempty"`
+}
+
+func sourceDiscoveryImports(w http.ResponseWriter, r *http.Request, s *Server, userID, sessionID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" || len(key) > 255 {
+		writeError(w, r, http.StatusBadRequest, "idempotency_required", "error.idempotency_required")
+		return
+	}
+	if s.cfg.SourceFetcher == nil || s.cfg.SourceSnapshots == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "source_fetch_unavailable", "error.source_fetch_unavailable")
+		return
+	}
+	var session sourcediscovery.Session
+	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		var readErr error
+		session, readErr = sourcediscovery.NewStore(tx).GetSession(r.Context(), sessionID)
+		return readErr
+	})
+	if errors.Is(err, sourcediscovery.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.discovery_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	outcomes := make([]discoveryImportOutcome, 0, len(session.Candidates))
+	for _, candidate := range session.Candidates {
+		if !candidate.Selected {
+			continue
+		}
+		if candidate.Status == sourcediscovery.CandidateImported && candidate.SourceID != nil {
+			outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "imported", SourceID: candidate.SourceID})
+			continue
+		}
+		var admission sourcediscovery.CandidateImport
+		err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+			var beginErr error
+			admission, beginErr = sourcediscovery.NewStore(tx).BeginCandidateImport(r.Context(), sessionID, candidate.ID)
+			return beginErr
+		})
+		if err != nil {
+			code := "discovery_invalid_state"
+			outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "import_failed", ErrorCode: &code})
+			continue
+		}
+		digest := sha256.Sum256([]byte(key + "\x00" + candidate.ID))
+		candidateKey := "discovery:" + hex.EncodeToString(digest[:])
+		created, _, importErr := s.importURLSource(r.Context(), userID, admission.NotebookID, candidateKey, admission.URL)
+		if importErr != nil {
+			code := discoveryImportErrorCode(importErr)
+			_ = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+				return sourcediscovery.NewStore(tx).FailCandidateImport(r.Context(), sessionID, candidate.ID, code)
+			})
+			outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "import_failed", ErrorCode: &code})
+			continue
+		}
+		completeErr := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+			return sourcediscovery.NewStore(tx).CompleteCandidateImport(r.Context(), sessionID, candidate.ID, created.ID)
+		})
+		if completeErr != nil {
+			code := "discovery_import_failed"
+			outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "import_failed", ErrorCode: &code})
+			continue
+		}
+		sourceID := created.ID
+		outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "imported", SourceID: &sourceID})
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"outcomes": outcomes})
+}
+
+func discoveryImportErrorCode(err error) string {
+	switch {
+	case errors.Is(err, fetcher.ErrUnsafeDestination):
+		return "unsafe_destination"
+	case errors.Is(err, fetcher.ErrResponseTooLarge), errors.Is(err, source.ErrQuotaReached):
+		return "limits_exceeded"
+	case errors.Is(err, fetcher.ErrUnsupportedType):
+		return "unsupported_source"
+	case errors.Is(err, errSourceObjectWrite):
+		return "source_store_unavailable"
+	default:
+		return "discovery_import_failed"
+	}
+}
+
+func sourceDiscoverySelection(w http.ResponseWriter, r *http.Request, s *Server, userID, sessionID string) {
+	if r.Method != http.MethodPatch {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
+	var request struct {
+		CandidateIDs []string `json:"candidate_ids"`
+	}
+	if !readJSON(w, r, &request) {
+		return
+	}
+	var session sourcediscovery.Session
+	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		var updateErr error
+		session, updateErr = sourcediscovery.NewStore(tx).ReplaceSelection(r.Context(), sessionID, request.CandidateIDs)
+		return updateErr
+	})
+	switch {
+	case errors.Is(err, sourcediscovery.ErrNotFound):
+		writeError(w, r, http.StatusNotFound, "not_found", "error.discovery_not_found")
+	case errors.Is(err, sourcediscovery.ErrCandidate), errors.Is(err, sourcediscovery.ErrInvalid):
+		writeError(w, r, http.StatusBadRequest, "discovery_candidate_invalid", "error.discovery_candidate_invalid")
+	case errors.Is(err, sourcediscovery.ErrState):
+		writeError(w, r, http.StatusConflict, "discovery_invalid_state", "error.discovery_invalid_state")
+	case err != nil:
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"session": session})
+	}
 }

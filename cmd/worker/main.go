@@ -30,10 +30,12 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprojection"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcepurge"
+	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 	agentworker "github.com/huangxinxinyu/nano-notebook/internal/worker"
 	"github.com/huangxinxinyu/nano-notebook/internal/workload"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -83,6 +85,9 @@ type workerConfig struct {
 	DocumentRenderMaxOutputBytes   int64
 	SourceProcessingMaxBytes       int64
 	SourceProcessingMaxRunes       int
+	BraveSearchAPIKey              string
+	SourceDiscoveryLease           time.Duration
+	SourceDiscoveryPoll            time.Duration
 	AgentInteractiveConcurrency    int
 	SourceProcessingConcurrency    int
 	ReplayKeyID                    string
@@ -97,6 +102,12 @@ type workerConfig struct {
 
 type traceFlusher interface {
 	ForceFlush(context.Context) error
+}
+
+type notConfiguredWebSearchProvider struct{}
+
+func (notConfiguredWebSearchProvider) Search(context.Context, websearch.Request) ([]websearch.Candidate, error) {
+	return nil, websearch.ErrNotConfigured
 }
 
 const (
@@ -301,6 +312,22 @@ func main() {
 	)
 	sourceProcessingDone := make(chan error, 1)
 	go func() { sourceProcessingDone <- sourceProcessingService.Run(ctx) }()
+	var searchProvider websearch.Provider = notConfiguredWebSearchProvider{}
+	if config.BraveSearchAPIKey != "" {
+		searchProvider, err = websearch.NewBraveProvider(websearch.BraveConfig{
+			APIKey:     config.BraveSearchAPIKey,
+			HTTPClient: &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+		})
+		if err != nil {
+			slog.Error("Brave Web Search Provider invalid", "error", err)
+			os.Exit(1)
+		}
+	}
+	discoveryQueue := sourcediscovery.NewQueue(db.Pool(), config.SourceDiscoveryLease)
+	discoveryProcessor := sourcediscovery.NewProcessor(db.Pool(), discoveryQueue, searchProvider)
+	discoveryService := sourcediscovery.NewService(discoveryProcessor, config.SourceDiscoveryPoll)
+	discoveryDone := make(chan error, 1)
+	go func() { discoveryDone <- discoveryService.Run(ctx) }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
@@ -380,6 +407,16 @@ func main() {
 		}
 	case <-shutdownCtx.Done():
 		slog.Error("Source processing Service did not stop before shutdown", "error", shutdownCtx.Err())
+		os.Exit(1)
+	}
+	select {
+	case err := <-discoveryDone:
+		if err != nil {
+			slog.Error("Source Discovery Service shutdown failed", "error", err)
+			os.Exit(1)
+		}
+	case <-shutdownCtx.Done():
+		slog.Error("Source Discovery Service did not stop before shutdown", "error", shutdownCtx.Err())
 		os.Exit(1)
 	}
 	if err := purgeSender.ForceFlush(shutdownCtx); err != nil {
@@ -512,6 +549,14 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	sourceDiscoveryLease, err := workerEnvDuration("NANO_SOURCE_DISCOVERY_LEASE_DURATION", 30*time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	sourceDiscoveryPoll, err := workerEnvDuration("NANO_SOURCE_DISCOVERY_POLL_INTERVAL", 500*time.Millisecond)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	documentRenderTimeout, err := workerEnvDuration("NANO_DOCUMENT_RENDER_TIMEOUT", 100*time.Second)
 	if err != nil {
 		return workerConfig{}, err
@@ -605,6 +650,8 @@ func loadWorkerConfig() (workerConfig, error) {
 		DocumentRenderDPI: documentRenderDPI, DocumentRenderMaxPixelsPerPage: int64(documentRenderMaxPixels),
 		DocumentRenderMaxOutputBytes: int64(documentRenderMaxOutput),
 		SourceProcessingMaxBytes:     int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
+		BraveSearchAPIKey:    strings.TrimSpace(os.Getenv("NANO_BRAVE_SEARCH_API_KEY")),
+		SourceDiscoveryLease: sourceDiscoveryLease, SourceDiscoveryPoll: sourceDiscoveryPoll,
 		AgentInteractiveConcurrency: agentInteractiveConcurrency, SourceProcessingConcurrency: sourceProcessingConcurrency,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 		MailSMTPAddr:      env("NANO_MAIL_SMTP_ADDR", "127.0.0.1:51025"),
@@ -635,6 +682,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.DocumentRenderMaxPixelsPerPage < 1 || config.DocumentRenderMaxPixelsPerPage > 100_000_000 ||
 		config.DocumentRenderMaxOutputBytes < 1 || config.DocumentRenderMaxOutputBytes > 2<<30 ||
 		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
+		config.SourceDiscoveryLease <= 0 || config.SourceDiscoveryPoll <= 0 ||
 		workload.ValidateInteractiveCapacity(config.AgentInteractiveConcurrency, config.SourceProcessingConcurrency) != nil ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 ||
 		strings.TrimSpace(config.MailSMTPAddr) == "" || strings.TrimSpace(config.MailFrom) == "" || strings.TrimSpace(config.WebBaseURL) == "" ||
