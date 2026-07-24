@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -584,5 +585,61 @@ func TestSourceDiscoveryCompletionCanonicalizesDeduplicatesAndSelectsCandidates(
 	}
 	if session.Candidates[0].Ordinal != 0 || session.Candidates[1].Ordinal != 1 {
 		t.Fatalf("Candidate ordinals = %+v", session.Candidates)
+	}
+}
+
+func TestSourceDiscoveryCompletionMarksExistingNotebookURLImported(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "discovery-existing-url@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "discovery-existing-url")
+	ownerID := sourceTestUserID(t, api, "discovery-existing-url@example.com")
+	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into source_sources(
+			id,notebook_id,input_kind,format,title,media_type,byte_size,content_sha256,original_object_key,
+			origin_url,final_url,origin_url_identity,final_url_identity,state
+		) values('src_existing_web',$1,'url','html','Existing','text/html',1,$2,'sources/existing/original',
+			'https://example.com/article','https://example.com/article','https://example.com/article','https://example.com/article','ready')
+	`, notebookID, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.WithRequestPrincipal(ctx, ownerID, func(tx pgx.Tx) error {
+		_, err := sourcediscovery.NewStore(tx).CreateSession(ctx, sourcediscovery.CreateSessionCommand{
+			ID: "dsc_existing_web", JobID: "dscjob_existing_web", NotebookID: notebookID, UserID: ownerID,
+			Origin: sourcediscovery.OriginManual, Query: "existing web",
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lease, ok, err := sourcediscovery.NewQueue(api.db.Pool(), 30*time.Second).Claim(ctx)
+	if err != nil || !ok {
+		t.Fatalf("lease=%+v ok=%v err=%v", lease, ok, err)
+	}
+	tx, err := api.db.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourcediscovery.NewStore(tx).CompleteSearch(ctx, sourcediscovery.CompleteSearchCommand{
+		SessionID: lease.SessionID, JobID: lease.ID, LeaseToken: lease.LeaseToken,
+		Candidates: []sourcediscovery.DiscoveredCandidate{{ID: "dscand_existing_web", Title: "Existing", URL: "https://example.com/article?utm_source=brave", DisplayURL: "example.com/article"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var selected bool
+	var sourceID *string
+	if err := api.db.Pool().QueryRow(ctx, `select status,selected,source_id from source_discovery_candidates where id='dscand_existing_web'`).Scan(&status, &selected, &sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if status != "imported" || selected || sourceID == nil || *sourceID != "src_existing_web" {
+		t.Fatalf("candidate status=%s selected=%v source=%v", status, selected, sourceID)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -389,15 +390,15 @@ func (s *Store) CompleteSearch(ctx context.Context, command CompleteSearchComman
 	if strings.TrimSpace(command.SessionID) == "" || strings.TrimSpace(command.JobID) == "" || strings.TrimSpace(command.LeaseToken) == "" {
 		return ErrInvalid
 	}
-	var leasedSessionID string
+	var leasedSessionID, notebookID string
 	if err := s.db.QueryRow(ctx, `
-		select j.session_id
+		select j.session_id,s.notebook_id
 		from source_discovery_jobs j
 		join source_discovery_sessions s on s.id=j.session_id
 		where j.id=$1 and j.session_id=$2 and j.status='running'
 		  and j.lease_token=$3::uuid and j.lease_expires_at > now() and s.status='searching'
 		for update of j,s
-	`, command.JobID, command.SessionID, command.LeaseToken).Scan(&leasedSessionID); errors.Is(err, pgx.ErrNoRows) {
+	`, command.JobID, command.SessionID, command.LeaseToken).Scan(&leasedSessionID, &notebookID); errors.Is(err, pgx.ErrNoRows) {
 		return ErrLeaseLost
 	} else if err != nil {
 		return err
@@ -418,15 +419,8 @@ func (s *Store) CompleteSearch(ctx context.Context, command CompleteSearchComman
 	if _, err := s.db.Exec(ctx, `delete from source_discovery_candidates where session_id=$1`, command.SessionID); err != nil {
 		return err
 	}
-	for ordinal, candidate := range canonical {
-		if _, err := s.db.Exec(ctx, `
-			insert into source_discovery_candidates(
-				id,session_id,ordinal,title,canonical_url,display_url,snippet,favicon_ref,selected,status
-			) values($1,$2,$3,$4,$5,$6,$7,$8,true,'discovered')
-		`, candidate.ID, command.SessionID, ordinal, strings.TrimSpace(candidate.Title), candidate.URL,
-			strings.TrimSpace(candidate.DisplayURL), strings.TrimSpace(candidate.Snippet), candidate.FaviconRef); err != nil {
-			return err
-		}
+	if err := s.insertCandidates(ctx, command.SessionID, notebookID, canonical); err != nil {
+		return err
 	}
 	_, err = s.db.Exec(ctx, `
 		update source_discovery_jobs
@@ -440,12 +434,12 @@ func (s *Store) CompleteResearchSession(ctx context.Context, researchRunID, summ
 	if strings.TrimSpace(researchRunID) == "" {
 		return "", ErrInvalid
 	}
-	var sessionID, query string
+	var sessionID, notebookID, query string
 	if err := s.db.QueryRow(ctx, `
-		select id,query from source_discovery_sessions
+		select id,notebook_id,query from source_discovery_sessions
 		where research_run_id=$1 and origin='research_agent' and status='searching'
 		for update
-	`, researchRunID).Scan(&sessionID, &query); errors.Is(err, pgx.ErrNoRows) {
+	`, researchRunID).Scan(&sessionID, &notebookID, &query); errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrState
 	} else if err != nil {
 		return "", err
@@ -464,17 +458,47 @@ func (s *Store) CompleteResearchSession(ctx context.Context, researchRunID, summ
 	if _, err := s.db.Exec(ctx, `delete from source_discovery_candidates where session_id=$1`, sessionID); err != nil {
 		return "", err
 	}
-	for ordinal, candidate := range canonical {
-		if _, err := s.db.Exec(ctx, `
-			insert into source_discovery_candidates(
-				id,session_id,ordinal,title,canonical_url,display_url,snippet,favicon_ref,selected,status
-			) values($1,$2,$3,$4,$5,$6,$7,$8,true,'discovered')
-		`, candidate.ID, sessionID, ordinal, strings.TrimSpace(candidate.Title), candidate.URL,
-			strings.TrimSpace(candidate.DisplayURL), strings.TrimSpace(candidate.Snippet), candidate.FaviconRef); err != nil {
-			return "", err
-		}
+	if err := s.insertCandidates(ctx, sessionID, notebookID, canonical); err != nil {
+		return "", err
 	}
 	return sessionID, nil
+}
+
+func (s *Store) insertCandidates(ctx context.Context, sessionID, notebookID string, candidates []DiscoveredCandidate) error {
+	for ordinal, candidate := range candidates {
+		identity, err := source.CanonicalURLIdentity(candidate.URL)
+		if err != nil {
+			return err
+		}
+		var existingSourceID *string
+		var sourceID string
+		err = s.db.QueryRow(ctx, `
+			select id from source_sources
+			where notebook_id=$1 and input_kind='url'
+			  and (origin_url_identity=$2 or final_url_identity=$2)
+			order by created_at,id limit 1
+		`, notebookID, identity).Scan(&sourceID)
+		if err == nil {
+			existingSourceID = &sourceID
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		selected := existingSourceID == nil
+		status := CandidateDiscovered
+		if existingSourceID != nil {
+			status = CandidateImported
+		}
+		if _, err := s.db.Exec(ctx, `
+			insert into source_discovery_candidates(
+				id,session_id,ordinal,title,canonical_url,display_url,snippet,favicon_ref,selected,status,source_id
+			) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		`, candidate.ID, sessionID, ordinal, strings.TrimSpace(candidate.Title), candidate.URL,
+			strings.TrimSpace(candidate.DisplayURL), strings.TrimSpace(candidate.Snippet), candidate.FaviconRef,
+			selected, status, existingSourceID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func SummaryForQuery(query string) string {
