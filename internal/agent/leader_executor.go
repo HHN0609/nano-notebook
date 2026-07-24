@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 	"github.com/jackc/pgx/v5"
@@ -268,20 +270,76 @@ func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, r
 		return err
 	}
 
-	candidates := make([]sourcediscovery.DiscoveredCandidate, 0, 10)
+	resultGroups := make([][]websearch.Candidate, 0, len(queries))
 	for _, query := range queries {
 		results, searchErr := e.provider.Search(ctx, websearch.Request{Query: query, Count: 10})
 		if searchErr != nil {
 			return e.failResearch(ctx, attempt, sourcediscovery.SafeProviderError(searchErr))
 		}
-		for _, result := range results {
-			candidates = append(candidates, sourcediscovery.DiscoveredCandidate{
-				ID: "dscand_" + uuid.NewString(), Title: result.Title, URL: result.URL,
-				DisplayURL: result.DisplayURL, Snippet: result.Description, ProviderRank: result.Rank,
-			})
+		resultGroups = append(resultGroups, results)
+	}
+	return e.completeResearch(ctx, attempt, mergeResearchCandidates(resultGroups))
+}
+
+func mergeResearchCandidates(groups [][]websearch.Candidate) []sourcediscovery.DiscoveredCandidate {
+	type retained struct {
+		candidate websearch.Candidate
+		identity  string
+		domain    string
+	}
+	interleaved := make([]retained, 0, 30)
+	seen := make(map[string]struct{}, 30)
+	for ordinal := 0; ; ordinal++ {
+		found := false
+		for _, group := range groups {
+			if ordinal >= len(group) {
+				continue
+			}
+			found = true
+			candidate := group[ordinal]
+			identity, err := source.CanonicalURLIdentity(candidate.URL)
+			if err != nil || strings.TrimSpace(candidate.Title) == "" {
+				continue
+			}
+			if _, duplicate := seen[identity]; duplicate {
+				continue
+			}
+			seen[identity] = struct{}{}
+			parsed, _ := url.Parse(candidate.URL)
+			interleaved = append(interleaved, retained{candidate: candidate, identity: identity, domain: strings.ToLower(parsed.Hostname())})
+		}
+		if !found {
+			break
 		}
 	}
-	return e.completeResearch(ctx, attempt, candidates)
+	preferred := make([]retained, 0, 10)
+	overflow := make([]retained, 0, len(interleaved))
+	domainCounts := make(map[string]int)
+	for _, item := range interleaved {
+		if item.domain != "" && domainCounts[item.domain] >= 2 {
+			overflow = append(overflow, item)
+			continue
+		}
+		preferred = append(preferred, item)
+		domainCounts[item.domain]++
+		if len(preferred) == 10 {
+			break
+		}
+	}
+	for _, item := range overflow {
+		if len(preferred) == 10 {
+			break
+		}
+		preferred = append(preferred, item)
+	}
+	result := make([]sourcediscovery.DiscoveredCandidate, 0, len(preferred))
+	for _, item := range preferred {
+		result = append(result, sourcediscovery.DiscoveredCandidate{
+			ID: "dscand_" + uuid.NewString(), Title: item.candidate.Title, URL: item.candidate.URL,
+			DisplayURL: item.candidate.DisplayURL, Snippet: item.candidate.Description, ProviderRank: item.candidate.Rank,
+		})
+	}
+	return result
 }
 
 func (e *LeaderExecutor) completeResearch(ctx context.Context, attempt Attempt, candidates []sourcediscovery.DiscoveredCandidate) error {

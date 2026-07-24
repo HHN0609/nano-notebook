@@ -6,12 +6,35 @@ import (
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 )
 
 type leaderDecisionModel struct {
 	outcome  models.ModelOutcome
 	err      error
 	requests []models.ModelRequest
+}
+
+func TestMergeResearchCandidatesInterleavesQueriesAndPrefersDomainDiversity(t *testing.T) {
+	groups := [][]websearch.Candidate{
+		{}, {}, {},
+	}
+	for index := 0; index < 10; index++ {
+		groups[0] = append(groups[0], websearch.Candidate{Title: "A", URL: "https://a.example/item/" + string(rune('a'+index)), DisplayURL: "a.example"})
+		groups[1] = append(groups[1], websearch.Candidate{Title: "B", URL: "https://b.example/item/" + string(rune('a'+index)), DisplayURL: "b.example"})
+		groups[2] = append(groups[2], websearch.Candidate{Title: "C", URL: "https://c.example/item/" + string(rune('a'+index)), DisplayURL: "c.example"})
+	}
+	merged := mergeResearchCandidates(groups)
+	if len(merged) != 10 {
+		t.Fatalf("merged=%d", len(merged))
+	}
+	seen := map[string]bool{}
+	for _, candidate := range merged[:3] {
+		seen[candidate.DisplayURL] = true
+	}
+	if !seen["a.example"] || !seen["b.example"] || !seen["c.example"] {
+		t.Fatalf("first candidates do not cover query groups: %+v", merged[:3])
+	}
 }
 
 func (m *leaderDecisionModel) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
