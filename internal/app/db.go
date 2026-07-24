@@ -696,6 +696,70 @@ create table if not exists chat_messages (
 create index if not exists chat_messages_order_idx
 	on chat_messages(chat_id, created_at, id);
 
+create table if not exists source_discovery_sessions (
+	id text primary key,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	user_id text not null references identity_users(id) on delete cascade,
+	origin_chat_id text references chat_chats(id) on delete cascade,
+	origin text not null check (origin in ('manual','research_agent')),
+	query text not null check (char_length(query) between 1 and 500),
+	summary text check (char_length(summary) <= 2000),
+	status text not null check (status in ('searching','ready','failed')),
+	research_run_id text,
+	error_code text check (char_length(error_code) <= 64),
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	completed_at timestamptz,
+	constraint source_discovery_sessions_completion_check check (
+		(status='searching' and error_code is null and completed_at is null)
+		or (status='ready' and error_code is null and completed_at is not null)
+		or (status='failed' and error_code is not null and completed_at is not null)
+	)
+);
+
+create index if not exists source_discovery_sessions_latest_idx
+	on source_discovery_sessions(user_id,notebook_id,created_at desc,id desc);
+
+create table if not exists source_discovery_candidates (
+	id text primary key,
+	session_id text not null references source_discovery_sessions(id) on delete cascade,
+	ordinal integer not null check (ordinal between 0 and 19),
+	title text not null check (char_length(title) between 1 and 300),
+	canonical_url text not null check (char_length(canonical_url) between 1 and 4096),
+	display_url text not null check (char_length(display_url) between 1 and 4096),
+	snippet text not null default '' check (char_length(snippet) <= 1000),
+	favicon_ref text check (char_length(favicon_ref) <= 4096),
+	selected boolean not null default true,
+	status text not null default 'discovered' check (status in ('discovered','importing','imported','import_failed')),
+	source_id text references source_sources(id) on delete set null,
+	import_error_code text check (char_length(import_error_code) <= 64),
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	unique(session_id,ordinal),
+	unique(session_id,canonical_url)
+);
+
+create table if not exists source_discovery_jobs (
+	id text primary key,
+	session_id text not null unique references source_discovery_sessions(id) on delete cascade,
+	status text not null check (status in ('queued','running','succeeded','failed','cancelled')),
+	attempt_no integer not null default 0 check (attempt_no between 0 and 3),
+	available_at timestamptz not null default now(),
+	lease_token uuid,
+	lease_expires_at timestamptz,
+	last_error_code text check (char_length(last_error_code) <= 64),
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	constraint source_discovery_jobs_lease_check check (
+		(status='queued' and lease_token is null and lease_expires_at is null)
+		or (status='running' and lease_token is not null and lease_expires_at is not null)
+		or (status in ('succeeded','failed','cancelled') and lease_token is null and lease_expires_at is null)
+	)
+);
+
+create index if not exists source_discovery_jobs_claim_idx
+	on source_discovery_jobs(available_at,created_at,id) where status='queued';
+
 create table if not exists agent_runs (
 	id text primary key,
 	user_id text not null references identity_users(id) on delete cascade,
@@ -1333,6 +1397,9 @@ alter table retrieval_source_index_builds enable row level security;
 alter table platform_idempotency_keys enable row level security;
 alter table chat_chats enable row level security;
 alter table chat_messages enable row level security;
+alter table source_discovery_sessions enable row level security;
+alter table source_discovery_candidates enable row level security;
+alter table source_discovery_jobs enable row level security;
 alter table agent_runs enable row level security;
 alter table agent_run_evidence_set enable row level security;
 alter table agent_run_grounding_plans enable row level security;
@@ -1380,6 +1447,7 @@ grant select, insert, update, delete on
 	chat_citations,
 	agent_jobs
 to nano_app;
+grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_app;
 grant select on retrieval_source_index_builds to nano_app;
 revoke update, delete on platform_capability_grants, platform_replay_access_audit from nano_app;
 revoke insert on platform_capability_grants from nano_app;
@@ -1416,6 +1484,7 @@ grant select, insert, update, delete on source_evidence_revisions, source_eviden
 grant select, insert, update, delete on retrieval_index_versions, retrieval_eval_runs to nano_worker;
 grant select, insert, update, delete on retrieval_source_index_builds to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
+grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
 grant select, insert on agent_run_checkpoints to nano_worker;
@@ -1970,6 +2039,62 @@ create policy chat_messages_worker on chat_messages
 	for all to nano_worker
 	using (true)
 	with check (true);
+
+drop policy if exists source_discovery_sessions_private on source_discovery_sessions;
+create policy source_discovery_sessions_private on source_discovery_sessions
+	for all to nano_app
+	using (
+		user_id = nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id,'source.maintain')
+	)
+	with check (
+		user_id = nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id,'source.maintain')
+	);
+
+drop policy if exists source_discovery_sessions_worker on source_discovery_sessions;
+create policy source_discovery_sessions_worker on source_discovery_sessions
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists source_discovery_candidates_private on source_discovery_candidates;
+create policy source_discovery_candidates_private on source_discovery_candidates
+	for all to nano_app
+	using (exists (
+		select 1 from source_discovery_sessions s
+		where s.id=source_discovery_candidates.session_id
+		  and s.user_id=nullif(current_setting('app.principal_id', true), '')
+		  and nano_has_notebook_capability(s.notebook_id,'source.maintain')
+	))
+	with check (exists (
+		select 1 from source_discovery_sessions s
+		where s.id=source_discovery_candidates.session_id
+		  and s.user_id=nullif(current_setting('app.principal_id', true), '')
+		  and nano_has_notebook_capability(s.notebook_id,'source.maintain')
+	));
+
+drop policy if exists source_discovery_candidates_worker on source_discovery_candidates;
+create policy source_discovery_candidates_worker on source_discovery_candidates
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists source_discovery_jobs_private on source_discovery_jobs;
+create policy source_discovery_jobs_private on source_discovery_jobs
+	for all to nano_app
+	using (exists (
+		select 1 from source_discovery_sessions s
+		where s.id=source_discovery_jobs.session_id
+		  and s.user_id=nullif(current_setting('app.principal_id', true), '')
+		  and nano_has_notebook_capability(s.notebook_id,'source.maintain')
+	))
+	with check (exists (
+		select 1 from source_discovery_sessions s
+		where s.id=source_discovery_jobs.session_id
+		  and s.user_id=nullif(current_setting('app.principal_id', true), '')
+		  and nano_has_notebook_capability(s.notebook_id,'source.maintain')
+	));
+
+drop policy if exists source_discovery_jobs_worker on source_discovery_jobs;
+create policy source_discovery_jobs_worker on source_discovery_jobs
+	for all to nano_worker using (true) with check (true);
 
 drop policy if exists agent_runs_private on agent_runs;
 create policy agent_runs_private on agent_runs

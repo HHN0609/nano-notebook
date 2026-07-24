@@ -113,6 +113,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/sources/", s.sourceByID)
 	s.mux.HandleFunc("/api/v1/citations/", s.citationByID)
 	s.mux.HandleFunc("/api/v1/source-upload-intents/", s.sourceUploadIntentByID)
+	s.mux.HandleFunc("/api/v1/source-discovery-sessions/", s.sourceDiscoverySessionByID)
 	s.mux.HandleFunc("/api/v1/chats/", s.chatByID)
 	s.mux.HandleFunc("/api/v1/agent-runs/", s.agentRunByID)
 	s.mux.HandleFunc("/api/admin/traces", s.adminTraceList)
@@ -471,6 +472,14 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 3 && parts[0] != "" && parts[1] == "sources" && parts[2] == "upload-intents" {
 		s.createSourceUploadIntent(w, r, user.ID, parts[0])
+		return
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "source-discovery-sessions" {
+		s.notebookSourceDiscoverySessions(w, r, user.ID, parts[0])
+		return
+	}
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "source-discovery-sessions" && parts[2] == "latest" {
+		s.latestSourceDiscoverySession(w, r, user.ID, parts[0])
 		return
 	}
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "chats" {
