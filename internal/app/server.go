@@ -36,6 +36,7 @@ type SourceUploadStore interface {
 type SourceSnapshotStore interface {
 	Put(context.Context, string, []byte) error
 	Get(context.Context, string, int64) ([]byte, error)
+	Delete(context.Context, string) error
 }
 
 type Config struct {

@@ -185,7 +185,7 @@ func Validate(artifact Artifact) error {
 
 func knownGapReason(reason string) bool {
 	switch reason {
-	case "decorative_visual_skipped", "decorative_image_skipped", "non_primary_visual_model_failed", "non_primary_media_unsupported":
+	case "decorative_visual_skipped", "decorative_image_skipped", "non_primary_visual_model_failed", "non_primary_media_unsupported", "thin_primary_content":
 		return true
 	default:
 		return false

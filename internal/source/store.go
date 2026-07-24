@@ -420,6 +420,38 @@ func (s *Store) BeginURLAdmission(ctx context.Context, command BeginURLAdmission
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return URLAdmission{}, false, err
 	}
+	requestIdentity, err := CanonicalURLIdentity(command.RequestURL)
+	if err != nil {
+		return URLAdmission{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "source-notebook:"+command.NotebookID); err != nil {
+		return URLAdmission{}, false, err
+	}
+	var existingSourceID string
+	err = s.db.QueryRow(ctx, `
+		select id from source_sources
+		where notebook_id=$1 and input_kind='url'
+		  and (origin_url_identity=$2 or final_url_identity=$2)
+		order by created_at,id limit 1
+	`, command.NotebookID, requestIdentity).Scan(&existingSourceID)
+	if err == nil {
+		var reused URLAdmission
+		err = s.db.QueryRow(ctx, `
+			insert into source_url_admissions(
+				id,source_id,notebook_id,created_by_user_id,idempotency_key,request_hash,request_url,state,completed_at
+			) values($1,$2,$3,$4,$5,$6,$7,'completed',now())
+			returning id,source_id,notebook_id,idempotency_key,request_hash,request_url,state,error_code,created_at,completed_at
+		`, command.ID, existingSourceID, command.NotebookID, principalID, command.IdempotencyKey,
+			command.RequestHash, command.RequestURL).Scan(
+			&reused.ID, &reused.SourceID, &reused.NotebookID, &reused.IdempotencyKey,
+			&reused.RequestHash, &reused.RequestURL, &reused.State, &reused.ErrorCode,
+			&reused.CreatedAt, &reused.CompletedAt,
+		)
+		return reused, true, err
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return URLAdmission{}, false, err
+	}
 	var created URLAdmission
 	err = s.db.QueryRow(ctx, `
 		insert into source_url_admissions(
@@ -466,6 +498,32 @@ func (s *Store) FinalizeURLAdmission(ctx context.Context, command FinalizeURLAdm
 	if _, err := s.db.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "source-notebook:"+admission.NotebookID); err != nil {
 		return Source{}, false, err
 	}
+	originIdentity, err := CanonicalURLIdentity(admission.RequestURL)
+	if err != nil {
+		return Source{}, false, err
+	}
+	finalIdentity, err := CanonicalURLIdentity(command.FinalURL)
+	if err != nil {
+		return Source{}, false, err
+	}
+	var existingSourceID string
+	err = s.db.QueryRow(ctx, `
+		select id from source_sources
+		where notebook_id=$1 and input_kind='url' and final_url_identity=$2
+		order by created_at,id limit 1
+	`, admission.NotebookID, finalIdentity).Scan(&existingSourceID)
+	if err == nil {
+		if _, err := s.db.Exec(ctx, `
+			update source_url_admissions set source_id=$2,state='completed',completed_at=$3 where id=$1
+		`, admission.ID, existingSourceID, command.CompletedAt); err != nil {
+			return Source{}, false, err
+		}
+		item, err := s.sourceByID(ctx, existingSourceID)
+		return item, true, err
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Source{}, false, err
+	}
 	var sourceCount int
 	if err := s.db.QueryRow(ctx, `select count(*) from source_sources where notebook_id=$1`, admission.NotebookID).Scan(&sourceCount); err != nil {
 		return Source{}, false, err
@@ -477,13 +535,14 @@ func (s *Store) FinalizeURLAdmission(ctx context.Context, command FinalizeURLAdm
 	err = s.db.QueryRow(ctx, `
 		insert into source_sources(
 			id, notebook_id, input_kind, format, title, media_type, byte_size,
-			content_sha256, original_object_key, origin_url, final_url, state
-		) values ($1, $2, 'url', $3, $4, $5, $6, $7, $8, $9, $10, 'uploaded')
+			content_sha256, original_object_key, origin_url, final_url,
+			origin_url_identity, final_url_identity, state
+		) values ($1, $2, 'url', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'uploaded')
 		returning id, notebook_id, title, format, media_type, byte_size,
 			content_sha256, original_object_key, state, created_at, updated_at
 	`, admission.SourceID, admission.NotebookID, command.Format, command.Title, command.MediaType,
 		command.ByteSize, command.ContentSHA256, command.OriginalObjectKey, admission.RequestURL,
-		command.FinalURL).Scan(
+		command.FinalURL, originIdentity, finalIdentity).Scan(
 		&created.ID, &created.NotebookID, &created.Title, &created.Format, &created.MediaType,
 		&created.ByteSize, &created.ContentSHA256, &created.OriginalObjectKey, &created.State,
 		&created.CreatedAt, &created.UpdatedAt,

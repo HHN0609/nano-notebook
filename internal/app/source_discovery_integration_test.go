@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -149,6 +150,114 @@ func TestSourceDiscoveryImportsPersistedSelectionThroughURLSourcePipeline(t *tes
 	}
 	if candidateStatus != "imported" || linkedSourceID != body.Outcomes[0].SourceID {
 		t.Fatalf("candidate status/source = %q/%q", candidateStatus, linkedSourceID)
+	}
+}
+
+func TestSourceDiscoveryImportDeduplicatesNormalizedRedirectTargetAcrossSessions(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "discovery-redirect-dedupe@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "discovery-redirect-dedupe")
+	ownerID := sourceTestUserID(t, api, "discovery-redirect-dedupe@example.com")
+	ctx := context.Background()
+	for index, rawURL := range []string{"https://first.example/article", "https://second.example/redirect"} {
+		sessionID := fmt.Sprintf("dsc_redirect_%d", index)
+		jobID := fmt.Sprintf("dscjob_redirect_%d", index)
+		candidateID := fmt.Sprintf("dscand_redirect_%d", index)
+		if err := api.db.WithRequestPrincipal(ctx, ownerID, func(tx pgx.Tx) error {
+			_, err := sourcediscovery.NewStore(tx).CreateSession(ctx, sourcediscovery.CreateSessionCommand{
+				ID: sessionID, JobID: jobID, NotebookID: notebookID, UserID: ownerID,
+				Origin: sourcediscovery.OriginManual, Query: "redirected material",
+			})
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := api.db.Pool().Exec(ctx, `update source_discovery_sessions set status='ready',completed_at=now() where id=$1`, sessionID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := api.db.Pool().Exec(ctx, `update source_discovery_jobs set status='succeeded' where id=$1`, jobID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := api.db.Pool().Exec(ctx, `
+			insert into source_discovery_candidates(id,session_id,ordinal,title,canonical_url,display_url,snippet,selected)
+			values($1,$2,0,'Same article',$3,'example/article','same',true)
+		`, candidateID, sessionID, rawURL); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload := []byte("<main><h1>Article</h1><p>This immutable article has enough meaningful primary content for deterministic source processing and retrieval.</p></main>")
+	digest := sha256.Sum256(payload)
+	remote := &recordingSourceFetcher{snapshot: fetcher.Snapshot{
+		FinalURL: "https://Final.Example/article?utm_source=brave&b=2&a=1#section", MediaType: "text/html", Payload: payload,
+		ContentSHA256: hex.EncodeToString(digest[:]),
+	}}
+	objects := objectstore.NewMemoryStore()
+	api.server = app.NewServer(app.Config{CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objects}, api.db)
+	api.handler = api.server.Handler()
+
+	var sourceIDs []string
+	for index := range 2 {
+		response := api.postJSONWithCookieAndCSRF(t,
+			fmt.Sprintf("/api/v1/source-discovery-sessions/dsc_redirect_%d/imports", index), map[string]any{},
+			owner, csrf, csrf.Value, fmt.Sprintf("redirect-batch-%d", index),
+		)
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("import %d status=%d body=%s", index, response.Code, response.Body.String())
+		}
+		var body struct {
+			Outcomes []struct {
+				SourceID string `json:"source_id"`
+			} `json:"outcomes"`
+		}
+		decodeBody(t, response, &body)
+		if len(body.Outcomes) != 1 || body.Outcomes[0].SourceID == "" {
+			t.Fatalf("import %d outcomes=%+v", index, body.Outcomes)
+		}
+		sourceIDs = append(sourceIDs, body.Outcomes[0].SourceID)
+	}
+	if sourceIDs[0] != sourceIDs[1] {
+		t.Fatalf("redirect Sources=%v, want one Source", sourceIDs)
+	}
+	var sourceCount, jobCount int
+	var finalIdentity string
+	if err := api.db.Pool().QueryRow(ctx, `select count(*),max(final_url_identity) from source_sources where notebook_id=$1`, notebookID).Scan(&sourceCount, &finalIdentity); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from source_processing_jobs where notebook_id=$1`, notebookID).Scan(&jobCount); err != nil {
+		t.Fatal(err)
+	}
+	if sourceCount != 1 || jobCount != 1 || finalIdentity != "https://final.example/article?a=1&b=2" {
+		t.Fatalf("source count=%d jobs=%d final identity=%q", sourceCount, jobCount, finalIdentity)
+	}
+	stored, err := objects.List(ctx, "sources/", "", 10)
+	if err != nil || len(stored) != 1 {
+		t.Fatalf("stored snapshots=%+v err=%v", stored, err)
+	}
+}
+
+func TestSourceDiscoveryRejectsForeignOriginChat(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "discovery-origin-owner@example.com")
+	other := api.register(t, "discovery-origin-other@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "discovery-origin-owner")
+	otherNotebookID := createSourceTestNotebook(t, api, other, "discovery-origin-other")
+	ownerID := sourceTestUserID(t, api, "discovery-origin-owner@example.com")
+	otherID := sourceTestUserID(t, api, "discovery-origin-other@example.com")
+	var foreignChatID string
+	if err := api.db.WithRequestPrincipal(context.Background(), otherID, func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `insert into chat_chats(id,notebook_id,creator_user_id,title) values('chat_foreign_origin',$1,$2,'Foreign') returning id`, otherNotebookID, otherID).Scan(&foreignChatID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := api.db.WithRequestPrincipal(context.Background(), ownerID, func(tx pgx.Tx) error {
+		_, err := sourcediscovery.NewStore(tx).CreateSession(context.Background(), sourcediscovery.CreateSessionCommand{
+			ID: "dsc_foreign_origin", JobID: "dscjob_foreign_origin", NotebookID: notebookID, UserID: ownerID,
+			OriginChatID: &foreignChatID, Origin: sourcediscovery.OriginManual, Query: "film",
+		})
+		return err
+	})
+	if !errors.Is(err, sourcediscovery.ErrInvalid) {
+		t.Fatalf("foreign origin chat error=%v, want ErrInvalid", err)
 	}
 }
 

@@ -143,6 +143,17 @@ func (s *Store) CreateSession(ctx context.Context, command CreateSessionCommand)
 	if err := s.requireMaintain(ctx, command.NotebookID); err != nil {
 		return Session{}, err
 	}
+	if command.OriginChatID != nil {
+		var chatID string
+		if err := s.db.QueryRow(ctx, `
+			select id from chat_chats
+			where id=$1 and notebook_id=$2 and creator_user_id=$3
+		`, *command.OriginChatID, command.NotebookID, command.UserID).Scan(&chatID); errors.Is(err, pgx.ErrNoRows) {
+			return Session{}, ErrInvalid
+		} else if err != nil {
+			return Session{}, err
+		}
+	}
 	var created Session
 	err := s.db.QueryRow(ctx, `
 		insert into source_discovery_sessions(

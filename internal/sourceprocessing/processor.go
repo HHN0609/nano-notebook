@@ -172,7 +172,7 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (r
 	if artifact.Coverage.TotalRunes > p.config.MaxNormalizedRunes {
 		return p.failTraced(ctx, lease, trace, "processing_budget_exceeded")
 	}
-	revisionID := stableRevisionID(item.ID, p.config.ExtractionConfigID)
+	revisionID := stableRevisionID(item.ID, artifact.ExtractionConfigID)
 	trace.moveStage("source.segmenting")
 	if item.State == source.StateNormalizing {
 		if _, _, err := p.publisher.Publish(ctx, evidence.PublishCommand{
@@ -374,6 +374,7 @@ func (e *NativeExtractor) Extract(ctx context.Context, item source.Source, paylo
 	case source.FormatDOCX, source.FormatPPTX:
 		return normalize.OOXML(input)
 	case source.FormatHTML:
+		input.ExtractionConfigID = "html-primary-v2"
 		return normalize.HTML(input)
 	case source.FormatPNG, source.FormatJPEG, source.FormatWebP:
 		if e == nil || e.media == nil || e.config.VisionModel == "" || e.config.VisionPromptVersion == "" {

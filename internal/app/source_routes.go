@@ -214,9 +214,10 @@ func (s *Server) importURLSource(ctx context.Context, userID, notebookID, key, r
 		title = "Web source"
 	}
 	var created source.Source
+	var finalizedReused bool
 	err = s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
 		var finalizeErr error
-		created, _, finalizeErr = source.NewStore(tx).FinalizeURLAdmission(ctx, source.FinalizeURLAdmissionCommand{
+		created, finalizedReused, finalizeErr = source.NewStore(tx).FinalizeURLAdmission(ctx, source.FinalizeURLAdmissionCommand{
 			AdmissionID: admission.ID, ProcessingJobID: jobID, Title: title, Format: format,
 			MediaType: snapshot.MediaType, ByteSize: int64(len(snapshot.Payload)),
 			ContentSHA256: strings.ToLower(snapshot.ContentSHA256), OriginalObjectKey: objectKey,
@@ -224,7 +225,10 @@ func (s *Server) importURLSource(ctx context.Context, userID, notebookID, key, r
 		})
 		return finalizeErr
 	})
-	return created, false, err
+	if err == nil && finalizedReused {
+		_ = s.cfg.SourceSnapshots.Delete(ctx, objectKey)
+	}
+	return created, finalizedReused, err
 }
 
 func canonicalSourceURL(rawURL string) (string, error) {

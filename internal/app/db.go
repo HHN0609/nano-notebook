@@ -361,6 +361,8 @@ create table if not exists source_sources (
 
 alter table source_sources add column if not exists origin_url text;
 alter table source_sources add column if not exists final_url text;
+alter table source_sources add column if not exists origin_url_identity text;
+alter table source_sources add column if not exists final_url_identity text;
 alter table source_sources drop constraint if exists source_sources_input_metadata_check;
 alter table source_sources add constraint source_sources_input_metadata_check check (
 	(input_kind = 'file' and origin_url is null and final_url is null)
@@ -382,6 +384,14 @@ create unique index if not exists source_sources_notebook_file_hash_idx
 
 create index if not exists source_sources_notebook_created_idx
 	on source_sources(notebook_id, created_at, id);
+
+create index if not exists source_sources_notebook_origin_url_identity_idx
+	on source_sources(notebook_id, origin_url_identity)
+	where input_kind='url' and origin_url_identity is not null;
+
+create unique index if not exists source_sources_notebook_final_url_identity_idx
+	on source_sources(notebook_id, final_url_identity)
+	where input_kind='url' and final_url_identity is not null;
 
 create table if not exists source_upload_intents (
 	id text primary key,
@@ -436,6 +446,8 @@ create table if not exists source_url_admissions (
 	),
 	unique (created_by_user_id, idempotency_key)
 );
+
+alter table source_url_admissions drop constraint if exists source_url_admissions_source_id_key;
 
 create table if not exists source_processing_jobs (
 	id text primary key,

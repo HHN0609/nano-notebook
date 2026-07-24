@@ -82,3 +82,68 @@ func TestHTMLAdapterClassifiesDOMBudgetSeparatelyFromMalformedContent(t *testing
 		t.Fatalf("HTML budget error=%v", err)
 	}
 }
+
+func TestHTMLPrimaryV2SelectsDenseContentAndRemovesRepeatedBoilerplate(t *testing.T) {
+	payload := []byte(`<!doctype html><html><body>
+		<header><a href="/">Home</a><a href="/pricing">Pricing</a></header>
+		<div class="layout"><aside>Related links and newsletter</aside><div class="post-content">
+			<h1>Deterministic web evidence</h1>
+			<p>This paragraph contains the durable primary material that a notebook user selected for later grounded retrieval.</p>
+			<p>Repeated subscription template should disappear from the normalized evidence.</p>
+			<p>Repeated subscription template should disappear from the normalized evidence.</p>
+			<pre><code>result := search(query)</code></pre>
+			<table><tr><th>Stage</th><th>State</th></tr><tr><td>Import</td><td>Ready</td></tr></table>
+		</div></div><footer>Privacy Terms Contact</footer></body></html>`)
+	artifact, err := normalize.HTML(normalize.Input{
+		SourceID: "src_html_v2", ExtractionConfigID: "html-primary-v2", Format: "html", Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.ExtractionConfigID != "html-primary-v2" || !strings.Contains(artifact.Text, "durable primary material") ||
+		strings.Contains(artifact.Text, "Home Pricing") || strings.Contains(artifact.Text, "Privacy Terms") ||
+		strings.Count(artifact.Text, "Repeated subscription template") != 1 {
+		t.Fatalf("v2 artifact text=%q", artifact.Text)
+	}
+	wantKinds := []string{"heading", "paragraph", "paragraph", "code", "table"}
+	if len(artifact.Blocks) != len(wantKinds) {
+		t.Fatalf("v2 blocks=%+v", artifact.Blocks)
+	}
+	for index, kind := range wantKinds {
+		if artifact.Blocks[index].Kind != kind || artifact.Blocks[index].Coordinate == nil || artifact.Blocks[index].Coordinate.Block != index+1 {
+			t.Fatalf("v2 block %d=%+v", index, artifact.Blocks[index])
+		}
+	}
+}
+
+func TestHTMLPrimaryV2RejectsLoginLinkFarmAndAbnormalDuplication(t *testing.T) {
+	tests := []struct {
+		name string
+		html string
+	}{
+		{name: "login wall", html: `<html><body><main><h1>Sign in</h1><p>Please log in to continue and access this content.</p></main></body></html>`},
+		{name: "link farm", html: `<html><body><main><h1>Directory</h1><p><a href="/1">one linked destination</a> <a href="/2">two linked destination</a> <a href="/3">three linked destination</a> <a href="/4">four linked destination</a></p></main></body></html>`},
+		{name: "duplicates", html: `<html><body><main><h1>Article</h1><p>Identical repeated boilerplate material with enough words to pass the minimum useful content boundary.</p><p>Identical repeated boilerplate material with enough words to pass the minimum useful content boundary.</p><p>Identical repeated boilerplate material with enough words to pass the minimum useful content boundary.</p></main></body></html>`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := normalize.HTML(normalize.Input{SourceID: "src_bad_v2", ExtractionConfigID: "html-primary-v2", Format: "html", Payload: []byte(test.html)})
+			if !errors.Is(err, normalize.ErrHTMLQuality) {
+				t.Fatalf("quality error=%v", err)
+			}
+		})
+	}
+}
+
+func TestHTMLPrimaryV2PublishesThinContentAsPartialCoverageWarning(t *testing.T) {
+	artifact, err := normalize.HTML(normalize.Input{
+		SourceID: "src_thin_v2", ExtractionConfigID: "html-primary-v2", Format: "html",
+		Payload: []byte(`<html><body><article><h1>Release note</h1><p>The stable release fixes notebook search and source import behavior for editors.</p></article></body></html>`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Coverage.Status != "partial" || len(artifact.Coverage.Gaps) != 1 || artifact.Coverage.Gaps[0].Reason != "thin_primary_content" {
+		t.Fatalf("coverage=%+v", artifact.Coverage)
+	}
+}
