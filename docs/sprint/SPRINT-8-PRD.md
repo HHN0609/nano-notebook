@@ -3,7 +3,7 @@
 ## Document Status
 
 - **Sprint:** Sprint 8
-- **Status:** Ready for implementation
+- **Status:** Implemented and accepted
 - **Date:** 2026-07-24
 - **Theme:** Web Source Discovery, durable Research delegation, and imported-Source RAG
 - **Delivery boundary:** Sprint 8 first delivers manual Web Source discovery and import, then reuses the same capability through a durable Leader-to-Research child Run. A delegated turn produces private candidates, not a same-turn Web answer.
