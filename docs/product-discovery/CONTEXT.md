@@ -24,9 +24,17 @@ _Avoid_: General answer, best-effort answer
 A Chat response based on the configured model rather than citeable Notebook Evidence. It carries no Citations and is allowed while no accepted search result contains a valid Evidence range, including when Sources are selected; it cannot claim Source support and never fills gaps inside a partially supported Grounded Answer.
 _Avoid_: Grounded Answer, hybrid answer, silent fallback
 
-**Research Agent**:
-The read-only assistant operating inside a Chat. It can perform multiple retrieval, comparison, synthesis, and verification steps over selected Sources, but cannot modify the Notebook or interact with external systems.
-_Avoid_: General agent, automation, chatbot
+**Leader Agent**:
+The only Chat-facing assistant. It durably chooses between the normal selected-Source conversation path and a bounded Source Discovery delegation for an explicit request from an authorized Member.
+_Avoid_: Router endpoint, Web-search bot, hidden orchestrator
+
+**Research child Run**:
+A non-Chat-facing durable child Run that expands an explicit Source Discovery request, uses the approved Web Search Provider, and creates a private Discovery Session. It cannot import or answer from candidates.
+_Avoid_: Grounded-answer Run, background prompt, autonomous crawler
+
+**Source Discovery Session**:
+A private, durable set of bounded Web candidates owned by one Member in one Notebook. Candidates are discovery material until the Member selects and imports them as immutable Sources.
+_Avoid_: Search answer, Source collection, shared results
 
 **Citation**:
 An inline link from a key factual claim or synthesized conclusion in a Grounded Answer to its supporting Source evidence. It previews the original passage on hover and opens the passage in context when selected; very short Sources may be cited as a whole.

@@ -16,7 +16,7 @@ This focus excludes a generic AI assistant as the initial product identity. Team
 
 ### Source Acquisition Scope
 
-The product accepts uploaded and external Sources. Search-based source discovery remains distinct from adding a known URL and is still outside the initial core workflow.
+The product accepts uploaded and external Sources. Search-based Source Discovery is distinct from adding a known URL: an Editor or Owner searches into a private candidate session, reviews the results, and explicitly imports selected URLs before they can become Notebook evidence.
 
 Keeping search in scope matters because the product may eventually support the full journey from finding material to understanding it. A Member adding a URL they already know is source ingestion, not search.
 
@@ -66,7 +66,7 @@ A Chat receives an automatically generated title based on its first question. It
 
 A new Chat initially selects all Sources currently in the Notebook. Each Chat remembers its own Source selection. A Member can include or exclude Sources before asking a question; the change affects subsequent answers only and does not rewrite existing answers.
 
-Sources added to the Notebook after a Chat is created are not automatically selected in that existing Chat. Newly created Chats continue to select all Sources available at their creation time.
+Sources added to the Notebook after a Chat is created are not automatically selected in that existing Chat, except that a Source imported from a Discovery session is selected into that session's originating private Chat after it becomes Ready. Newly created Chats continue to select all Sources available at their creation time.
 
 When an Editor or Owner deletes a Source, it is immediately removed from every Chat's available selection and cannot support future answers. Existing Chat messages and their inline Citation markers are never rewritten. Opening an affected Citation reports that the Source was deleted or is no longer accessible and does not reveal the former passage.
 
@@ -80,13 +80,13 @@ Immutability ensures that a historical Citation never silently points to evidenc
 
 Chat produces Grounded Answers using only Sources selected from the current Notebook and never supplements a partially supported answer with model knowledge or internet information. While no accepted search result contains a valid Evidence range, Chat may instead produce a claim-free Model-Knowledge Answer with no Citations and no claim of Source support. Any citeable Evidence activates the strict grounded contract.
 
-Future search results must first be added to the Notebook as Sources before Chat can use them as evidence.
+Search results must first be reviewed, imported, processed, and made Ready as Notebook Sources before Chat can use them as evidence. Provider snippets are never Evidence.
 
 ### Research Agent Boundary
 
-The initial Research Agent may iteratively retrieve evidence, compare multiple Sources, synthesize findings, and verify support before producing a Grounded Answer. It is not limited to a single retrieval-and-response step.
+The Leader Agent handles every Chat turn. It may continue the existing selected-Source research flow, or, only for an explicit Source-discovery request from an Editor or Owner, delegate to a durable Research child Run.
 
-The Research Agent is read-only. It cannot add, edit, rename, or delete Sources; change permissions; browse the internet; execute arbitrary code; call external services; or create durable Outputs. These exclusions apply even when the requesting Member otherwise has permission to perform the corresponding Notebook action manually.
+The Research child may use the bounded Source Discovery capability to create a private candidate session. It cannot import candidates, add or mutate Sources, change permissions, answer from hidden Web context, execute arbitrary code, call unregistered external services, or create durable Outputs. The Leader publishes only a short completion or failure message; the user still selects and imports candidates explicitly.
 
 ### Agent Run Visibility
 

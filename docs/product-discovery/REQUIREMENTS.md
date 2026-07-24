@@ -134,21 +134,23 @@ Documents include extracted text, document structure, readable tables, and usabl
 - Each Chat remembers its own Source selection.
 - A Member can include or exclude Sources before submitting the next question.
 - Selection changes affect subsequent answers only.
-- Sources added later do not silently enter existing Chats.
+- Sources added later do not silently enter existing Chats, except a Ready Source imported from that Chat's own private Discovery session.
 - When no Source is selected, a question runs in model-knowledge mode. When Sources are selected, the final response remains claim-free text while no accepted search contains a valid Evidence range. Any citeable Evidence switches the Run to strict grounded JSON; partial support remains grounded and discloses its gaps.
 
-### Research Agent
+### Leader And Research Delegation
 
-The Research Agent is a read-only, multi-step research assistant. For one question it may perform several rounds of retrieval, inspect evidence across Sources, compare claims, synthesize findings, identify contradictions, and verify support before answering.
+The Leader Agent handles every Chat turn. Ordinary questions continue through selected-Source research and answer publication. A clear request to search for, find, collect, or add external material may instead create exactly one durable Research child Run when the requesting Member is an Editor or Owner.
 
-The initial Research Agent cannot:
+The Research child may expand the request into at most three bounded Web queries and create at most ten private candidates through the approved Source Discovery capability. It cannot:
 
-- Mutate Sources, Notebooks, membership, or permissions
-- Browse the internet or search for new Sources
+- Import candidates or mutate Sources, Notebooks, membership, or permissions
+- Publish a Chat answer or use candidate snippets as Evidence
 - Execute arbitrary code
-- Call external services
+- Call external services outside the approved Web Search Provider
 - Create durable Outputs
 - Silently mix unselected Sources, model knowledge, or hidden internet context into a source-grounded answer
+
+After delegation, the Leader reports only that relevant material was found and the interface opens the exact Discovery session. The Member reviews and imports candidates; only successfully fetched, processed, and Ready Sources can support a later answer.
 
 If selected Sources partially support an answer, the Agent uses only that Evidence and states what remains insufficient instead of filling gaps with general knowledge. Before any accepted result contains citeable Evidence, the Composer may instead finish with claim-free text; this remains valid after an empty, failed, or degraded no-Evidence search and creates no Citations. Source deletion, authorization loss, and cancellation still prevent publication. Message rows do not carry a duplicate answer mode.
 
@@ -221,9 +223,8 @@ Each Notebook has exactly one transferable Owner and at most 50 additional Membe
 
 ## Committed Follow-Up Scope
 
-These product capabilities are expected after the initial release but are not initial-release acceptance criteria:
+These product capabilities are expected after the current committed delivery but are not current acceptance criteria:
 
-- Source discovery through search, with explicit review before results become Sources
 - An Output workspace for reports, study guides, mind maps, quizzes, slide decks, and audio overviews
 
 These Outputs are committed product scope. Their decomposition, dependencies, delivery order, milestones, and estimates are intentionally deferred until the technical `grill-with-docs` session; no coarse roadmap is treated as an accepted schedule.

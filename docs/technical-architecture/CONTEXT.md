@@ -28,9 +28,25 @@ _Avoid_: Permission flag, endpoint role check
 A durable unit of asynchronous work whose state survives process failure and can be claimed, reclaimed after lease expiry, cancelled, or completed by a Worker.
 _Avoid_: Goroutine, task when durability matters
 
+**Source Discovery Session**:
+A private durable record of one Member's bounded Web search in one Notebook. It owns normalized candidates, selection, import outcomes, and a safe summary, but no Source content or Evidence.
+_Avoid_: Search response, shared Source list, RAG context
+
+**Web Search Provider**:
+The server-side adapter boundary that accepts a bounded query and locale hints and returns Provider-neutral discovery candidates. Brave is the first adapter; its raw envelope and credential never cross the boundary.
+_Avoid_: Evidence Search Action, Fetcher Adapter, browser search
+
 **Agent Run**:
 The user-visible durable lifecycle of one requested answer. It owns product status and the input/output Message relationship; one input Message may have later Runs after explicit user retries, but a Run does not double as Worker delivery state.
 _Avoid_: Queue item, model request
+
+**Leader Run**:
+The only Member-facing Agent Run. It durably routes a Chat turn into ordinary conversation or explicit Source Discovery delegation and remains the sole authority allowed to publish the Assistant Message.
+_Avoid_: HTTP router, hidden child Run, general orchestrator
+
+**Research child Run**:
+An internal Agent Run linked to a Leader through `parent_run_id`. It may create one private Discovery Session through the bounded Web Search Provider and cannot publish Chat content or import Sources.
+_Avoid_: Research answer, prompt mode, crawler
 
 **Run Retry**:
 An explicit user request to answer the latest unanswered input Message again after its prior Run was cancelled or failed. It creates a new Agent Run, is unavailable after the Chat advances, and is distinct from automatic execution attempts inside an existing Run.

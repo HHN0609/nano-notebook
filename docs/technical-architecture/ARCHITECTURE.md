@@ -6,7 +6,7 @@ Nano Notebook is a small, single-region SaaS research workspace implemented with
 
 The current milestone is a complete local product. Production launch is a later delivery stage with AWS as the intended direction, S3 as the production Blob Store, and static Web Client delivery through S3 and CloudFront. Exact AWS compute, networking, backup, OIDC, email, and secret-management services are not prerequisites for local completion.
 
-The first release does not include an Agent Sandbox, arbitrary code execution, browser or computer use, general external tools, cloud-drive synchronization, Notes, search discovery, or generated Outputs. Search and the committed Output families remain later scope and will be scheduled after the initial dependency graph is complete.
+The current local product does not include an Agent Sandbox, arbitrary code execution, browser or computer use, general external tools, cloud-drive synchronization, Notes, or generated Outputs. It includes bounded Web Source Discovery through an approved provider and the restricted public-URL Fetcher; this is not browser automation or general Agent egress.
 
 ## 2. System Shape
 
@@ -146,7 +146,9 @@ typed Agent query
 -> Evidence candidates returned to Agent Controller
 ```
 
-The Research Agent reaches this pipeline only through the typed `search_evidence` Evidence Search Action. A Model Decision may propose multiple purposeful queries, inspect accepted candidate results, and refine later queries within the existing Run Budget. Each accepted Action Result contains Provider-neutral authoritative Evidence references and bounded previews rather than Qdrant records; Checkpoints prevent recovery from repeating accepted searches. Query purpose, inspected candidates, ranking and selection outcomes, and Retrieval Degradation feed restricted Durable Agent Trace records and audited Replay rather than Member-facing Chat data; model chain of thought is never requested or captured.
+The Chat-facing Leader reaches this pipeline only through the typed `search_evidence` Evidence Search Action. A Model Decision may propose multiple purposeful queries, inspect accepted candidate results, and refine later queries within the existing Run Budget. Each accepted Action Result contains Provider-neutral authoritative Evidence references and bounded previews rather than Qdrant records; Checkpoints prevent recovery from repeating accepted searches. Query purpose, inspected candidates, ranking and selection outcomes, and Retrieval Degradation feed restricted Durable Agent Trace records and audited Replay rather than Member-facing Chat data; model chain of thought is never requested or captured.
+
+Source Discovery is a separate provider-neutral application capability. Brave returns bounded human-facing candidates, never Evidence. An explicit discovery request may create a Research child Run that owns its own Job and Checkpoints, produces one private Discovery Session, and cannot publish Chat content or import a Source. The parent Leader waits without a lease and resumes from the durable child outcome. Only a later user-selected URL import through the restricted Fetcher can enter the ordinary immutable Source and RAG pipeline.
 
 Dense-only retrieval is an intermediate implementation milestone, not the completed product path. Embedding and reranker models, analyzers, chunking, candidate limits, fusion weights, and stopping thresholds are selected through offline evaluation rather than fixed by overall architecture. Learned sparse models remain deferred unless evaluation demonstrates a stable BM25 recall gap that justifies another model dependency.
 

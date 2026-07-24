@@ -1,0 +1,5 @@
+# Delegate Source Discovery through child Runs
+
+Every Chat turn belongs to a Leader Run that durably records either `continue_chat` or `delegate_research`. Delegation is legal only for explicit Source Discovery intent from an Editor or Owner. It atomically creates one Research child Run and Job linked by `parent_run_id`, then places the parent Job in `waiting` without a Worker lease. Child completion or failure requeues the parent, which alone may publish the Chat-facing completion or failure Message.
+
+The Research child owns independent budgets, Checkpoints, Attempts, Trace, cancellation, and one private Discovery Session outcome. It may expand at most three bounded queries and retain at most ten normalized candidates through the approved Web Search Provider. It cannot import candidates, mutate Sources, publish Messages, or answer from Provider snippets. Member-facing Run APIs expose only the Leader; restricted Trace preserves the parent-child tree. Invalid routing never defaults to Web access, and cancellation, authorization loss, membership removal, or Notebook deletion fences both Runs and late publication.
