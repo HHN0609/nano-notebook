@@ -272,6 +272,22 @@ func (q *Queue) CompleteEvidence(ctx context.Context, jobID, leaseToken, revisio
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
+		insert into chat_source_selections(chat_id,source_id,selected,explicit,updated_at)
+		select distinct session.origin_chat_id,$1,true,false,$2::timestamptz
+		from source_discovery_candidates candidate
+		join source_discovery_sessions session on session.id=candidate.session_id
+		join chat_chats chat on chat.id=session.origin_chat_id
+		where candidate.source_id=$1 and candidate.status='imported'
+		  and session.origin_chat_id is not null
+		  and chat.notebook_id=session.notebook_id
+		  and chat.creator_user_id=session.user_id
+		on conflict(chat_id,source_id) do update
+		set selected=true,updated_at=excluded.updated_at
+		where chat_source_selections.explicit=false
+	`, sourceID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
 		update source_processing_jobs
 		set status='succeeded', lease_token=null, lease_expires_at=null, last_error_code=null, updated_at=$2
 		where id=$1

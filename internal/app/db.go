@@ -697,6 +697,19 @@ create table if not exists chat_chats (
 create index if not exists chat_chats_private_recent_idx
 	on chat_chats(creator_user_id, notebook_id, updated_at desc, id desc);
 
+create table if not exists chat_source_selections (
+	chat_id text not null references chat_chats(id) on delete cascade,
+	source_id text not null references source_sources(id) on delete cascade,
+	selected boolean not null,
+	explicit boolean not null default false,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	primary key(chat_id,source_id)
+);
+
+create index if not exists chat_source_selections_selected_idx
+	on chat_source_selections(chat_id,source_id) where selected=true;
+
 create table if not exists chat_messages (
 	id text primary key,
 	chat_id text not null references chat_chats(id) on delete cascade,
@@ -1408,6 +1421,7 @@ alter table retrieval_eval_runs enable row level security;
 alter table retrieval_source_index_builds enable row level security;
 alter table platform_idempotency_keys enable row level security;
 alter table chat_chats enable row level security;
+alter table chat_source_selections enable row level security;
 alter table chat_messages enable row level security;
 alter table source_discovery_sessions enable row level security;
 alter table source_discovery_candidates enable row level security;
@@ -1453,6 +1467,7 @@ grant select, insert, update, delete on
 	retrieval_eval_runs,
 	platform_idempotency_keys,
 	chat_chats,
+	chat_source_selections,
 	chat_messages,
 	agent_runs,
 	agent_run_evidence_set,
@@ -1470,6 +1485,7 @@ grant select on
 	notebook_notebooks,
 	notebook_memberships,
 	chat_chats,
+	chat_source_selections,
 	chat_messages,
 	agent_runs,
 	agent_run_evidence_set,
@@ -1498,6 +1514,7 @@ grant select, insert, update, delete on retrieval_source_index_builds to nano_wo
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
+grant select, insert, update, delete on chat_source_selections to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
 grant select, insert on agent_run_checkpoints to nano_worker;
 revoke all on agent_traces, agent_trace_records from nano_app, nano_worker;
@@ -2027,6 +2044,25 @@ create policy chat_chats_worker on chat_chats
 	for all to nano_worker
 	using (true)
 	with check (true);
+
+drop policy if exists chat_source_selections_private on chat_source_selections;
+create policy chat_source_selections_private on chat_source_selections
+	for all to nano_app
+	using (exists (
+		select 1 from chat_chats c
+		where c.id=chat_source_selections.chat_id
+		  and c.creator_user_id=nullif(current_setting('app.principal_id', true), '')
+	))
+	with check (exists (
+		select 1 from chat_chats c join source_sources s on s.id=chat_source_selections.source_id
+		where c.id=chat_source_selections.chat_id
+		  and c.creator_user_id=nullif(current_setting('app.principal_id', true), '')
+		  and c.notebook_id=s.notebook_id
+	));
+
+drop policy if exists chat_source_selections_worker on chat_source_selections;
+create policy chat_source_selections_worker on chat_source_selections
+	for all to nano_worker using (true) with check (true);
 
 drop policy if exists chat_messages_private on chat_messages;
 create policy chat_messages_private on chat_messages

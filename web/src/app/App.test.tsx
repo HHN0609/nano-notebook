@@ -162,7 +162,7 @@ test("selects only ready Sources and pins them when admitting a Message", async 
       { id: "src_processing", notebook_id: "nb_test", title: "meeting.mp3", format: "mp3", byte_size: 4096, state: "processing" }
     ] });
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
-    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [], source_ids: ["src_ready"] });
     if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
       admittedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return json({ message_id: admittedBody.id, run_id: "run_selected", status: "queued" }, 202);
@@ -182,7 +182,8 @@ test("selects only ready Sources and pins them when admitting a Message", async 
   await user.type(await within(chat).findByRole("textbox", { name: "Message Nano Notebook" }), "Summarize attention.");
   await user.click(within(chat).getByRole("button", { name: "Send message" }));
 
-  await waitFor(() => expect(admittedBody?.source_ids).toEqual(["src_ready"]));
+  await waitFor(() => expect(admittedBody?.id).toBeTruthy());
+  expect(admittedBody).not.toHaveProperty("source_ids");
   expect(within(chat).getByText("Answers can use the selected Sources (1) and include citations.")).toBeInTheDocument();
 });
 

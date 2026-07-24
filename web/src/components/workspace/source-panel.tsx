@@ -77,9 +77,10 @@ export type SourcePanelCopy = {
   failureReasonLabels: Record<NonNullable<MemberSource["failure_reason"]>, string>;
 };
 
-export function SourcePanelContent({ copy, notebookID, controller, canMaintain = true }: {
+export function SourcePanelContent({ copy, notebookID, originChatID, controller, canMaintain = true }: {
   copy: SourcePanelCopy;
   notebookID: string;
+  originChatID?: string;
   controller: SourcesController;
   canMaintain?: boolean;
 }) {
@@ -210,6 +211,7 @@ export function SourcePanelContent({ copy, notebookID, controller, canMaintain =
           <DialogDescription>{copy.addDialogBody}</DialogDescription>
           <SourceDiscovery
             notebookID={notebookID}
+            originChatID={originChatID}
             active={addOpen}
             onExpandedChange={setDiscoveryExpanded}
             onImported={controller.refresh}

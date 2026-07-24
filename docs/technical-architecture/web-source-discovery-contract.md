@@ -43,6 +43,13 @@ Requires `Idempotency-Key` and no request body. Returns `202 Accepted` with one 
 
 Requires `Idempotency-Key` and returns `202 Accepted`. It retries a failed Session, or re-admits selected `import_failed` Candidates when the Session itself is ready. Other states return `409`.
 
+### Persisted Chat Source selection
+
+- `GET /api/v1/chats/{chat_id}/source-selection`
+- `PATCH /api/v1/chats/{chat_id}/source-selection`
+
+The projection and replacement body are both `{"source_ids":["Source ID"]}`. Replacement is atomic and accepts only distinct Ready Sources in the Chat's Notebook. Chat snapshots also expose `source_ids`. Message admission resolves this persisted selection and freezes it into the Run Evidence Set; the browser does not send `source_ids` on the normal path. The message endpoint temporarily accepts the old field as a validated, persisted replacement for rolling-client compatibility.
+
 ## Session projection
 
 ```json

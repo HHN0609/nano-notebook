@@ -40,8 +40,9 @@ export type SourceDiscoveryCopy = {
   importFailed: string;
 };
 
-export function SourceDiscovery({ notebookID, active, copy, onExpandedChange, onImported }: {
+export function SourceDiscovery({ notebookID, originChatID, active, copy, onExpandedChange, onImported }: {
   notebookID: string;
+  originChatID?: string;
   active: boolean;
   copy: SourceDiscoveryCopy;
   onExpandedChange: (expanded: boolean) => void;
@@ -89,7 +90,7 @@ export function SourceDiscovery({ notebookID, active, copy, onExpandedChange, on
       const response = await memberAPI(`/api/v1/notebooks/${notebookID}/source-discovery-sessions`, {
         method: "POST",
         headers: { "X-CSRF-Token": csrfToken() },
-        body: JSON.stringify({ query: value })
+        body: JSON.stringify({ query: value, ...(originChatID ? { origin_chat_id: originChatID } : {}) })
       });
       if (!response.ok) throw new Error(copy.failed);
       setSession(((await response.json()) as { session: DiscoverySession }).session);

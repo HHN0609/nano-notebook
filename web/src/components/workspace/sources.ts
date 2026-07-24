@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { csrfToken, memberAPI } from "./source-upload";
 
 export type MemberSource = {
   id: string;
@@ -20,8 +20,7 @@ export type SourcesController = {
   refresh: () => Promise<unknown>;
 };
 
-export function useNotebookSources(notebookID: string, unavailableLabel: string): SourcesController {
-  const [selection, setSelection] = useState<{ notebookID: string; overrides: Record<string, boolean> }>(() => ({ notebookID, overrides: {} }));
+export function useNotebookSources(notebookID: string, unavailableLabel: string, chatID?: string, initialSourceIDs: string[] = []): SourcesController {
   const query = useQuery({
     queryKey: ["notebook-sources", notebookID],
     queryFn: async () => {
@@ -32,21 +31,42 @@ export function useNotebookSources(notebookID: string, unavailableLabel: string)
     refetchInterval: ({ state }) => state.data?.some((item) => item.state === "processing") ? 2500 : false,
     retry: false
   });
-  const overrides = selection.notebookID === notebookID ? selection.overrides : {};
+  const selection = useQuery({
+    queryKey: ["chat-source-selection", chatID],
+    enabled: Boolean(chatID),
+    queryFn: async (): Promise<string[]> => {
+      const response = await memberAPI(`/api/v1/chats/${chatID}/source-selection`);
+      if (!response.ok) throw new Error(unavailableLabel);
+      return ((await response.json()) as { source_ids: string[] }).source_ids;
+    },
+    initialData: initialSourceIDs,
+    staleTime: Infinity,
+    refetchInterval: query.data?.some((item) => item.state === "processing") ? 2500 : false,
+    retry: false
+  });
   const selectedSourceIDs = (query.data ?? [])
-    .filter((item) => item.state === "ready" && overrides[item.id] !== false)
+    .filter((item) => item.state === "ready" && (selection.data ?? []).includes(item.id))
     .map((item) => item.id);
 
   return {
     sources: query.data ?? [],
     selectedSourceIDs,
     isLoading: query.isLoading,
-    error: query.isError ? unavailableLabel : null,
-    toggle: (sourceID) => setSelection((current) => {
-      const currentOverrides = current.notebookID === notebookID ? current.overrides : {};
-      const isSelected = selectedSourceIDs.includes(sourceID);
-      return { notebookID, overrides: { ...currentOverrides, [sourceID]: !isSelected } };
-    }),
-    refresh: query.refetch
+    error: query.isError || selection.isError ? unavailableLabel : null,
+    toggle: (sourceID) => {
+      if (!chatID) return;
+      const next = selectedSourceIDs.includes(sourceID)
+        ? selectedSourceIDs.filter((id) => id !== sourceID)
+        : [...selectedSourceIDs, sourceID];
+      void memberAPI(`/api/v1/chats/${chatID}/source-selection`, {
+        method: "PATCH",
+        headers: { "X-CSRF-Token": csrfToken() },
+        body: JSON.stringify({ source_ids: next })
+      }).then((response) => {
+        if (!response.ok) throw new Error(unavailableLabel);
+        return selection.refetch();
+      }).catch(() => selection.refetch());
+    },
+    refresh: async () => Promise.all([query.refetch(), selection.refetch()])
   };
 }

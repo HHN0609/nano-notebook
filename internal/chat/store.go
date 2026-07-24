@@ -15,6 +15,7 @@ var (
 	ErrIdempotencyMismatch = errors.New("idempotency mismatch")
 	ErrMessageConflict     = errors.New("message id conflict")
 	ErrNotFound            = errors.New("notebook or chat not found")
+	ErrSelectionInvalid    = errors.New("Chat Source selection is invalid")
 )
 
 type DBTX interface {
@@ -107,6 +108,14 @@ func (s *Store) CreatePrivate(ctx context.Context, userID, notebookID, key, requ
 	if err != nil {
 		return Chat{}, false, err
 	}
+	if _, err := s.db.Exec(ctx, `
+		insert into chat_source_selections(chat_id,source_id,selected,explicit)
+		select $1,s.id,true,false from source_sources s
+		where s.notebook_id=$2 and s.state='ready'
+		on conflict(chat_id,source_id) do nothing
+	`, created.ID, created.NotebookID); err != nil {
+		return Chat{}, false, err
+	}
 	response, err := json.Marshal(map[string]any{"chat": created})
 	if err != nil {
 		return Chat{}, false, err
@@ -118,6 +127,74 @@ func (s *Store) CreatePrivate(ctx context.Context, userID, notebookID, key, requ
 		return Chat{}, false, err
 	}
 	return created, false, nil
+}
+
+func (s *Store) SelectedSourceIDs(ctx context.Context, userID, chatID string) ([]string, error) {
+	if _, err := s.GetPrivate(ctx, userID, chatID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, `
+		select selection.source_id
+		from chat_source_selections selection
+		join source_sources source on source.id=selection.source_id and source.state='ready'
+		where selection.chat_id=$1 and selection.selected=true
+		order by source.created_at,source.id
+	`, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]string, 0)
+	for rows.Next() {
+		var sourceID string
+		if err := rows.Scan(&sourceID); err != nil {
+			return nil, err
+		}
+		result = append(result, sourceID)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ReplaceSourceSelection(ctx context.Context, userID, chatID string, sourceIDs []string) ([]string, error) {
+	item, err := s.GetPrivate(ctx, userID, chatID)
+	if err != nil {
+		return nil, err
+	}
+	if len(sourceIDs) > 50 {
+		return nil, ErrSelectionInvalid
+	}
+	seen := make(map[string]struct{}, len(sourceIDs))
+	for _, sourceID := range sourceIDs {
+		if sourceID == "" {
+			return nil, ErrSelectionInvalid
+		}
+		if _, duplicate := seen[sourceID]; duplicate {
+			return nil, ErrSelectionInvalid
+		}
+		seen[sourceID] = struct{}{}
+	}
+	if len(sourceIDs) > 0 {
+		var valid int
+		if err := s.db.QueryRow(ctx, `
+			select count(*) from source_sources
+			where notebook_id=$1 and state='ready' and id=any($2::text[])
+		`, item.NotebookID, sourceIDs).Scan(&valid); err != nil {
+			return nil, err
+		}
+		if valid != len(sourceIDs) {
+			return nil, ErrSelectionInvalid
+		}
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into chat_source_selections(chat_id,source_id,selected,explicit,updated_at)
+		select $1,s.id,s.id=any($2::text[]),true,now()
+		from source_sources s where s.notebook_id=$3 and s.state='ready'
+		on conflict(chat_id,source_id) do update
+		set selected=excluded.selected,explicit=true,updated_at=excluded.updated_at
+	`, chatID, sourceIDs, item.NotebookID); err != nil {
+		return nil, err
+	}
+	return s.SelectedSourceIDs(ctx, userID, chatID)
 }
 
 func (s *Store) GetPrivate(ctx context.Context, userID, chatID string) (Chat, error) {

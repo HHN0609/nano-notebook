@@ -826,7 +826,57 @@ func (s *Server) chatByID(w http.ResponseWriter, r *http.Request) {
 		s.admitMessage(w, r, user.ID, parts[0])
 		return
 	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "source-selection" {
+		s.chatSourceSelection(w, r, user.ID, parts[0])
+		return
+	}
 	writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+}
+
+func (s *Server) chatSourceSelection(w http.ResponseWriter, r *http.Request, userID, chatID string) {
+	var sourceIDs []string
+	var err error
+	switch r.Method {
+	case http.MethodGet:
+		err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+			sourceIDs, err = chat.NewStore(tx).SelectedSourceIDs(r.Context(), userID, chatID)
+			return err
+		})
+	case http.MethodPatch:
+		if !validCSRF(r) {
+			writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+			return
+		}
+		var request struct {
+			SourceIDs []string `json:"source_ids"`
+		}
+		if !readJSON(w, r, &request) {
+			return
+		}
+		for index := range request.SourceIDs {
+			request.SourceIDs[index] = strings.TrimSpace(request.SourceIDs[index])
+		}
+		err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+			sourceIDs, err = chat.NewStore(tx).ReplaceSourceSelection(r.Context(), userID, chatID, request.SourceIDs)
+			return err
+		})
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	if errors.Is(err, chat.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.chat_not_found")
+		return
+	}
+	if errors.Is(err, chat.ErrSelectionInvalid) {
+		writeError(w, r, http.StatusBadRequest, "source_selection_invalid", "error.source_selection_invalid")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"source_ids": sourceIDs})
 }
 
 func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, chatID string) {
@@ -834,6 +884,7 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 	var messages []chat.Message
 	var runs []agent.RunSnapshot
 	var citations []agent.CitationSnapshot
+	var selectedSourceIDs []string
 	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		chatStore := chat.NewStore(tx)
 		var err error
@@ -850,6 +901,10 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 			return err
 		}
 		citations, err = agent.NewStore(tx).CitationsForChat(r.Context(), userID, chatID)
+		if err != nil {
+			return err
+		}
+		selectedSourceIDs, err = chatStore.SelectedSourceIDs(r.Context(), userID, chatID)
 		return err
 	})
 	if errors.Is(err, chat.ErrNotFound) {
@@ -860,7 +915,7 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"chat": chatResult, "messages": messages, "runs": runs, "citations": citations})
+	writeJSON(w, http.StatusOK, map[string]any{"chat": chatResult, "messages": messages, "runs": runs, "citations": citations, "source_ids": selectedSourceIDs})
 }
 
 func (s *Server) agentRunByID(w http.ResponseWriter, r *http.Request) {
@@ -1082,23 +1137,29 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		return
 	}
 	var req struct {
-		ID        string   `json:"id"`
-		Content   string   `json:"content"`
-		TimeZone  string   `json:"time_zone"`
-		SourceIDs []string `json:"source_ids"`
+		ID        string    `json:"id"`
+		Content   string    `json:"content"`
+		TimeZone  string    `json:"time_zone"`
+		SourceIDs *[]string `json:"source_ids,omitempty"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if _, err := uuid.Parse(req.ID); err != nil || len(req.ID) != 36 || strings.TrimSpace(req.Content) == "" || len([]rune(req.Content)) > 8000 || len(req.SourceIDs) > 50 {
+	if _, err := uuid.Parse(req.ID); err != nil || len(req.ID) != 36 || strings.TrimSpace(req.Content) == "" || len([]rune(req.Content)) > 8000 {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.message_invalid")
 		return
 	}
-	for index := range req.SourceIDs {
-		req.SourceIDs[index] = strings.TrimSpace(req.SourceIDs[index])
-		if req.SourceIDs[index] == "" {
+	if req.SourceIDs != nil {
+		if len(*req.SourceIDs) > 50 {
 			writeError(w, r, http.StatusBadRequest, "validation_failed", "error.message_invalid")
 			return
+		}
+		for index := range *req.SourceIDs {
+			(*req.SourceIDs)[index] = strings.TrimSpace((*req.SourceIDs)[index])
+			if (*req.SourceIDs)[index] == "" {
+				writeError(w, r, http.StatusBadRequest, "validation_failed", "error.message_invalid")
+				return
+			}
 		}
 	}
 	runID, err := newOpaqueID("run")
@@ -1112,10 +1173,6 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		return
 	}
 	status := "queued"
-	promptVersion := agent.BarePromptVersion
-	if len(req.SourceIDs) > 0 {
-		promptVersion = agent.GroundedPromptVersion
-	}
 	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "admit_agent_run:"+userID); err != nil {
 			return err
@@ -1136,12 +1193,14 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 			if err != nil {
 				return err
 			}
-			matches, err := agent.NewStore(tx).EvidenceSetMatches(r.Context(), run.ID, req.SourceIDs)
-			if err != nil {
-				return err
-			}
-			if !matches {
-				return chat.ErrMessageConflict
+			if req.SourceIDs != nil {
+				matches, err := agent.NewStore(tx).EvidenceSetMatches(r.Context(), run.ID, *req.SourceIDs)
+				if err != nil {
+					return err
+				}
+				if !matches {
+					return chat.ErrMessageConflict
+				}
 			}
 			runID = run.ID
 			status = run.Status
@@ -1156,13 +1215,29 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		} else if active {
 			return agent.ErrActiveRun
 		}
+		var sourceIDs []string
+		if req.SourceIDs != nil {
+			if _, err := chatStore.ReplaceSourceSelection(r.Context(), userID, chatID, *req.SourceIDs); err != nil {
+				return err
+			}
+			sourceIDs = append([]string(nil), (*req.SourceIDs)...)
+		} else {
+			sourceIDs, err = chatStore.SelectedSourceIDs(r.Context(), userID, chatID)
+			if err != nil {
+				return err
+			}
+		}
 		if err := chatStore.InsertUserMessage(r.Context(), req.ID, chatID, req.Content); err != nil {
 			return err
+		}
+		promptVersion := agent.BarePromptVersion
+		if len(sourceIDs) > 0 {
+			promptVersion = agent.GroundedPromptVersion
 		}
 		if err := agentStore.CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, promptVersion, normalizeBrowserTimeZone(req.TimeZone), s.cfg.AgentRun); err != nil {
 			return err
 		}
-		if err := agentStore.PinEvidenceSet(r.Context(), runID, userID, req.SourceIDs); err != nil {
+		if err := agentStore.PinEvidenceSet(r.Context(), runID, userID, sourceIDs); err != nil {
 			return err
 		}
 		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {

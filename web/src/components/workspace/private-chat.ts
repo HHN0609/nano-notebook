@@ -45,6 +45,7 @@ export type ChatSnapshot = {
   messages: ChatMessage[];
   runs: AgentRun[];
   citations: Citation[];
+  source_ids: string[];
 };
 
 export type ChatController = {
@@ -56,10 +57,10 @@ export type ChatController = {
   retry: (runID: string) => Promise<boolean>;
 };
 
-export function usePrivateChat(notebookID: string, copy: ChatPanelCopy, selectedSourceIDs: string[] = []): ChatController {
+export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatController {
   const queryClient = useQueryClient();
   const [bootstrapKey] = useState(() => crypto.randomUUID());
-  const [command, setCommand] = useState<{ id: string; content: string; time_zone: string; source_ids: string[] } | null>(null);
+  const [command, setCommand] = useState<{ id: string; content: string; time_zone: string } | null>(null);
   const retryCommand = useRef<{ sourceRunID: string; key: string; timeZone: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const queryKey = useMemo(() => ["private-chat", notebookID] as const, [notebookID]);
@@ -81,7 +82,7 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy, selected
       const snapshotResponse = await api(`/api/v1/chats/${selected.id}`);
       if (!snapshotResponse.ok) throw new Error(copy.unavailableLabel);
       const snapshot = (await snapshotResponse.json()) as ChatSnapshot;
-      return { ...snapshot, citations: snapshot.citations ?? [] };
+      return { ...snapshot, citations: snapshot.citations ?? [], source_ids: snapshot.source_ids ?? [] };
     },
     retry: false
   });
@@ -122,7 +123,7 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy, selected
 
     const pending = command?.content === content
       ? command
-      : { id: crypto.randomUUID(), content, time_zone: browserTimeZone(), source_ids: [...selectedSourceIDs] };
+      : { id: crypto.randomUUID(), content, time_zone: browserTimeZone() };
     setCommand(pending);
     setError(null);
     const response = await api(`/api/v1/chats/${snapshot.chat.id}/messages`, {
