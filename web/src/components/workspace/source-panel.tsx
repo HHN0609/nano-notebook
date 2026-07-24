@@ -10,6 +10,7 @@ import { Label } from "../ui/label";
 import { acceptedSourceFormats, csrfToken, memberAPI, uploadSourceFile } from "./source-upload";
 import type { MemberSource, SourcesController } from "./sources";
 import { SourceImageViewer, type SourceImageRegion } from "./source-image-viewer";
+import { SourceDiscovery } from "./source-discovery";
 
 type SourceCoordinate = {
   page_number?: number;
@@ -44,6 +45,16 @@ export type SourcePanelCopy = {
   urlLabel: string;
   urlPlaceholder: string;
   addURLLabel: string;
+  webSearchLabel: string;
+  webSearchPlaceholder: string;
+  webSearchActionLabel: string;
+  webSearchingLabel: string;
+  selectAllLabel: string;
+  importSelectedLabel: string;
+  webSearchFailedLabel: string;
+  noSearchResultsLabel: string;
+  openSearchResultLabel: string;
+  sourceImportFailedLabel: string;
   readyLabel: string;
   processingLabel: string;
   sourceFailedLabel: string;
@@ -74,6 +85,7 @@ export function SourcePanelContent({ copy, notebookID, controller, canMaintain =
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [discoveryExpanded, setDiscoveryExpanded] = useState(false);
   const [url, setURL] = useState("");
   const [addingURL, setAddingURL] = useState(false);
   const [uploads, setUploads] = useState<Array<{ id: string; title: string; state: "uploading" | "failed" }>>([]);
@@ -192,10 +204,29 @@ export function SourcePanelContent({ copy, notebookID, controller, canMaintain =
         </div>
       )}
 
-      <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogContent className="source-dialog" closeLabel={copy.closeLabel}>
+      <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) setDiscoveryExpanded(false); }}>
+        <DialogContent className={`source-dialog${discoveryExpanded ? " source-dialog--discovery" : ""}`} closeLabel={copy.closeLabel}>
           <DialogTitle>{copy.addDialogTitle}</DialogTitle>
           <DialogDescription>{copy.addDialogBody}</DialogDescription>
+          <SourceDiscovery
+            notebookID={notebookID}
+            active={addOpen}
+            onExpandedChange={setDiscoveryExpanded}
+            onImported={controller.refresh}
+            copy={{
+              label: copy.webSearchLabel,
+              placeholder: copy.webSearchPlaceholder,
+              search: copy.webSearchActionLabel,
+              searching: copy.webSearchingLabel,
+              selectAll: copy.selectAllLabel,
+              importSelected: copy.importSelectedLabel,
+              failed: copy.webSearchFailedLabel,
+              noResults: copy.noSearchResultsLabel,
+              openResult: copy.openSearchResultLabel,
+              importFailed: copy.sourceImportFailedLabel
+            }}
+          />
+          <div className="source-dialog-divider" />
           <input ref={fileInput} className="sr-only" type="file" multiple accept={acceptedSourceFormats} aria-label={copy.chooseFilesLabel} onChange={(event) => void addFiles(event.target.files)} />
           <Button variant="outline" onClick={() => fileInput.current?.click()}><MaterialSymbol name="upload_file" size={19} />{copy.chooseFilesLabel}</Button>
           <p className="source-format-help">{copy.supportedFormatsLabel}</p>
