@@ -23,6 +23,7 @@ Manual Source Discovery is the primary product capability. Agent delegation is c
 This PRD derives from:
 
 - `docs/superpowers/specs/2026-07-24-web-source-discovery-and-research-delegation-design.md`
+- `docs/superpowers/specs/2026-07-25-discovery-source-peek-and-fetcher-dns-design.md`
 - `docs/product-discovery/CONTEXT.md`
 - `docs/product-discovery/REQUIREMENTS.md`
 - `docs/technical-architecture/ARCHITECTURE.md`
@@ -90,6 +91,11 @@ Sprint 8 is complete only when all of the following are true:
 29. Deterministic tests require no real Brave credential; an opt-in smoke test uses `NANO_BRAVE_SEARCH_API_KEY` without logging or returning it.
 30. Sprint 1 through Sprint 7 authentication, Source, RAG, sharing, recovery, observability, and deletion behavior remains green.
 31. Leader routing and Research query expansion publish their actual requested/selected model and Provider-reported token usage to each Run Trace; Brave HTTP calls do not invent LLM usage.
+32. Expanded Discovery preserves a separately scrolling existing-Source region at approximately 180 px on desktop and 140 px in compact layouts.
+33. A Fetcher-only RFC 8484 resolver may be enabled only when both its HTTPS endpoint and fixed public bootstrap address are configured; partial configuration fails startup.
+34. The local start script enables Fetcher DoH defaults so Candidate import works under Clash/Mihomo Fake IP DNS without changing global application DNS behavior.
+35. System DNS remains the production default when Fetcher DoH is unset, and every resolved target still passes the existing public-address and mixed-answer rejection policy.
+36. Live desktop and compact acceptance must demonstrate a public Brave Candidate import without `unsafe_destination`, while `198.18.0.0/15` and private/reserved IPv4 and IPv6 remain blocked.
 
 ## 5. Canonical Terms
 

@@ -3,7 +3,7 @@
 ## Status
 
 - Approved: 2026-07-25
-- Implementation: pending
+- Implementation: completed and accepted 2026-07-25
 - Scope: left-panel Discovery layout and Source Fetcher DNS resolution only
 
 ## Problem
@@ -96,3 +96,12 @@ Brave search, Chat routing, Research delegation, object storage, Source processi
 4. `198.18.0.0/15`, private IPv4, and private/reserved IPv6 remain blocked by the Fetcher.
 5. Other application network behavior is unchanged because the resolver is scoped to the Source Fetcher.
 6. Production behavior remains unchanged unless both Fetcher DoH variables are configured.
+
+## Implementation Evidence
+
+- `0a45128` keeps the existing Source collection visible in a separately scrolling 180 px desktop / 140 px compact lower region.
+- `d4ea1d4` adds the optional bootstrap-pinned RFC 8484 resolver and enables local-only defaults in `scripts/start`.
+- `48caefb` makes successful imports visually distinct from failures and removes a duplicate nested Sources region from the accessibility tree.
+- Resolver tests cover A/AAAA wire queries, pinned no-proxy transport, redirect refusal, timeout, malformed content type, oversized response, non-success status, unsafe bootstrap rejection, and partial configuration rejection.
+- The full Go suite, 59 Web tests, type-check, lint, production build, and 18 applicable Playwright regression journeys passed.
+- Live desktop and compact Brave searches returned public `go.dev` Candidates; selected imports reached `imported` without `unsafe_destination`, while the existing Source region remained exactly 180 px and 140 px respectively.

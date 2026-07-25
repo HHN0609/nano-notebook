@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -83,20 +84,51 @@ func TestDoHResolverLooksUpIPv4AndIPv6WithDNSMessages(t *testing.T) {
 }
 
 func TestDoHResolverBoundsAndValidatesResponses(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+	}{
+		{name: "non-success status", status: http.StatusBadGateway, contentType: "application/dns-message"},
+		{name: "invalid content type", status: http.StatusOK, contentType: "text/plain", body: "no"},
+		{name: "oversized body", status: http.StatusOK, contentType: "application/dns-message", body: "12345"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resolver := &doHResolver{
+				endpoint: "https://resolver.test/dns-query",
+				client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: test.status,
+						Header:     http.Header{"Content-Type": []string{test.contentType}},
+						Body:       io.NopCloser(strings.NewReader(test.body)),
+						Request:    request,
+					}, nil
+				})},
+				maxResponseBytes: 4,
+			}
+			if _, err := resolver.LookupNetIP(context.Background(), "ip4", "example.com"); err == nil {
+				t.Fatal("LookupNetIP accepted an invalid DoH response")
+			}
+		})
+	}
+}
+
+func TestDoHResolverHonorsItsHTTPTimeout(t *testing.T) {
 	resolver := &doHResolver{
 		endpoint: "https://resolver.test/dns-query",
-		client: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"text/plain"}},
-				Body:       io.NopCloser(strings.NewReader("not a DNS message")),
-				Request:    request,
-			}, nil
-		})},
-		maxResponseBytes: 4,
+		client: &http.Client{
+			Timeout: 10 * time.Millisecond,
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			}),
+		},
+		maxResponseBytes: 4096,
 	}
 	if _, err := resolver.LookupNetIP(context.Background(), "ip4", "example.com"); err == nil {
-		t.Fatal("LookupNetIP accepted an invalid, oversized DoH response")
+		t.Fatal("LookupNetIP did not enforce its HTTP timeout")
 	}
 }
 
