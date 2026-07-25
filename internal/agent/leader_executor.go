@@ -186,6 +186,7 @@ func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run lead
 	}
 	childRunID := "run_" + uuid.NewString()
 	childJobID := "job_" + uuid.NewString()
+	sessionID := "dss_" + uuid.NewString()
 	if _, err := tx.Exec(ctx, `insert into agent_run_routes(run_id,route) values($1,'delegate_research')`, attempt.RunID); err != nil {
 		return err
 	}
@@ -203,6 +204,18 @@ func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run lead
 		return err
 	}
 	if _, err := tx.Exec(ctx, `insert into agent_jobs(id,kind,run_id,status) values($1,'agent_run',$2,'queued')`, childJobID, childRunID); err != nil {
+		return err
+	}
+	if _, err := sourcediscovery.NewStore(tx).EnsureResearchSession(ctx, sourcediscovery.ResearchSessionCommand{
+		ID: sessionID, NotebookID: run.NotebookID, UserID: run.UserID, OriginChatID: run.ChatID,
+		ResearchRunID: childRunID, Query: truncateLeaderRunes(run.Message, 500),
+	}); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		update agent_runs set discovery_session_id=$3,updated_at=now()
+		where id in ($1,$2) and discovery_session_id is null
+	`, attempt.RunID, childRunID, sessionID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -227,6 +240,9 @@ func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run lead
 		return err
 	}
 	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_jobs',$1)`, childJobID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs',$1)`, attempt.RunID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

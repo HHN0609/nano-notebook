@@ -100,6 +100,24 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	if parentJobStatus != "waiting" || parentLease != "" || route != "delegate_research" || childRole != "research" || normal.calls != 0 {
 		t.Fatalf("parent job=%q lease=%q route=%q child=%q normal=%d", parentJobStatus, parentLease, route, childRole, normal.calls)
 	}
+	var parentSessionID, childSessionID *string
+	var searchingSessionStatus string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select parent.discovery_session_id,child.discovery_session_id,coalesce(session.status,'')
+		from agent_runs parent
+		join agent_runs child on child.parent_run_id=parent.id
+		left join source_discovery_sessions session on session.id=parent.discovery_session_id
+		where parent.id=$1
+	`, admittedBody.RunID).Scan(&parentSessionID, &childSessionID, &searchingSessionStatus); err != nil {
+		t.Fatal(err)
+	}
+	if parentSessionID == nil || childSessionID == nil || *parentSessionID != *childSessionID || searchingSessionStatus != "searching" {
+		t.Fatalf("delegated Session parent=%v child=%v status=%q", parentSessionID, childSessionID, searchingSessionStatus)
+	}
+	searchingProjection := api.getWithCookie(t, "/api/v1/chats/"+chatBody.Chat.ID, owner)
+	if searchingProjection.Code != http.StatusOK || !strings.Contains(searchingProjection.Body.String(), *parentSessionID) {
+		t.Fatalf("searching projection status=%d body=%s", searchingProjection.Code, searchingProjection.Body.String())
+	}
 
 	childJob, ok, err := queue.ClaimNext(context.Background())
 	if err != nil || !ok || childJob.RunID != childRunID {
@@ -123,6 +141,9 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	}
 	if sessionID == "" || childStatus != "completed" || requeuedStatus != "queued" || candidateCount != 2 {
 		t.Fatalf("child=%q parent job=%q session=%q candidates=%d", childStatus, requeuedStatus, sessionID, candidateCount)
+	}
+	if sessionID != *parentSessionID {
+		t.Fatalf("completed Session=%q, want delegated Session=%q", sessionID, *parentSessionID)
 	}
 
 	resumed, ok, err := queue.ClaimNext(context.Background())
