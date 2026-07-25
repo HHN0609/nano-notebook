@@ -14,6 +14,7 @@ func TestSourceOpenActionFormatPolicy(t *testing.T) {
 		want  sourceOpenAction
 	}{
 		{name: "web", item: source.Source{ID: "web", InputKind: "url", Format: source.FormatHTML, FinalURL: "https://example.com/final"}, state: "ready", want: sourceOpenAction{Kind: "external", Href: "https://example.com/final"}},
+		{name: "remote pdf", item: source.Source{ID: "remote-pdf", InputKind: "url", Format: source.FormatPDF, FinalURL: "https://example.com/degree.pdf"}, state: "ready", want: sourceOpenAction{Kind: "external", Href: "https://example.com/degree.pdf"}},
 		{name: "youtube", item: source.Source{ID: "youtube", InputKind: "url", Format: source.FormatYouTube, FinalURL: "https://www.youtube.com/watch?v=abc"}, state: "ready", want: sourceOpenAction{Kind: "external", Href: "https://www.youtube.com/watch?v=abc"}},
 		{name: "txt", item: source.Source{ID: "txt", InputKind: "file", Format: source.FormatTXT, MediaType: "text/plain"}, state: "ready", want: inlineAction("txt", "text/plain")},
 		{name: "markdown", item: source.Source{ID: "markdown", InputKind: "file", Format: source.FormatMarkdown, MediaType: "text/markdown"}, state: "ready", want: inlineAction("markdown", "text/markdown")},

@@ -58,7 +58,7 @@ func sourceOpenActionFor(item source.Source, state string) sourceOpenAction {
 	if state != "ready" {
 		return sourceOpenAction{Kind: "none"}
 	}
-	if item.InputKind == "url" && (item.Format == source.FormatHTML || item.Format == source.FormatYouTube) {
+	if item.InputKind == "url" {
 		href, err := canonicalSourceURL(item.FinalURL)
 		if err == nil {
 			return sourceOpenAction{Kind: "external", Href: href}
