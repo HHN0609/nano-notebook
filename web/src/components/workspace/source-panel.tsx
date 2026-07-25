@@ -217,6 +217,7 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
           onExpandedChange={ignoreDiscoveryExpansion}
           onSessionActive={activateDiscovery}
           onImported={controller.refresh}
+          onImportAccepted={() => { setDiscoveryOpen(false); setPinnedDiscoverySessionID(undefined); }}
           copy={{
             label: copy.webSearchLabel,
             placeholder: copy.webSearchPlaceholder,

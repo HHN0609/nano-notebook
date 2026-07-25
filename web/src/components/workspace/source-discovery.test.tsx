@@ -71,7 +71,7 @@ test("shows a safe error when search admission fails", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent("Search failed");
 });
 
-test("distinguishes imported candidates from failed imports", async () => {
+test("does not render failed import candidates as Source choices", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({ session: {
     id: "dsc_status", notebook_id: "nb_1", query: "film", status: "ready",
     candidates: [
@@ -92,7 +92,36 @@ test("distinguishes imported candidates from failed imports", async () => {
   />);
 
   expect(await screen.findByText("Ready")).toHaveClass("source-discovery-imported");
-  expect(screen.getByText("Import failed")).toHaveClass("source-discovery-import-failed");
+  expect(screen.queryByText("Failed guide")).not.toBeInTheDocument();
+  expect(screen.queryByText("Import failed")).not.toBeInTheDocument();
+});
+
+test("notifies its owner to collapse after at least one Source is admitted", async () => {
+  let reads = 0;
+  vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if ((init?.method ?? "GET") === "POST") return Response.json({ outcomes: [{ candidate_id: "candidate_1", status: "imported", source_id: "src_1" }] }, { status: 202 });
+    reads += 1;
+    return Response.json({ session: {
+      id: "dsc_import", notebook_id: "nb_1", query: "film", status: "ready",
+      candidates: [{ id: "candidate_1", ordinal: 0, title: "Guide", canonical_url: "https://example.com/guide", display_url: "example.com/guide", snippet: "Guide.", selected: true, status: reads > 1 ? "imported" : "discovered" }]
+    } });
+  }));
+  const onImportAccepted = vi.fn();
+  render(<SourceDiscovery
+    notebookID="nb_1"
+    active
+    onExpandedChange={vi.fn()}
+    onImported={vi.fn()}
+    onImportAccepted={onImportAccepted}
+    copy={{
+      label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
+      selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported"
+    }}
+  />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Import selected" }));
+  await waitFor(() => expect(onImportAccepted).toHaveBeenCalledTimes(1));
 });
 
 test("loads the exact Research session requested by a completed Leader Run", async () => {

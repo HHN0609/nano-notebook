@@ -44,7 +44,7 @@ export type SourceDiscoveryCopy = {
   imported: string;
 };
 
-export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, active, showResults = true, hideLabel = false, copy, onExpandedChange, onSessionActive, onImported }: {
+export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, active, showResults = true, hideLabel = false, copy, onExpandedChange, onSessionActive, onImported, onImportAccepted }: {
   notebookID: string;
   originChatID?: string;
   requestedSessionID?: string;
@@ -55,13 +55,15 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
   onExpandedChange: (expanded: boolean) => void;
   onSessionActive?: () => void;
   onImported: () => void | Promise<unknown>;
+  onImportAccepted?: () => void;
 }) {
   const searchInputID = useId();
   const [query, setQuery] = useState("");
   const [session, setSession] = useState<DiscoverySession | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const expanded = session?.status === "ready" && session.candidates.length > 0;
+  const visibleCandidates = useMemo(() => session?.candidates.filter((candidate) => candidate.status !== "import_failed") ?? [], [session]);
+  const expanded = session?.status === "ready" && visibleCandidates.length > 0;
 
   useEffect(() => onExpandedChange(Boolean(showResults && expanded)), [expanded, onExpandedChange, showResults]);
   useEffect(() => {
@@ -153,7 +155,7 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
     }
   }
 
-  const importable = useMemo(() => session?.candidates.filter((candidate) => candidate.status === "discovered" || candidate.status === "import_failed") ?? [], [session]);
+  const importable = useMemo(() => visibleCandidates.filter((candidate) => candidate.status === "discovered"), [visibleCandidates]);
   const selectedIDs = useMemo(() => importable.filter((candidate) => candidate.selected).map((candidate) => candidate.id), [importable]);
   const allSelected = importable.length > 0 && selectedIDs.length === importable.length;
 
@@ -167,9 +169,11 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
         headers: { "Idempotency-Key": crypto.randomUUID(), "X-CSRF-Token": csrfToken() }
       });
       if (!response.ok) throw new Error(copy.importFailed);
+      const payload = await response.json() as { outcomes?: Array<{ status: string }> };
       const refreshed = await memberAPI(`/api/v1/source-discovery-sessions/${session.id}`);
       if (refreshed.ok) setSession(((await refreshed.json()) as { session: DiscoverySession }).session);
       await onImported();
+      if (payload.outcomes?.some((outcome) => outcome.status === "imported")) onImportAccepted?.();
     } catch {
       setError(copy.importFailed);
     } finally {
@@ -186,14 +190,14 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
     {showResults && session?.status === "searching" ? <p className="source-discovery-status" role="status">{copy.searching}</p> : null}
     {showResults && error ? <p className="source-discovery-error" role="alert">{error}</p> : null}
     {showResults && session?.status === "failed" ? <div><p className="source-discovery-error" role="alert">{copy.failed}</p><Button variant="outline" disabled={busy} onClick={() => void retrySearch()}>{copy.retry}</Button></div> : null}
-    {showResults && session?.status === "ready" && session.candidates.length === 0 ? <p className="source-discovery-status">{copy.noResults}</p> : null}
+    {showResults && session?.status === "ready" && visibleCandidates.length === 0 ? <p className="source-discovery-status">{copy.noResults}</p> : null}
     {showResults && expanded ? <div className="source-discovery-expanded">
       {session.summary ? <p className="source-discovery-summary">{session.summary}</p> : null}
       <div className="source-discovery-toolbar">
         <label>{copy.selectAll}<input aria-label={copy.selectAll} type="checkbox" checked={allSelected} onChange={() => void replaceSelection(allSelected ? [] : importable.map((candidate) => candidate.id))} /></label>
       </div>
       <div className="source-discovery-results">
-        {session.candidates.map((candidate) => <article className="source-discovery-result" key={candidate.id}>
+        {visibleCandidates.map((candidate) => <article className="source-discovery-result" key={candidate.id}>
           <span className="source-discovery-site-icon" aria-hidden="true">
             {candidate.favicon_ref ? <img src={candidate.favicon_ref} alt="" /> : <MaterialSymbol name="language" size={18} />}
           </span>
@@ -201,7 +205,6 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
             <a href={candidate.canonical_url} target="_blank" rel="noreferrer noopener" aria-label={`${candidate.title} · ${copy.openResult}`}>{candidate.title} ↗</a>
             <span>{candidate.display_url}</span>
             <p>{candidate.snippet}</p>
-            {candidate.status === "import_failed" ? <small className="source-discovery-import-failed">{copy.importFailed}</small> : null}
             {candidate.status === "imported" ? <small className="source-discovery-imported">{copy.imported}</small> : null}
           </div>
           <input
