@@ -147,12 +147,14 @@ const (
 type Source struct {
 	ID                string    `json:"id"`
 	NotebookID        string    `json:"notebook_id"`
+	InputKind         string    `json:"-"`
 	Title             string    `json:"title"`
 	Format            Format    `json:"format"`
 	MediaType         string    `json:"media_type"`
 	ByteSize          int64     `json:"byte_size"`
 	ContentSHA256     string    `json:"content_sha256"`
 	OriginalObjectKey string    `json:"-"`
+	FinalURL          string    `json:"-"`
 	State             State     `json:"state"`
 	FailureCode       string    `json:"-"`
 	CreatedAt         time.Time `json:"created_at"`
@@ -330,13 +332,13 @@ func (s *Store) CreateUploaded(ctx context.Context, command CreateUploadedComman
 			id, notebook_id, input_kind, format, title, media_type, byte_size,
 			content_sha256, original_object_key, state
 		) values ($1, $2, 'file', $3, $4, $5, $6, $7, $8, 'uploaded')
-		returning id, notebook_id, title, format, media_type, byte_size,
-			content_sha256, original_object_key, state, created_at, updated_at`,
+		returning id, notebook_id, input_kind, title, format, media_type, byte_size,
+			content_sha256, original_object_key, coalesce(final_url,''), state, created_at, updated_at`,
 		command.ID, command.NotebookID, command.Format, command.Title, command.MediaType,
 		command.ByteSize, command.ContentSHA256, command.OriginalObjectKey,
 	).Scan(
-		&created.ID, &created.NotebookID, &created.Title, &created.Format, &created.MediaType,
-		&created.ByteSize, &created.ContentSHA256, &created.OriginalObjectKey, &created.State,
+		&created.ID, &created.NotebookID, &created.InputKind, &created.Title, &created.Format, &created.MediaType,
+		&created.ByteSize, &created.ContentSHA256, &created.OriginalObjectKey, &created.FinalURL, &created.State,
 		&created.CreatedAt, &created.UpdatedAt,
 	)
 	return created, err
@@ -538,13 +540,13 @@ func (s *Store) FinalizeURLAdmission(ctx context.Context, command FinalizeURLAdm
 			content_sha256, original_object_key, origin_url, final_url,
 			origin_url_identity, final_url_identity, state
 		) values ($1, $2, 'url', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'uploaded')
-		returning id, notebook_id, title, format, media_type, byte_size,
-			content_sha256, original_object_key, state, created_at, updated_at
+		returning id, notebook_id, input_kind, title, format, media_type, byte_size,
+			content_sha256, original_object_key, coalesce(final_url,''), state, created_at, updated_at
 	`, admission.SourceID, admission.NotebookID, command.Format, command.Title, command.MediaType,
 		command.ByteSize, command.ContentSHA256, command.OriginalObjectKey, admission.RequestURL,
 		command.FinalURL, originIdentity, finalIdentity).Scan(
-		&created.ID, &created.NotebookID, &created.Title, &created.Format, &created.MediaType,
-		&created.ByteSize, &created.ContentSHA256, &created.OriginalObjectKey, &created.State,
+		&created.ID, &created.NotebookID, &created.InputKind, &created.Title, &created.Format, &created.MediaType,
+		&created.ByteSize, &created.ContentSHA256, &created.OriginalObjectKey, &created.FinalURL, &created.State,
 		&created.CreatedAt, &created.UpdatedAt,
 	)
 	if err != nil {
@@ -689,14 +691,14 @@ func (s *Store) FinalizeUploadIntent(ctx context.Context, id, processingJobID, o
 func (s *Store) sourceByID(ctx context.Context, id string) (Source, error) {
 	var item Source
 	err := s.db.QueryRow(ctx, `
-		select id, notebook_id, title, format, media_type, byte_size,
-			content_sha256, original_object_key, state,
+		select id, notebook_id, input_kind, title, format, media_type, byte_size,
+			content_sha256, original_object_key, coalesce(final_url,''), state,
 			coalesce((select j.last_error_code from source_processing_jobs j where j.source_id=source_sources.id order by j.created_at desc, j.id desc limit 1),''),
 			created_at, updated_at
 		from source_sources where id = $1`, id,
 	).Scan(
-		&item.ID, &item.NotebookID, &item.Title, &item.Format, &item.MediaType,
-		&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.State, &item.FailureCode,
+		&item.ID, &item.NotebookID, &item.InputKind, &item.Title, &item.Format, &item.MediaType,
+		&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.FinalURL, &item.State, &item.FailureCode,
 		&item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -865,12 +867,12 @@ func (s *Store) Remove(ctx context.Context, id, purgeID string) (PurgeIntent, er
 func (s *Store) sourceByIDForUpdate(ctx context.Context, id string) (Source, error) {
 	var item Source
 	err := s.db.QueryRow(ctx, `
-		select id, notebook_id, title, format, media_type, byte_size,
-			content_sha256, original_object_key, state, created_at, updated_at
+		select id, notebook_id, input_kind, title, format, media_type, byte_size,
+			content_sha256, original_object_key, coalesce(final_url,''), state, created_at, updated_at
 		from source_sources where id=$1 for update`, id,
 	).Scan(
-		&item.ID, &item.NotebookID, &item.Title, &item.Format, &item.MediaType,
-		&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.State,
+		&item.ID, &item.NotebookID, &item.InputKind, &item.Title, &item.Format, &item.MediaType,
+		&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.FinalURL, &item.State,
 		&item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -884,8 +886,8 @@ func (s *Store) ListForNotebook(ctx context.Context, notebookID string) ([]Sourc
 		return nil, err
 	}
 	rows, err := s.db.Query(ctx, `
-		select s.id, s.notebook_id, s.title, s.format, s.media_type, s.byte_size,
-			s.content_sha256, s.original_object_key, s.state, coalesce(j.last_error_code,''), s.created_at, s.updated_at
+		select s.id, s.notebook_id, s.input_kind, s.title, s.format, s.media_type, s.byte_size,
+			s.content_sha256, s.original_object_key, coalesce(s.final_url,''), s.state, coalesce(j.last_error_code,''), s.created_at, s.updated_at
 		from source_sources s
 		left join lateral (
 			select last_error_code from source_processing_jobs where source_id=s.id order by created_at desc, id desc limit 1
@@ -900,8 +902,8 @@ func (s *Store) ListForNotebook(ctx context.Context, notebookID string) ([]Sourc
 	for rows.Next() {
 		var item Source
 		if err := rows.Scan(
-			&item.ID, &item.NotebookID, &item.Title, &item.Format, &item.MediaType,
-			&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.State, &item.FailureCode,
+			&item.ID, &item.NotebookID, &item.InputKind, &item.Title, &item.Format, &item.MediaType,
+			&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.FinalURL, &item.State, &item.FailureCode,
 			&item.CreatedAt, &item.UpdatedAt,
 		); err != nil {
 			return nil, err

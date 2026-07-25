@@ -19,15 +19,22 @@ import (
 )
 
 type memberSource struct {
-	ID            string        `json:"id"`
-	NotebookID    string        `json:"notebook_id"`
-	Title         string        `json:"title"`
-	Format        source.Format `json:"format"`
-	ByteSize      int64         `json:"byte_size"`
-	State         string        `json:"state"`
-	FailureReason string        `json:"failure_reason,omitempty"`
-	CreatedAt     time.Time     `json:"created_at"`
-	UpdatedAt     time.Time     `json:"updated_at"`
+	ID            string           `json:"id"`
+	NotebookID    string           `json:"notebook_id"`
+	Title         string           `json:"title"`
+	Format        source.Format    `json:"format"`
+	ByteSize      int64            `json:"byte_size"`
+	State         string           `json:"state"`
+	FailureReason string           `json:"failure_reason,omitempty"`
+	OpenAction    sourceOpenAction `json:"open_action"`
+	CreatedAt     time.Time        `json:"created_at"`
+	UpdatedAt     time.Time        `json:"updated_at"`
+}
+
+type sourceOpenAction struct {
+	Kind      string `json:"kind"`
+	Href      string `json:"href,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
 }
 
 func sourceForMember(item source.Source) memberSource {
@@ -39,12 +46,62 @@ func sourceForMember(item source.Source) memberSource {
 	}
 	result := memberSource{
 		ID: item.ID, NotebookID: item.NotebookID, Title: item.Title, Format: item.Format,
-		ByteSize: item.ByteSize, State: state, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+		ByteSize: item.ByteSize, State: state, OpenAction: sourceOpenActionFor(item, state), CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}
 	if state == "failed" {
 		result.FailureReason = source.SafeFailureReason(item.FailureCode)
 	}
 	return result
+}
+
+func sourceOpenActionFor(item source.Source, state string) sourceOpenAction {
+	if state != "ready" {
+		return sourceOpenAction{Kind: "none"}
+	}
+	if item.InputKind == "url" && (item.Format == source.FormatHTML || item.Format == source.FormatYouTube) {
+		href, err := canonicalSourceURL(item.FinalURL)
+		if err == nil {
+			return sourceOpenAction{Kind: "external", Href: href}
+		}
+		return sourceOpenAction{Kind: "none"}
+	}
+	if item.InputKind == "file" {
+		if mediaType := inlineOriginalMediaType(item.Format, item.MediaType); mediaType != "" {
+			return sourceOpenAction{
+				Kind: "inline_original", Href: "/api/v1/sources/" + item.ID + "/original-asset", MediaType: mediaType,
+			}
+		}
+	}
+	return sourceOpenAction{Kind: "none"}
+}
+
+func inlineOriginalMediaType(format source.Format, mediaType string) string {
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	allowed := false
+	switch format {
+	case source.FormatTXT:
+		allowed = mediaType == "text/plain"
+	case source.FormatMarkdown:
+		allowed = mediaType == "text/markdown"
+	case source.FormatPDF:
+		allowed = mediaType == "application/pdf"
+	case source.FormatMP3:
+		allowed = mediaType == "audio/mpeg"
+	case source.FormatWAV:
+		allowed = mediaType == "audio/wav" || mediaType == "audio/x-wav"
+	case source.FormatM4A:
+		allowed = mediaType == "audio/mp4" || mediaType == "audio/x-m4a"
+	case source.FormatPNG:
+		allowed = mediaType == "image/png"
+	case source.FormatJPEG:
+		allowed = mediaType == "image/jpeg"
+	case source.FormatWebP:
+		allowed = mediaType == "image/webp"
+	}
+	if allowed {
+		return mediaType
+	}
+	return ""
 }
 
 func (s *Server) notebookSources(w http.ResponseWriter, r *http.Request, userID, notebookID string) {
@@ -264,12 +321,16 @@ func (s *Server) sourceByID(w http.ResponseWriter, r *http.Request) {
 	}
 	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/sources/"), "/")
 	parts := strings.Split(remainder, "/")
-	if parts[0] == "" || len(parts) > 2 || (len(parts) == 2 && parts[1] != "retry" && parts[1] != "viewer-asset") {
+	if parts[0] == "" || len(parts) > 2 || (len(parts) == 2 && parts[1] != "retry" && parts[1] != "viewer-asset" && parts[1] != "original-asset") {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
 		return
 	}
 	if r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "viewer-asset" {
 		s.writeSourceViewerAsset(w, r, user.ID, parts[0])
+		return
+	}
+	if r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "original-asset" {
+		s.writeSourceOriginalAsset(w, r, user.ID, parts[0])
 		return
 	}
 	if r.Method == http.MethodGet && len(parts) == 1 {
@@ -357,6 +418,54 @@ func (s *Server) sourceByID(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 	}
+}
+
+func (s *Server) writeSourceOriginalAsset(w http.ResponseWriter, r *http.Request, userID, sourceID string) {
+	if s.cfg.SourceSnapshots == nil {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.source_not_found")
+		return
+	}
+	var item source.Source
+	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		var readErr error
+		item, readErr = source.NewStore(tx).SourceByID(r.Context(), sourceID)
+		return readErr
+	})
+	mediaType := inlineOriginalMediaType(item.Format, item.MediaType)
+	if err != nil || item.State != source.StateReady || item.InputKind != "file" || mediaType == "" ||
+		item.ByteSize < 1 || item.ByteSize > 100*1024*1024 || len(item.ContentSHA256) != 64 || strings.TrimSpace(item.OriginalObjectKey) == "" {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.source_not_found")
+		return
+	}
+	payload, err := s.cfg.SourceSnapshots.Get(r.Context(), item.OriginalObjectKey, item.ByteSize)
+	digest := sha256.Sum256(payload)
+	if err != nil || int64(len(payload)) != item.ByteSize || !strings.EqualFold(hex.EncodeToString(digest[:]), item.ContentSHA256) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.source_not_found")
+		return
+	}
+	w.Header().Set("Content-Type", mediaType)
+	w.Header().Set("Content-Disposition", `inline; filename="`+safeInlineFilename(item.Title)+`"`)
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(payload)
+}
+
+func safeInlineFilename(title string) string {
+	title = strings.TrimSpace(strings.ReplaceAll(title, "\\", "/"))
+	if index := strings.LastIndex(title, "/"); index >= 0 {
+		title = title[index+1:]
+	}
+	title = strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f || character == '"' || character == '\\' {
+			return -1
+		}
+		return character
+	}, title)
+	if title == "" || title == "." || title == ".." {
+		return "source"
+	}
+	return title
 }
 
 func (s *Server) writeSourceViewerAsset(w http.ResponseWriter, r *http.Request, userID, sourceID string) {

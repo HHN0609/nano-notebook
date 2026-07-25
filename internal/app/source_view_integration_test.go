@@ -206,6 +206,154 @@ func TestImageViewerAssetStreamsOnlyAuthorizedReadyInlineContent(t *testing.T) {
 	}
 }
 
+func TestSourceListDeclaresServerOwnedOpenActions(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-open-actions@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-open-actions")
+	ownerID := sourceTestUserID(t, api, "source-open-actions@example.com")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_open_pdf", "srcjob_open_pdf", "1")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_open_docx", "srcjob_open_docx", "2")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_open_processing", "srcjob_open_processing", "3")
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set state='ready',title='paper.pdf',format='pdf',media_type='application/pdf' where id='src_open_pdf'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set state='ready',title='brief.docx',format='docx',media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document' where id='src_open_docx'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_sources(
+			id,notebook_id,input_kind,format,title,media_type,byte_size,content_sha256,original_object_key,
+			origin_url,final_url,origin_url_identity,final_url_identity,state
+		) values(
+			'src_open_web',$1,'url','html','Example guide','text/html',18,$2,'sources/src_open_web/original',
+			'https://example.com/start','https://example.com/final','https://example.com/start','https://example.com/final','ready'
+		)
+	`, notebookID, strings.Repeat("4", 64)); err != nil {
+		t.Fatal(err)
+	}
+
+	response := api.getWithCookie(t, "/api/v1/notebooks/"+notebookID+"/sources", owner)
+	if response.Code != http.StatusOK {
+		t.Fatalf("Source list status=%d body=%s", response.Code, response.Body.String())
+	}
+	type openAction struct {
+		Kind      string `json:"kind"`
+		Href      string `json:"href"`
+		MediaType string `json:"media_type"`
+	}
+	var body struct {
+		Sources []struct {
+			ID         string     `json:"id"`
+			OpenAction openAction `json:"open_action"`
+		} `json:"sources"`
+	}
+	decodeBody(t, response, &body)
+	actions := make(map[string]openAction, len(body.Sources))
+	for _, item := range body.Sources {
+		actions[item.ID] = item.OpenAction
+	}
+	want := map[string]openAction{
+		"src_open_pdf":        {Kind: "inline_original", Href: "/api/v1/sources/src_open_pdf/original-asset", MediaType: "application/pdf"},
+		"src_open_docx":       {Kind: "none"},
+		"src_open_processing": {Kind: "none"},
+		"src_open_web":        {Kind: "external", Href: "https://example.com/final"},
+	}
+	for sourceID, expected := range want {
+		if got := actions[sourceID]; got != expected {
+			t.Fatalf("Source %s open_action=%+v want=%+v body=%s", sourceID, got, expected, response.Body.String())
+		}
+	}
+	for _, forbidden := range []string{"content_sha256", "original_object_key", "sources/src_open_web/original"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("Source list exposed %q: %s", forbidden, response.Body.String())
+		}
+	}
+}
+
+func TestOriginalAssetServesOnlyAuthorizedReadyAllowlistedIntegrityVerifiedBytes(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-original@example.com")
+	intruder := api.register(t, "source-original-intruder@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-original")
+	ownerID := sourceTestUserID(t, api, "source-original@example.com")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_original_txt", "srcjob_original_txt", "5")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_original_docx", "srcjob_original_docx", "6")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_original_processing", "srcjob_original_processing", "7")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_original_corrupt", "srcjob_original_corrupt", "8")
+
+	payload := []byte("immutable original notes")
+	digest := fmt.Sprintf("%x", sha256.Sum256(payload))
+	docxPayload := []byte("immutable docx bytes")
+	docxDigest := fmt.Sprintf("%x", sha256.Sum256(docxPayload))
+	processingPayload := []byte("not ready")
+	processingDigest := fmt.Sprintf("%x", sha256.Sum256(processingPayload))
+	corruptPayload := []byte("different bytes")
+	objects := objectstore.NewMemoryStore()
+	for key, value := range map[string][]byte{
+		"sources/src_original_txt/original":        payload,
+		"sources/src_original_docx/original":       docxPayload,
+		"sources/src_original_processing/original": processingPayload,
+		"sources/src_original_corrupt/original":    corruptPayload,
+	} {
+		if err := objects.Put(context.Background(), key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set state='ready',title='notes.txt',format='txt',media_type='text/plain',
+			byte_size=$2,content_sha256=$3,original_object_key='sources/src_original_txt/original' where id=$1
+	`, "src_original_txt", len(payload), digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set state='ready',title='brief.docx',format='docx',media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+			byte_size=$2,content_sha256=$3,original_object_key='sources/src_original_docx/original' where id=$1
+	`, "src_original_docx", len(docxPayload), docxDigest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set title='pending.txt',format='txt',media_type='text/plain',
+			byte_size=$2,content_sha256=$3,original_object_key='sources/src_original_processing/original' where id=$1
+	`, "src_original_processing", len(processingPayload), processingDigest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set state='ready',title='corrupt.txt',format='txt',media_type='text/plain',
+			byte_size=$2,content_sha256=$3,original_object_key='sources/src_original_corrupt/original' where id=$1
+	`, "src_original_corrupt", len(corruptPayload), strings.Repeat("f", 64)); err != nil {
+		t.Fatal(err)
+	}
+	api.server = app.NewServer(app.Config{CookieSecure: false, SourceSnapshots: objects}, api.db)
+	api.handler = api.server.Handler()
+
+	response := api.getWithCookie(t, "/api/v1/sources/src_original_txt/original-asset", owner)
+	if response.Code != http.StatusOK || response.Body.String() != string(payload) ||
+		response.Header().Get("Content-Type") != "text/plain" ||
+		response.Header().Get("Content-Disposition") != `inline; filename="notes.txt"` ||
+		response.Header().Get("Cache-Control") != "private, no-store" ||
+		response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("original asset status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+	}
+	for name, test := range map[string]struct {
+		cookie   *http.Cookie
+		sourceID string
+	}{
+		"intruder":    {cookie: intruder, sourceID: "src_original_txt"},
+		"unsupported": {cookie: owner, sourceID: "src_original_docx"},
+		"not ready":   {cookie: owner, sourceID: "src_original_processing"},
+		"corrupt":     {cookie: owner, sourceID: "src_original_corrupt"},
+	} {
+		denied := api.getWithCookie(t, "/api/v1/sources/"+test.sourceID+"/original-asset", test.cookie)
+		if denied.Code != http.StatusNotFound || strings.Contains(denied.Body.String(), "original_object_key") {
+			t.Fatalf("%s original asset status=%d body=%s", name, denied.Code, denied.Body.String())
+		}
+	}
+}
+
 func getSourceView(t *testing.T, api *testAPI, cookie *http.Cookie, sourceID string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/sources/"+sourceID, nil)
