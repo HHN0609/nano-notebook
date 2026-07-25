@@ -548,7 +548,9 @@ test("opens the exact delegated Research Session in left-side Discovery while it
     const method = init?.method ?? "GET";
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic", role: "owner" } });
-    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
+      { id: "src_existing", title: "Existing source.pdf", format: "pdf", state: "ready", failure_reason: null }
+    ] });
     if (url.endsWith("/api/v1/notebooks/nb_test/source-discovery-sessions/latest")) return new Response(null, { status: 204 });
     if (url.endsWith("/api/v1/source-discovery-sessions/dss_research")) return json({ session: {
       id: "dss_research", notebook_id: "nb_test", query: "Go learning material", status: "searching", candidates: []
@@ -581,6 +583,9 @@ test("opens the exact delegated Research Session in left-side Discovery while it
   expect(await within(sources).findByText("Source discovery")).toBeInTheDocument();
   expect(within(sources).getByDisplayValue("Go learning material")).toBeInTheDocument();
   expect(within(sources).getByRole("status")).toHaveTextContent("Searching…");
+  expect(within(sources).getByText("Existing source.pdf")).toBeVisible();
+  expect(within(sources).getByRole("checkbox", { name: "Use Existing source.pdf" })).toBeVisible();
+  expect(sources.querySelector(".source-panel-existing-peek")).toBeInTheDocument();
   expect(screen.queryByRole("dialog", { name: "Add sources" })).not.toBeInTheDocument();
   expect(document.querySelector(".workspace-panels")).toHaveClass("workspace-panels--source-discovery");
 });

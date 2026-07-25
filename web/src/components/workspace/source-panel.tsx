@@ -178,6 +178,39 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
   }
 
   const statusLabels = { ready: copy.readyLabel, processing: copy.processingLabel, failed: copy.sourceFailedLabel };
+  const sourceCollection = (
+    <>
+      {controller.error ? <p className="source-panel-error" role="alert">{controller.error}</p> : null}
+      {!controller.isLoading && controller.sources.length === 0 ? (
+        <div className="panel-empty-state">
+          <MaterialSymbol name="draft" size={28} />
+          <strong>{copy.emptyTitle}</strong>
+          <p>{copy.emptyBody}</p>
+        </div>
+      ) : (
+        <div className="source-list">
+          {controller.sources.map((source) => (
+            <article className="source-list-item" key={source.id}>
+              {source.state === "ready" ? (
+                <input
+                  type="checkbox"
+                  aria-label={`${copy.useSourceLabel} ${source.title}`}
+                  checked={controller.selectedSourceIDs.includes(source.id)}
+                  onChange={() => controller.toggle(source.id)}
+                />
+              ) : <MaterialSymbol name={source.state === "failed" ? "error" : "hourglass_top"} size={18} />}
+              <button className="source-list-title" type="button" disabled={source.state !== "ready"} onClick={() => setViewSourceID(source.id)}>{source.title}</button>
+              <span className={`source-state source-state--${source.state}`}>{statusLabels[source.state]}</span>
+              {canMaintain && source.state === "failed" ? <IconButton icon="refresh" label={`${copy.retryLabel} ${source.title}`} onClick={() => void sourceAction(source.id, "retry")} /> : null}
+              {canMaintain ? <IconButton icon="edit" label={`${copy.renameLabel} ${source.title}`} onClick={() => { setEditingSource(source); setEditTitle(source.title); }} /> : null}
+              {canMaintain ? <IconButton icon="delete" label={`${copy.deleteLabel} ${source.title}`} onClick={() => setRemovingSource(source)} /> : null}
+              {source.state === "failed" && source.failure_reason ? <p className="source-failure-reason">{copy.failureReasonLabels[source.failure_reason]}</p> : null}
+            </article>
+          ))}
+        </div>
+      )}
+    </>
+  );
 
   return (
     <div className="workspace-panel-content source-panel-content">
@@ -215,35 +248,12 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
         />
         {!discoveryOpen ? <IconButton className="source-add-action" icon="add" label={copy.addSourcesLabel} onClick={() => setAddOpen(true)} /> : null}
       </div> : null}
-      {!discoveryOpen && controller.error ? <p className="source-panel-error" role="alert">{controller.error}</p> : null}
-      {!discoveryOpen && !controller.isLoading && controller.sources.length === 0 ? (
-        <div className="panel-empty-state">
-          <MaterialSymbol name="draft" size={28} />
-          <strong>{copy.emptyTitle}</strong>
-          <p>{copy.emptyBody}</p>
-        </div>
-      ) : !discoveryOpen ? (
-        <div className="source-list">
-          {controller.sources.map((source) => (
-            <article className="source-list-item" key={source.id}>
-              {source.state === "ready" ? (
-                <input
-                  type="checkbox"
-                  aria-label={`${copy.useSourceLabel} ${source.title}`}
-                  checked={controller.selectedSourceIDs.includes(source.id)}
-                  onChange={() => controller.toggle(source.id)}
-                />
-              ) : <MaterialSymbol name={source.state === "failed" ? "error" : "hourglass_top"} size={18} />}
-              <button className="source-list-title" type="button" disabled={source.state !== "ready"} onClick={() => setViewSourceID(source.id)}>{source.title}</button>
-              <span className={`source-state source-state--${source.state}`}>{statusLabels[source.state]}</span>
-              {canMaintain && source.state === "failed" ? <IconButton icon="refresh" label={`${copy.retryLabel} ${source.title}`} onClick={() => void sourceAction(source.id, "retry")} /> : null}
-              {canMaintain ? <IconButton icon="edit" label={`${copy.renameLabel} ${source.title}`} onClick={() => { setEditingSource(source); setEditTitle(source.title); }} /> : null}
-              {canMaintain ? <IconButton icon="delete" label={`${copy.deleteLabel} ${source.title}`} onClick={() => setRemovingSource(source)} /> : null}
-              {source.state === "failed" && source.failure_reason ? <p className="source-failure-reason">{copy.failureReasonLabels[source.failure_reason]}</p> : null}
-            </article>
-          ))}
-        </div>
-      ) : null}
+      {discoveryOpen ? (
+        <section className="source-panel-existing-peek" aria-label={copy.title}>
+          <h3>{copy.title}</h3>
+          {sourceCollection}
+        </section>
+      ) : sourceCollection}
 
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
         <DialogContent className="source-dialog" closeLabel={copy.closeLabel}>
