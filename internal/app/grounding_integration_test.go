@@ -100,15 +100,16 @@ func TestGroundingRequiresSearchAttemptForSelectedSources(t *testing.T) {
 	}
 }
 
-func TestGroundingAcceptsUnmarkedPlainTextAfterEvidence(t *testing.T) {
+func TestGroundingAddsRetrievedSourceReferencesWhenTheModelOmitsEveryMarker(t *testing.T) {
 	api, attempt, _, _ := groundingFixture(t, "unmarked-after-evidence@example.com", "src_unmarked", "evr_unmarked")
 	service := agent.NewGroundingService(api.db.Pool())
 	prepared, err := service.Prepare(
 		context.Background(), attempt,
-		checkpointedEvidencePrefix("src_unmarked", "evr_unmarked", "unit_ground", 0, 27, false, true),
+		checkpointedDegradedEvidencePrefix("src_unmarked", "evr_unmarked", "unit_ground", 0, 27),
 		models.FinalDraft{Text: "Ordinary conversational answer."},
 	)
-	if err != nil || prepared.Text != "Ordinary conversational answer." {
+	want := "Ordinary conversational answer.\n\nSources: [source:src_unmarked]"
+	if err != nil || prepared.Text != want {
 		t.Fatalf("prepared=%+v err=%v", prepared, err)
 	}
 	var outcome string
@@ -118,8 +119,17 @@ func TestGroundingAcceptsUnmarkedPlainTextAfterEvidence(t *testing.T) {
 	`, attempt.RunID).Scan(&outcome, &performed, &degraded); err != nil {
 		t.Fatal(err)
 	}
-	if outcome != "source_free" || !performed || !degraded {
+	if outcome != "source_cited" || !performed || !degraded {
 		t.Fatalf("plan=%s performed=%t degraded=%t", outcome, performed, degraded)
+	}
+	var sourceID string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select source_id from agent_draft_source_references where run_id=$1 and reference_ordinal=0
+	`, attempt.RunID).Scan(&sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if sourceID != "src_unmarked" {
+		t.Fatalf("source=%s", sourceID)
 	}
 }
 
@@ -471,6 +481,20 @@ func checkpointedEvidencePrefix(sourceID, revisionID, unitID string, start, end 
 			"complete_empty": completeEmpty, "degraded": degraded, "degradations": []string{"reranker_unavailable"}, "evidence": []any{},
 		})
 	}
+	result := agent.ActionResult{Status: agent.ActionSucceeded, Output: output}
+	return agent.CheckpointPrefix{Proposals: []agent.AcceptedProposal{{DecisionNo: 1, Actions: []agent.AcceptedAction{{
+		ActionID: "decision:1/action:0", Index: 0, Name: "search_evidence", Result: &result,
+	}}}}, AcceptedDecisions: 1, AcceptedActions: 1}
+}
+
+func checkpointedDegradedEvidencePrefix(sourceID, revisionID, unitID string, start, end int) agent.CheckpointPrefix {
+	output, _ := json.Marshal(map[string]any{
+		"complete_empty": false, "degraded": true, "degradations": []string{"reranker_unavailable"},
+		"evidence": []any{map[string]any{
+			"source_id": sourceID, "evidence_revision_id": revisionID, "source_title": "Fixture", "preview": "The launch date is 20 July.",
+			"evidence_ranges": []any{map[string]any{"unit_id": unitID, "start_rune": start, "end_rune": end}},
+		}},
+	})
 	result := agent.ActionResult{Status: agent.ActionSucceeded, Output: output}
 	return agent.CheckpointPrefix{Proposals: []agent.AcceptedProposal{{DecisionNo: 1, Actions: []agent.AcceptedAction{{
 		ActionID: "decision:1/action:0", Index: 0, Name: "search_evidence", Result: &result,

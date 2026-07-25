@@ -145,6 +145,12 @@ func (s *GroundingService) prepare(ctx context.Context, attempt Attempt, prefix 
 	}
 	result.eligibleSourceCount = len(allowed)
 	normalizedText, references, discarded := normalizeSourceMarkers(draft.Text, allowed)
+	if len(references) == 0 && research.evidenceSeen {
+		normalizedText = appendRetrievedSourceMarkers(normalizedText, research.ranges)
+		var fallbackDiscarded int
+		normalizedText, references, fallbackDiscarded = normalizeSourceMarkers(normalizedText, allowed)
+		discarded += fallbackDiscarded
+	}
 	result.validReferenceCount = len(references)
 	result.discardedMarkerCount = discarded
 	draft.Text = normalizedText
@@ -161,6 +167,27 @@ func (s *GroundingService) prepare(ctx context.Context, attempt Attempt, prefix 
 	result.draft = draft
 	result.outcome = outcome
 	return result, nil
+}
+
+func appendRetrievedSourceMarkers(text string, ranges []researchRange) string {
+	var markers strings.Builder
+	seen := make(map[string]struct{})
+	for _, item := range ranges {
+		if _, duplicate := seen[item.SourceID]; duplicate {
+			continue
+		}
+		seen[item.SourceID] = struct{}{}
+		if markers.Len() == 0 {
+			markers.WriteString("\n\nSources:")
+		}
+		markers.WriteString(" [source:")
+		markers.WriteString(item.SourceID)
+		markers.WriteByte(']')
+		if len(seen) >= maxSourceMarkerOccurrences {
+			break
+		}
+	}
+	return strings.TrimSpace(text) + markers.String()
 }
 
 func parseResearchState(prefix CheckpointPrefix) (researchState, error) {
