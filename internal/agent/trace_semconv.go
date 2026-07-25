@@ -11,6 +11,8 @@ const TraceSemanticConventionVersion = 1
 const (
 	ModelPhaseAnswerComposition      = "answer_composition"
 	ModelPhaseQueryContextualization = "query_contextualization"
+	ModelPhaseLeaderRouting          = "leader_routing"
+	ModelPhaseResearchQueryExpansion = "research_query_expansion"
 )
 
 const (
@@ -35,6 +37,14 @@ func TraceModelStartIdentity(runID string, attemptNo, decisionNo int) string {
 
 func TraceQueryContextModelStartIdentity(runID string, attemptNo, decisionNo int) string {
 	return fmt.Sprintf("run/%s/attempt/%d/query-context/model/%d/start", runID, attemptNo, decisionNo)
+}
+
+func TraceLeaderRouteModelStartIdentity(runID string, attemptNo int) string {
+	return fmt.Sprintf("run/%s/attempt/%d/leader-route/model/start", runID, attemptNo)
+}
+
+func TraceResearchPlanModelStartIdentity(runID string, attemptNo int) string {
+	return fmt.Sprintf("run/%s/attempt/%d/research-plan/model/start", runID, attemptNo)
 }
 
 func TraceQueryContextStartIdentity(runID string, attemptNo int) string {

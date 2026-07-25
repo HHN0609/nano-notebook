@@ -91,7 +91,20 @@ func (e *LeaderExecutor) execute(ctx context.Context, attempt Attempt) error {
 		return ErrInvalidLeaderRoute
 	}
 	if run.ExistingRoute == nil {
-		route, err := e.router.DecideRoute(ctx, LeaderRouteRequest{Model: run.Model, UserMessage: run.Message})
+		request := LeaderRouteRequest{Model: run.Model, UserMessage: run.Message}
+		var route LeaderRoute
+		if traced, ok := e.router.(TracedLeaderRouter); ok {
+			traceContext, tracer, traceErr := e.modelTraceContext(ctx, attempt)
+			if traceErr != nil {
+				return traceErr
+			}
+			route, err = traced.DecideRouteTraced(traceContext, tracer, request, ModelTraceOptions{
+				StartIdentity: TraceLeaderRouteModelStartIdentity(attempt.RunID, attempt.AttemptNo),
+				Phase:         ModelPhaseLeaderRouting,
+			})
+		} else {
+			route, err = e.router.DecideRoute(ctx, request)
+		}
 		if err != nil {
 			return err
 		}
@@ -249,7 +262,21 @@ func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run lead
 }
 
 func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, run leaderRunContext) error {
-	queries, err := e.planner.ExpandQueries(ctx, ResearchPlanRequest{Model: run.Model, UserMessage: run.Message})
+	request := ResearchPlanRequest{Model: run.Model, UserMessage: run.Message}
+	var queries []string
+	var err error
+	if traced, ok := e.planner.(TracedResearchPlanner); ok {
+		traceContext, tracer, traceErr := e.modelTraceContext(ctx, attempt)
+		if traceErr != nil {
+			return traceErr
+		}
+		queries, err = traced.ExpandQueriesTraced(traceContext, tracer, request, ModelTraceOptions{
+			StartIdentity: TraceResearchPlanModelStartIdentity(attempt.RunID, attempt.AttemptNo),
+			Phase:         ModelPhaseResearchQueryExpansion,
+		})
+	} else {
+		queries, err = e.planner.ExpandQueries(ctx, request)
+	}
 	if err != nil {
 		return err
 	}
@@ -553,6 +580,32 @@ func (e *LeaderExecutor) workerTx(ctx context.Context) (pgx.Tx, error) {
 		return nil, err
 	}
 	return tx, nil
+}
+
+func (e *LeaderExecutor) modelTraceContext(ctx context.Context, attempt Attempt) (context.Context, *agentobs.Tracer, error) {
+	tx, err := e.workerTx(ctx)
+	if err != nil {
+		return ctx, nil, err
+	}
+	defer tx.Rollback(ctx)
+	recorder, err := NewRunTraceRecorder(ctx, tx, attempt.RunID)
+	if err != nil {
+		return ctx, nil, err
+	}
+	attemptSpan, err := recorder.SpanContextByIdentity(ctx, TraceAttemptStartIdentity(attempt.RunID, attempt.AttemptNo))
+	if err != nil {
+		return ctx, nil, err
+	}
+	tracer, err := agentobs.NewTracer(agentobs.TracerConfig{
+		Recorder: recorder, SemanticConventionVersion: TraceSemanticConventionVersion,
+	})
+	if err != nil {
+		return ctx, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ctx, nil, err
+	}
+	return agentobs.ContextWithSpanContext(ctx, attemptSpan), tracer, nil
 }
 
 func boundQueries(input []string) []string {

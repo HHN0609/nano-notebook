@@ -7,7 +7,10 @@ import (
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 )
 
@@ -37,6 +40,27 @@ type recordingResearchProvider struct {
 
 type callbackResearchProvider struct {
 	search func(context.Context, websearch.Request) ([]websearch.Candidate, error)
+}
+
+type tracedResearchModel struct{ calls int }
+
+func (m *tracedResearchModel) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
+	m.calls++
+	text := string(agent.LeaderDelegateResearch)
+	if m.calls == 2 {
+		text = "QUERY: traced research"
+	}
+	input, output, total := int64(7), int64(2), int64(9)
+	cost := 0.001
+	return models.ModelOutcome{
+		ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: text}},
+		Metadata: models.ModelCallMetadata{
+			RequestedModel: request.Model, SelectedProvider: "test-provider", SelectedModel: "trace-model",
+			ResultKind: models.ModelResultFinalDraft, FinishReason: "stop",
+			InputTokens: &input, OutputTokens: &output, TotalTokens: &total,
+			Cost: models.ModelCost{Known: true, Amount: &cost, Currency: "USD", Source: "test"},
+		},
+	}, nil
 }
 
 func (p callbackResearchProvider) Search(ctx context.Context, request websearch.Request) ([]websearch.Candidate, error) {
@@ -170,6 +194,61 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	projection := api.getWithCookie(t, "/api/v1/chats/"+chatBody.Chat.ID, owner)
 	if projection.Code != http.StatusOK || !strings.Contains(projection.Body.String(), sessionID) || strings.Contains(projection.Body.String(), childRunID) {
 		t.Fatalf("member projection status=%d body=%s", projection.Code, projection.Body.String())
+	}
+}
+
+func TestLeaderAndResearchModelUsageAppearsInTheirRunTraces(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "leader-research-trace@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "leader-research-trace")
+	chatResponse := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks/"+notebookID+"/chats", map[string]any{}, owner, csrf, csrf.Value, "leader-research-trace-chat")
+	var chatBody struct {
+		Chat struct {
+			ID string `json:"id"`
+		} `json:"chat"`
+	}
+	decodeBody(t, chatResponse, &chatBody)
+	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatBody.Chat.ID+"/messages", map[string]any{
+		"id": "0190cdd2-5f2d-7ad8-b3f5-1b588788c0c8", "content": "帮我搜索可观测性资料", "time_zone": "Asia/Shanghai",
+	}, owner, csrf, csrf.Value, "")
+	var admission struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, admitted, &admission)
+
+	sink := &capturingDirectTraceSink{}
+	queue := jobs.NewQueueWithTraceSink(api.db.Pool(), sink)
+	model := &tracedResearchModel{}
+	executor := agent.NewLeaderExecutor(
+		api.db.Pool(), &recordingNormalExecutor{}, agent.NewModelLeaderRouter(model),
+		agent.NewModelResearchPlanner(model), &recordingResearchProvider{}, agent.WithLeaderTraceSink(sink),
+	)
+	parent, ok, err := queue.ClaimNext(context.Background())
+	if err != nil || !ok || parent.RunID != admission.RunID {
+		t.Fatalf("parent claim=%+v ok=%v err=%v", parent, ok, err)
+	}
+	if err := executor.Execute(context.Background(), agent.Attempt{JobID: parent.ID, RunID: parent.RunID, AttemptNo: parent.AttemptNo, LeaseToken: parent.LeaseToken}); err != nil {
+		t.Fatal(err)
+	}
+	child, ok, err := queue.ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("child claim=%+v ok=%v err=%v", child, ok, err)
+	}
+	if err := executor.Execute(context.Background(), agent.Attempt{JobID: child.ID, RunID: child.RunID, AttemptNo: child.AttemptNo, LeaseToken: child.LeaseToken}); err != nil {
+		t.Fatal(err)
+	}
+
+	modelCalls := map[string]agentobs.Record{}
+	for _, envelope := range sink.envelopes {
+		if envelope.Record.Kind == agentobs.RecordSpanEnded && envelope.Record.Name == semconv.ModelCall {
+			modelCalls[envelope.Trace.RunID] = envelope.Record
+		}
+	}
+	for _, runID := range []string{parent.RunID, child.RunID} {
+		record, found := modelCalls[runID]
+		if !found || traceAttribute(record, semconv.ModelNameKey) != "trace-model" || traceAttribute(record, semconv.TokenTotalKey) != "9" {
+			t.Fatalf("Run %s model call=%+v all envelopes=%+v", runID, record, sink.envelopes)
+		}
 	}
 }
 
