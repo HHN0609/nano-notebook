@@ -274,6 +274,7 @@ func main() {
 	leaderExecutor := agent.NewLeaderExecutor(
 		db.Pool(), controller, agent.NewModelLeaderRouter(modelClient),
 		agent.NewModelResearchPlanner(modelClient), searchProvider, agent.WithLeaderTraceSink(traceExporter),
+		agent.WithLeaderReplayStager(replayStager),
 	)
 	mailSender := mailoutbox.NewSender(
 		mailoutbox.NewQueue(db.Pool(), config.MailLeaseDuration),

@@ -1,6 +1,7 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"strings"
@@ -11,6 +12,8 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 )
 
@@ -197,7 +200,7 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	}
 }
 
-func TestLeaderAndResearchModelUsageAppearsInTheirRunTraces(t *testing.T) {
+func TestLeaderAndResearchModelUsageAndReplayAppearInTheirRunTraces(t *testing.T) {
 	api := newTestAPI(t)
 	owner, csrf := api.registerWithCSRF(t, "leader-research-trace@example.com")
 	notebookID := createSourceTestNotebook(t, api, owner, "leader-research-trace")
@@ -217,11 +220,24 @@ func TestLeaderAndResearchModelUsageAppearsInTheirRunTraces(t *testing.T) {
 	decodeBody(t, admitted, &admission)
 
 	sink := &capturingDirectTraceSink{}
+	keyProvider, err := replay.NewDevelopmentKeyProvider("leader-replay-test-key", bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := replay.NewSealer(keyProvider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayStager, err := replay.NewObjectStager(sealer, objectstore.NewMemoryStore(), replay.StagerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	queue := jobs.NewQueueWithTraceSink(api.db.Pool(), sink)
 	model := &tracedResearchModel{}
 	executor := agent.NewLeaderExecutor(
 		api.db.Pool(), &recordingNormalExecutor{}, agent.NewModelLeaderRouter(model),
 		agent.NewModelResearchPlanner(model), &recordingResearchProvider{}, agent.WithLeaderTraceSink(sink),
+		agent.WithLeaderReplayStager(replayStager),
 	)
 	parent, ok, err := queue.ClaimNext(context.Background())
 	if err != nil || !ok || parent.RunID != admission.RunID {
@@ -248,6 +264,17 @@ func TestLeaderAndResearchModelUsageAppearsInTheirRunTraces(t *testing.T) {
 		record, found := modelCalls[runID]
 		if !found || traceAttribute(record, semconv.ModelNameKey) != "trace-model" || traceAttribute(record, semconv.TokenTotalKey) != "9" {
 			t.Fatalf("Run %s model call=%+v all envelopes=%+v", runID, record, sink.envelopes)
+		}
+		var replayClasses []replay.Class
+		for _, envelope := range sink.envelopes {
+			if envelope.Trace.RunID == runID && envelope.Record.Name == semconv.ModelCall {
+				for _, attachment := range envelope.Attachments {
+					replayClasses = append(replayClasses, attachment.Class)
+				}
+			}
+		}
+		if len(replayClasses) != 2 || replayClasses[0] != replay.ClassModelRequest || replayClasses[1] != replay.ClassModelDecision {
+			t.Fatalf("Run %s Replay classes=%v, want model request and decision", runID, replayClasses)
 		}
 	}
 }

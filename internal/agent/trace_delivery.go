@@ -33,6 +33,7 @@ type TracePublishResult struct {
 type TraceTransaction struct {
 	descriptor collector.TraceDescriptor
 	sink       TraceSink
+	replay     ReplayStager
 
 	mu        sync.Mutex
 	records   []agentobs.Record
@@ -45,12 +46,19 @@ type traceTransactionContextKey struct{}
 type traceScopeContextKey struct{}
 
 type TraceScope struct {
-	sink TraceSink
+	sink   TraceSink
+	replay ReplayStager
 
 	mu           sync.Mutex
 	transactions map[agentobs.TraceID]*TraceTransaction
 	order        []agentobs.TraceID
 	closed       bool
+}
+
+type TraceScopeOption func(*TraceScope)
+
+func WithTraceScopeReplayStager(stager ReplayStager) TraceScopeOption {
+	return func(scope *TraceScope) { scope.replay = stager }
 }
 
 func DeterministicSpanID(traceID agentobs.TraceID, semanticIdentity string) (agentobs.SpanID, error) {
@@ -73,11 +81,15 @@ func NewTraceTransaction(descriptor collector.TraceDescriptor, sink TraceSink) (
 	return &TraceTransaction{descriptor: descriptor, sink: sink}, nil
 }
 
-func NewTraceScope(sink TraceSink) (*TraceScope, error) {
+func NewTraceScope(sink TraceSink, options ...TraceScopeOption) (*TraceScope, error) {
 	if sink == nil {
 		return nil, errors.New("Agent Trace scope requires a Sink")
 	}
-	return &TraceScope{sink: sink, transactions: make(map[agentobs.TraceID]*TraceTransaction)}, nil
+	scope := &TraceScope{sink: sink, transactions: make(map[agentobs.TraceID]*TraceTransaction)}
+	for _, option := range options {
+		option(scope)
+	}
+	return scope, nil
 }
 
 func ContextWithTraceScope(ctx context.Context, scope *TraceScope) context.Context {
@@ -117,6 +129,7 @@ func (s *TraceScope) Transaction(descriptor collector.TraceDescriptor) (*TraceTr
 	if err != nil {
 		return nil, err
 	}
+	transaction.replay = s.replay
 	s.transactions[descriptor.TraceID] = transaction
 	s.order = append(s.order, descriptor.TraceID)
 	return transaction, nil
@@ -249,7 +262,10 @@ func (t *TraceTransaction) PublishAfterCommit(ctx context.Context) TracePublishR
 
 	result := TracePublishResult{Attempted: len(records)}
 	for _, record := range records {
-		err := t.sink.Offer(ctx, agentbatch.Envelope{Trace: t.descriptor, Record: record})
+		attachments, err := directReplayAttachments(t.replay, record)
+		if err == nil {
+			err = t.sink.Offer(ctx, agentbatch.Envelope{Trace: t.descriptor, Record: record, Attachments: attachments})
+		}
 		if err != nil {
 			result.Failed++
 			result.Errors = append(result.Errors, err)

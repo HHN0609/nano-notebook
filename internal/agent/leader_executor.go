@@ -26,18 +26,23 @@ type AttemptExecutor interface {
 // Leader Runs either continue through the normal controller or suspend while a
 // durable, non-member-visible Research child gathers Source candidates.
 type LeaderExecutor struct {
-	pool      *pgxpool.Pool
-	normal    AttemptExecutor
-	router    LeaderRouter
-	planner   ResearchPlanner
-	provider  websearch.Provider
-	traceSink TraceSink
+	pool         *pgxpool.Pool
+	normal       AttemptExecutor
+	router       LeaderRouter
+	planner      ResearchPlanner
+	provider     websearch.Provider
+	traceSink    TraceSink
+	replayStager ReplayStager
 }
 
 type LeaderExecutorOption func(*LeaderExecutor)
 
 func WithLeaderTraceSink(sink TraceSink) LeaderExecutorOption {
 	return func(executor *LeaderExecutor) { executor.traceSink = sink }
+}
+
+func WithLeaderReplayStager(stager ReplayStager) LeaderExecutorOption {
+	return func(executor *LeaderExecutor) { executor.replayStager = stager }
 }
 
 func NewLeaderExecutor(pool *pgxpool.Pool, normal AttemptExecutor, router LeaderRouter, planner ResearchPlanner, provider websearch.Provider, options ...LeaderExecutorOption) *LeaderExecutor {
@@ -66,7 +71,7 @@ func (e *LeaderExecutor) Execute(ctx context.Context, attempt Attempt) error {
 	if e == nil || e.pool == nil || e.normal == nil || e.router == nil || e.planner == nil || e.provider == nil {
 		return errors.New("Leader Executor dependencies are incomplete")
 	}
-	scope, err := NewTraceScope(e.traceSink)
+	scope, err := NewTraceScope(e.traceSink, WithTraceScopeReplayStager(e.replayStager))
 	if err != nil {
 		return err
 	}
@@ -98,9 +103,11 @@ func (e *LeaderExecutor) execute(ctx context.Context, attempt Attempt) error {
 			if traceErr != nil {
 				return traceErr
 			}
+			modelIdentity := TraceLeaderRouteModelStartIdentity(attempt.RunID, attempt.AttemptNo)
 			route, err = traced.DecideRouteTraced(traceContext, tracer, request, ModelTraceOptions{
-				StartIdentity: TraceLeaderRouteModelStartIdentity(attempt.RunID, attempt.AttemptNo),
-				Phase:         ModelPhaseLeaderRouting,
+				StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
+				DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: e.replayStager,
+				Phase: ModelPhaseLeaderRouting,
 			})
 		} else {
 			route, err = e.router.DecideRoute(ctx, request)
@@ -270,9 +277,11 @@ func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, r
 		if traceErr != nil {
 			return traceErr
 		}
+		modelIdentity := TraceResearchPlanModelStartIdentity(attempt.RunID, attempt.AttemptNo)
 		queries, err = traced.ExpandQueriesTraced(traceContext, tracer, request, ModelTraceOptions{
-			StartIdentity: TraceResearchPlanModelStartIdentity(attempt.RunID, attempt.AttemptNo),
-			Phase:         ModelPhaseResearchQueryExpansion,
+			StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
+			DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: e.replayStager,
+			Phase: ModelPhaseResearchQueryExpansion,
 		})
 	} else {
 		queries, err = e.planner.ExpandQueries(ctx, request)
