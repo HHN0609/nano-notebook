@@ -1562,6 +1562,8 @@ span.source-list-title {
   gap: 2px;
 }
 
+.source-panel-content--hidden { display: none; }
+
 .source-original-breadcrumb span:last-child {
   overflow: hidden;
   color: var(--secondary-foreground);

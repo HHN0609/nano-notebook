@@ -197,12 +197,9 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
     </>
   );
 
-  if (viewingSource) {
-    return <SourceOriginalViewer key={viewingSource.id} source={viewingSource} onBack={onCloseSource} copy={copy} />;
-  }
-
   return (
-    <div className="workspace-panel-content source-panel-content">
+    <>
+    <div className={`workspace-panel-content source-panel-content${viewingSource ? " source-panel-content--hidden" : ""}`} aria-hidden={viewingSource ? true : undefined}>
       <div className="workspace-panel-header">
         <h2>{discoveryOpen ? <span className="source-discovery-breadcrumb"><span>{copy.title}</span><MaterialSymbol name="chevron_right" size={18} /><span>{copy.discoveryTitle}</span></span> : copy.title}</h2>
         {discoveryOpen
@@ -288,6 +285,8 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
         </DialogContent>
       </Dialog>
     </div>
+    {viewingSource ? <SourceOriginalViewer key={viewingSource.id} source={viewingSource} onBack={onCloseSource} copy={copy} /> : null}
+    </>
   );
 }
 

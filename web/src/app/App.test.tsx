@@ -643,18 +643,22 @@ test("submits one durable Message and projects the final answer from Run SSE", a
 test("opens the exact delegated Research Session in left-side Discovery while it is searching", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   let admittedMessageID = "";
+  let discoverySessionReads = 0;
   fetchHandler = async (input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic", role: "owner" } });
     if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
-      { id: "src_existing", title: "Existing source.pdf", format: "pdf", state: "ready", failure_reason: null }
+      { id: "src_existing", notebook_id: "nb_test", title: "Existing source.pdf", format: "pdf", byte_size: 100, state: "ready", failure_reason: null, open_action: { kind: "inline_original", href: "/api/v1/sources/src_existing/original-asset", media_type: "application/pdf" } }
     ] });
     if (url.endsWith("/api/v1/notebooks/nb_test/source-discovery-sessions/latest")) return new Response(null, { status: 204 });
-    if (url.endsWith("/api/v1/source-discovery-sessions/dss_research")) return json({ session: {
-      id: "dss_research", notebook_id: "nb_test", query: "Go learning material", status: "searching", candidates: []
-    } });
+    if (url.endsWith("/api/v1/source-discovery-sessions/dss_research")) {
+      discoverySessionReads++;
+      return json({ session: {
+        id: "dss_research", notebook_id: "nb_test", query: "Go learning material", status: "searching", candidates: []
+      } });
+    }
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
     if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [] });
     if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
@@ -688,6 +692,13 @@ test("opens the exact delegated Research Session in left-side Discovery while it
   expect(sources.querySelector(".source-panel-existing-peek")).toBeInTheDocument();
   expect(screen.queryByRole("dialog", { name: "Add sources" })).not.toBeInTheDocument();
   expect(document.querySelector(".workspace-panels")).toHaveClass("workspace-panels--source-discovery");
+  const readsBeforeOpen = discoverySessionReads;
+  await user.click(within(sources).getByRole("button", { name: "Existing source.pdf" }));
+  expect(await within(sources).findByRole("region", { name: "Original source Existing source.pdf" })).toBeInTheDocument();
+  await user.click(within(sources).getByRole("button", { name: "Back to Sources" }));
+  expect(within(sources).getByDisplayValue("Go learning material")).toBeInTheDocument();
+  expect(within(sources).getByRole("status")).toHaveTextContent("Searching…");
+  expect(discoverySessionReads).toBe(readsBeforeOpen);
 });
 
 test("creates the first private Chat with one bootstrap idempotency key", async () => {
