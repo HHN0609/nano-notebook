@@ -10,6 +10,7 @@ import { acceptedSourceFormats, csrfToken, memberAPI, uploadSourceFile } from ".
 import type { MemberSource, SourcesController } from "./sources";
 import { SourceDiscovery } from "./source-discovery";
 import { SourceOpenTarget } from "./source-open-target";
+import { SourceSiteIcon } from "./source-site-icon";
 
 export type SourcePanelCopy = {
   title: string;
@@ -174,8 +175,9 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
         </div>
       ) : (
         <div className="source-list">
-          {controller.sources.map((source) => (
-            <article className="source-list-item" key={source.id}>
+          {controller.sources.map((source) => {
+            const webSourceHref = source.open_action?.kind === "external" ? source.open_action.href : undefined;
+            return <article className={`source-list-item${webSourceHref ? " source-list-item--web" : ""}`} key={source.id}>
               {source.state === "ready" ? (
                 <input
                   type="checkbox"
@@ -184,14 +186,15 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
                   onChange={() => controller.toggle(source.id)}
                 />
               ) : <MaterialSymbol name={source.state === "failed" ? "error" : "hourglass_top"} size={18} />}
+              {webSourceHref ? <SourceSiteIcon href={webSourceHref} /> : null}
               <SourceOpenTarget source={source.state === "ready" ? source : undefined} className="source-list-title" onInlineOriginal={onOpenSource}>{source.title}</SourceOpenTarget>
               <span className={`source-state source-state--${source.state}`}>{statusLabels[source.state]}</span>
               {canMaintain && source.state === "failed" ? <IconButton icon="refresh" label={`${copy.retryLabel} ${source.title}`} onClick={() => void sourceAction(source.id, "retry")} /> : null}
               {canMaintain ? <IconButton icon="edit" label={`${copy.renameLabel} ${source.title}`} onClick={() => { setEditingSource(source); setEditTitle(source.title); }} /> : null}
               {canMaintain ? <IconButton icon="delete" label={`${copy.deleteLabel} ${source.title}`} onClick={() => setRemovingSource(source)} /> : null}
               {source.state === "failed" && source.failure_reason ? <p className="source-failure-reason">{copy.failureReasonLabels[source.failure_reason]}</p> : null}
-            </article>
-          ))}
+            </article>;
+          })}
         </div>
       )}
     </>

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "./App";
@@ -405,6 +405,11 @@ test("uses external links and disables unsupported Source opening", async () => 
   expect(link).toHaveAttribute("href", "https://go.dev/doc/");
   expect(link).toHaveAttribute("target", "_blank");
   expect(link).toHaveAttribute("rel", "noreferrer noopener");
+	const webSourceRow = link.closest(".source-list-item");
+	const favicon = webSourceRow?.querySelector<HTMLImageElement>(".source-site-icon img");
+	expect(favicon).toHaveAttribute("src", "https://go.dev/favicon.ico");
+	fireEvent.error(favicon!);
+	expect(webSourceRow?.querySelector(".source-site-icon .material-symbol")).toHaveTextContent("language");
   const unsupported = within(sources).getByText("brief.docx");
   expect(unsupported.closest("a,button")).toBeNull();
 });

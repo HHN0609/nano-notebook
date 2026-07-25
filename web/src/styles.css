@@ -1525,6 +1525,10 @@ h2 {
   color: var(--muted-foreground);
 }
 
+.source-list-item--web {
+  grid-template-columns: 20px 28px minmax(0, 1fr) auto auto auto;
+}
+
 .source-list-item:hover {
   background: var(--control-background);
 }
@@ -1782,7 +1786,7 @@ span.source-list-title {
 
 .source-discovery-result:last-child { border-bottom: 0; }
 
-.source-discovery-site-icon {
+.source-site-icon {
   display: grid;
   width: 28px;
   height: 28px;
@@ -1793,7 +1797,7 @@ span.source-list-title {
   background: var(--muted);
 }
 
-.source-discovery-site-icon img { width: 20px; height: 20px; object-fit: contain; }
+.source-site-icon img { width: 20px; height: 20px; object-fit: contain; }
 
 .source-discovery-result-copy {
   display: grid;

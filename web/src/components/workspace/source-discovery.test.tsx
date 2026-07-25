@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import { SourceDiscovery } from "./source-discovery";
@@ -45,6 +45,10 @@ test("searches and renders selected candidates as safe external links with right
   expect(screen.getByRole("checkbox", { name: "Film production guide" })).toBeChecked();
   expect(screen.getByRole("checkbox", { name: "Select all" })).toBeChecked();
   expect(screen.getByText("Practical production guides.")).toBeVisible();
+	const icon = link.closest(".source-discovery-result")?.querySelector<HTMLImageElement>(".source-discovery-site-icon img");
+	expect(icon).toHaveAttribute("src", "https://example.com/favicon.ico");
+	fireEvent.error(icon!);
+	expect(link.closest(".source-discovery-result")?.querySelector(".material-symbol")).toHaveTextContent("language");
   await waitFor(() => expect(onExpandedChange).toHaveBeenCalledWith(true));
   expect(requests.some((request) => request.path === "/api/v1/notebooks/nb_1/source-discovery-sessions" && request.method === "POST")).toBe(true);
 });

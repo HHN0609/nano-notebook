@@ -1,9 +1,9 @@
 import { useEffect, useId, useMemo, useState } from "react";
-import { MaterialSymbol } from "../icons/material-symbol";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { csrfToken, memberAPI } from "./source-upload";
+import { SourceSiteIcon } from "./source-site-icon";
 
 type DiscoveryCandidate = {
   id: string;
@@ -204,9 +204,7 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
       </div>
       <div className="source-discovery-results">
         {visibleCandidates.map((candidate) => <article className="source-discovery-result" key={candidate.id}>
-          <span className="source-discovery-site-icon" aria-hidden="true">
-            {candidate.favicon_ref ? <img src={candidate.favicon_ref} alt="" /> : <MaterialSymbol name="language" size={18} />}
-          </span>
+          <SourceSiteIcon className="source-discovery-site-icon" href={candidate.canonical_url} preferredSrc={candidate.favicon_ref} />
           <div className="source-discovery-result-copy">
             <a href={candidate.canonical_url} target="_blank" rel="noreferrer noopener" aria-label={`${candidate.title} · ${copy.openResult}`}>{candidate.title} ↗</a>
             <span>{candidate.display_url}</span>
