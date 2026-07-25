@@ -22,6 +22,8 @@ type fetcherConfig struct {
 	MaxCompressedBytes int64
 	MaxExpandedBytes   int64
 	Timeout            time.Duration
+	DoHURL             string
+	DoHBootstrapAddr   string
 }
 
 func main() {
@@ -32,7 +34,18 @@ func main() {
 		slog.Error("Source Fetcher configuration invalid", "error", err)
 		os.Exit(1)
 	}
+	var resolver sourcefetcher.Resolver
+	if config.DoHURL != "" {
+		resolver, err = sourcefetcher.NewDoHResolver(sourcefetcher.DoHConfig{
+			Endpoint: config.DoHURL, BootstrapAddress: config.DoHBootstrapAddr,
+		})
+		if err != nil {
+			slog.Error("Source Fetcher DoH configuration invalid", "error", err)
+			os.Exit(1)
+		}
+	}
 	core := sourcefetcher.New(sourcefetcher.Config{
+		Resolver:     resolver,
 		MaxRedirects: config.MaxRedirects, MaxCompressedBytes: config.MaxCompressedBytes,
 		MaxExpandedBytes: config.MaxExpandedBytes, Timeout: config.Timeout,
 	})
@@ -77,6 +90,11 @@ func loadFetcherConfig() (fetcherConfig, error) {
 	config := fetcherConfig{
 		Addr: fetcherEnv("NANO_FETCHER_ADDR", "127.0.0.1:8083"), MaxRedirects: maxRedirects,
 		MaxCompressedBytes: maxCompressed, MaxExpandedBytes: maxExpanded, Timeout: timeout,
+		DoHURL:           strings.TrimSpace(os.Getenv("NANO_FETCHER_DOH_URL")),
+		DoHBootstrapAddr: strings.TrimSpace(os.Getenv("NANO_FETCHER_DOH_BOOTSTRAP_ADDR")),
+	}
+	if (config.DoHURL == "") != (config.DoHBootstrapAddr == "") {
+		return fetcherConfig{}, errors.New("Source Fetcher DoH URL and bootstrap address must be configured together")
 	}
 	if strings.TrimSpace(config.Addr) == "" || config.MaxRedirects < 1 || config.MaxRedirects > 10 ||
 		config.MaxCompressedBytes < 1 || config.MaxExpandedBytes < config.MaxCompressedBytes ||
