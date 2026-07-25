@@ -177,7 +177,7 @@ func TestDecisionContextReconstructsCompletedCheckpointBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Model != "aliyun/qwen-flash" || len(request.Messages) != 5 {
+	if request.Model != "aliyun/qwen-plus" || len(request.Messages) != 5 {
 		t.Fatalf("request model/messages = %q/%+v", request.Model, request.Messages)
 	}
 	if request.Messages[0].Role != models.RoleSystem || request.Messages[0].Content != "System prompt for checkpoint context." ||

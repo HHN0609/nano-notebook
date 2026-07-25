@@ -73,7 +73,7 @@ func TestWorkerClaimsBuildsContextAndPublishesOneAnswer(t *testing.T) {
 	if err := agent.NewController(runtime, model, registry).Execute(ctx, attemptFromClaim(claimed)); err != nil {
 		t.Fatal(err)
 	}
-	if modelRequest.Model != "aliyun/qwen-flash" || modelRequest.Stream || modelRequest.MaxCompletionTokens != 2048 {
+	if modelRequest.Model != "aliyun/qwen-plus" || modelRequest.Stream || modelRequest.MaxCompletionTokens != 2048 {
 		t.Fatalf("model request = %+v", modelRequest)
 	}
 	if len(modelRequest.Messages) != 2 || modelRequest.Messages[0].Role != "system" || modelRequest.Messages[1].Role != "user" || modelRequest.Messages[1].Content != "Why is a publication barrier useful?" {

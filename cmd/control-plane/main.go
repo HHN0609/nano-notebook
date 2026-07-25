@@ -181,7 +181,7 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 		ProducerID:            env("NANO_CONTROL_PLANE_PRODUCER_ID", "nano-control-plane"),
 		ReplayKeyID:           env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 		CookieSecure: os.Getenv("NANO_COOKIE_SECURE") == "true", Version: env("NANO_VERSION", "dev"),
-		DefaultModel: env("NANO_CHAT_MODEL", "aliyun/qwen-flash"),
+		DefaultModel: env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
 		SourceS3: objectstore.S3Config{
 			Endpoint:        env("NANO_SOURCE_S3_ENDPOINT", "127.0.0.1:59000"),
 			AccessKeyID:     env("NANO_SOURCE_S3_ACCESS_KEY_ID", "nano"),

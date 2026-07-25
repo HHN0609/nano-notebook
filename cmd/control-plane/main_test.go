@@ -36,3 +36,15 @@ func TestLoadControlPlaneConfigIncludesCollectorQueryAndReplayKey(t *testing.T) 
 		t.Fatalf("Fetcher URL = %q", config.FetcherURL)
 	}
 }
+
+func TestLoadControlPlaneConfigDefaultsToQwenPlus(t *testing.T) {
+	t.Setenv("NANO_CHAT_MODEL", "")
+
+	config, err := loadControlPlaneConfig()
+	if err != nil {
+		t.Fatalf("loadControlPlaneConfig: %v", err)
+	}
+	if config.DefaultModel != "aliyun/qwen-plus" {
+		t.Fatalf("Default model = %q, want aliyun/qwen-plus", config.DefaultModel)
+	}
+}

@@ -68,7 +68,7 @@ func NewServer(cfg Config, db *DB) *Server {
 		cfg.Version = "dev"
 	}
 	if cfg.DefaultModel == "" {
-		cfg.DefaultModel = "aliyun/qwen-flash"
+		cfg.DefaultModel = "aliyun/qwen-plus"
 	}
 	cfg.AgentRun = normalizedRunConfig(cfg.AgentRun)
 	s := &Server{cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(), runHub: newRunHub(), adminTraces: cfg.AdminTraces, replaySealer: cfg.ReplaySealer}

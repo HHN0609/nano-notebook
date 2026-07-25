@@ -7,6 +7,7 @@
           "name": "dashscope-local",
           "value": "env.DASHSCOPE_API_KEY",
           "models": [
+            "qwen-plus",
             "qwen-flash"
           ],
           "weight": 1
