@@ -3,7 +3,7 @@
 ## Document Status
 
 - **Sprint:** Sprint 8
-- **Status:** Interaction amendment approved; implementation pending
+- **Status:** Implemented and accepted
 - **Date:** 2026-07-24; amended 2026-07-25
 - **Theme:** Web Source Discovery, durable Research delegation, and imported-Source RAG
 - **Delivery boundary:** Sprint 8 first delivers manual Web Source discovery and import, then reuses the same capability through a durable Leader-to-Research child Run. A delegated turn produces private candidates, not a same-turn Web answer.
@@ -89,6 +89,7 @@ Sprint 8 is complete only when all of the following are true:
 28. The final grounded response publishes only valid Source markers and Citations through the current Publication Barrier.
 29. Deterministic tests require no real Brave credential; an opt-in smoke test uses `NANO_BRAVE_SEARCH_API_KEY` without logging or returning it.
 30. Sprint 1 through Sprint 7 authentication, Source, RAG, sharing, recovery, observability, and deletion behavior remains green.
+31. Leader routing and Research query expansion publish their actual requested/selected model and Provider-reported token usage to each Run Trace; Brave HTTP calls do not invent LLM usage.
 
 ## 5. Canonical Terms
 
@@ -357,6 +358,7 @@ Required metadata includes:
 - Candidate import outcomes;
 - Web cleaning quality outcome;
 - existing Source processing and RAG stage metadata;
+- requested and selected model, Provider, token usage, and Provider-reported cost for Leader routing and Research query expansion;
 - final publication or cancellation outcome.
 
 The credential, raw Brave envelope, unrestricted page body, and model chain of thought are forbidden from logs and standard Trace payloads.
@@ -415,7 +417,7 @@ No later step may compensate for an incomplete manual Source Discovery path.
 | Import | Partial success, idempotency, redirect deduplication, safe fetch tests |
 | Cleaning | Boilerplate, duplicate, login wall, tables, code, quality warning fixtures |
 | Selection | New Chat, later Source, origin Chat, explicit deselection tests |
-| Runtime | Route, child creation, waiting, resume, recovery, cancel tests |
+| Runtime | Route, child creation, waiting, resume, recovery, cancel, and parent/child model-usage Trace tests |
 | RAG | Ready-only pinning, scoped hybrid retrieval, authoritative reload, citation tests |
 | Security | Viewer denial, cross-Member isolation, URL substitution, credential-redaction tests |
 | Regression | `go test ./...`, Web unit tests, typecheck, lint, and Playwright journeys |
