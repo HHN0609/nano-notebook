@@ -1,7 +1,7 @@
 # Web Source Discovery And Research Delegation Design
 
-**Date:** 2026-07-24
-**Status:** Approved for implementation; written-spec review explicitly waived
+**Date:** 2026-07-24; left-panel interaction amended 2026-07-25
+**Status:** Approved; 2026-07-25 interaction amendment awaiting written-spec review
 **Scope:** Source Discovery, Web Search, durable Leader-to-Research delegation, Source import, Web normalization, persisted Chat selection, and reuse of the existing grounded RAG pipeline
 
 ## 1. Outcome
@@ -193,11 +193,12 @@ Expanded queries are developer Trace data and are not Member-facing content.
 When the Leader accepts a delegation:
 
 1. it checkpoints the accepted delegation;
-2. it creates the child Run and Job atomically;
-3. its own Job enters an internal `waiting` state without a Worker Lease;
-4. the user-facing Leader Run remains active;
-5. child completion or failure atomically requeues the parent Job;
-6. the resumed Leader consumes the durable child outcome and publishes one short Assistant Message.
+2. it creates the child Run, child Job, and empty private Discovery Session atomically;
+3. it links the opaque Session identity into the Member-facing Leader Run projection;
+4. its own Job enters an internal `waiting` state without a Worker Lease;
+5. the user-facing Leader Run remains active, allowing the left panel to show the Session's searching state;
+6. child completion or failure atomically requeues the parent Job;
+7. the resumed Leader consumes the durable child outcome and publishes one short Assistant Message.
 
 Child Runs are excluded from Member-facing active-Run lists and the one-active-interaction limit. They remain visible in restricted developer Trace tooling.
 
@@ -270,7 +271,7 @@ The Agent schema gains enough structure to identify and link roles:
 
 - `agent_role = leader | research`;
 - `parent_run_id` for Research children;
-- `discovery_session_id` for the child outcome;
+- `discovery_session_id` for the exact private Session, exposed on the Leader projection from delegation onward;
 - a durable parent-child delegation record or equivalent uniqueness constraint.
 
 Only the Leader owns `output_message_id`.
@@ -368,7 +369,11 @@ The child does not fetch candidate pages, import Sources, or compose a research 
 
 ## 9. Source Discovery UI
 
-The existing Add Sources dialog gains a Web Search entry. Search results expand the dialog modestly in width and height; the experience is not full screen.
+The Source panel is the permanent home of Web Search and Discovery, matching the NotebookLM interaction model. Its primary control is a persistent Web Search field rather than a large Add Sources button. A compact adjacent add control opens the existing file-upload and direct-URL dialog; Web Search does not live in that dialog.
+
+Submitting a manual search switches the left Source panel into a dedicated `Sources > Source Discovery` view. On desktop, the left panel widens modestly from its normal width to approximately 560 px; it never becomes a centered modal or a full-screen state. Closing Discovery restores the normal panel width and Source list. Compact layouts keep the existing single-panel navigation and use the available viewport width without horizontal clipping.
+
+As soon as an authorized Chat turn delegates to Research, the same left-side Discovery view opens in a searching state. The child Run never fabricates links in Chat. When the child commits its private Session, the existing view transitions to results for that exact Session. The Leader may publish only its generic completion message. Search completion does not import candidates automatically: the Member reviews the list and explicitly invokes Import Selected.
 
 Expanded content contains:
 
@@ -399,7 +404,7 @@ Per-item UI states are:
 - import failed with retry;
 - Source processing failed, linked to the existing Source failure experience.
 
-When a Research child completes, the active UI opens the corresponding private Session automatically. Reload restores the latest private Session without repeatedly fabricating a new search.
+When a Research child starts, the active UI opens its corresponding private Session automatically in the left panel. Completion updates that exact view to results. Reload restores the latest private Session without repeatedly fabricating a new search.
 
 ## 10. Candidate Import And Deduplication
 
@@ -709,14 +714,15 @@ Member-facing APIs do not expose expanded queries, provider diagnostics, ranking
 
 ### 20.5 UI
 
-- modest expanded dialog at supported desktop and compact viewports;
+- persistent Web Search field and compact file/URL add control in the left Source panel;
+- dedicated left-side Discovery mode, modest desktop widening, and compact viewport containment;
 - no full-screen desktop state;
 - summary only while expanded;
 - right-aligned per-row checkboxes and upper-right Select All;
 - default selection of importable items;
 - safe external links and no page preview;
 - import, Source processing, Ready, and failure states;
-- automatic open on Research completion;
+- automatic searching-state open on Research delegation and exact-Session results on completion;
 - private latest-Session recovery.
 
 ### 20.6 Source And RAG
@@ -740,7 +746,7 @@ An opt-in smoke test uses `NANO_BRAVE_SEARCH_API_KEY` to verify authentication, 
 ### 21.1 Manual Discovery
 
 1. An Editor searches for `怎么拍电影`.
-2. The Add Sources dialog expands modestly and shows up to ten results.
+2. The left Source panel enters Discovery mode, widens modestly, and shows up to ten results.
 3. Every importable checkbox is on the right and selected by default.
 4. The Editor clears unwanted items and imports the rest.
 5. Successful URLs create Sources; failed URLs remain independently retryable.
@@ -752,7 +758,7 @@ An opt-in smoke test uses `NANO_BRAVE_SEARCH_API_KEY` to verify authentication, 
 2. The Leader checkpoints `delegate_research` and creates one Research child Run.
 3. The child performs at most three searches and publishes one private candidate Session.
 4. The parent resumes and publishes a generic completion message without a count.
-5. The Source Discovery dialog opens automatically.
+5. The left Source panel opens the exact Source Discovery Session automatically, beginning with searching state and then showing results.
 6. The user selects and imports candidates.
 7. No same-turn Web answer is produced.
 

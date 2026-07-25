@@ -3,8 +3,8 @@
 ## Document Status
 
 - **Sprint:** Sprint 8
-- **Status:** Implemented and accepted
-- **Date:** 2026-07-24
+- **Status:** Interaction amendment approved; implementation pending
+- **Date:** 2026-07-24; amended 2026-07-25
 - **Theme:** Web Source Discovery, durable Research delegation, and imported-Source RAG
 - **Delivery boundary:** Sprint 8 first delivers manual Web Source discovery and import, then reuses the same capability through a durable Leader-to-Research child Run. A delegated turn produces private candidates, not a same-turn Web answer.
 
@@ -47,7 +47,7 @@ The approved Sprint 8 design supersedes older statements that defer Source disco
 
 Deliver these dependent slices in order:
 
-1. **Manual Source Discovery:** an Editor or Owner searches the Web from Add Sources, restores a private candidate session, selects results, and imports them.
+1. **Manual Source Discovery:** an Editor or Owner searches the Web from the persistent field in the left Source panel, restores a private candidate session, selects results, and imports them.
 2. **Imported-Source readiness:** selected URLs become immutable Sources only through the existing restricted Fetcher, versioned normalization, Evidence publication, chunking, hybrid projection, and Ready barrier.
 3. **Persisted Chat selection:** a Ready imported Source becomes selected only in the private Chat that originated its Discovery session.
 4. **Leader routing:** every Chat turn receives a durable `continue_chat` or `delegate_research` decision.
@@ -59,8 +59,8 @@ The Sprint does not deliver same-turn Deep Research answers.
 
 Sprint 8 is complete only when all of the following are true:
 
-1. The Source panel provides a Web Search input inside Add Sources.
-2. Search results expand the dialog modestly without a full-screen desktop state.
+1. The left Source panel provides a persistent Web Search input; a compact adjacent add control retains file upload and direct-URL import.
+2. Search switches the left panel into Discovery mode and widens it modestly without a centered dialog or full-screen desktop state.
 3. The expanded view displays a candidate-set summary, title links, snippets, site icons or fallbacks, right-aligned checkboxes, and upper-right Select All.
 4. Importable results default to selected; already imported URLs are disabled and labeled.
 5. Manual search uses the exact user query, makes at most one Brave request, and retains at most ten candidates.
@@ -83,7 +83,7 @@ Sprint 8 is complete only when all of the following are true:
 22. The Research child expands at most three queries, calls Brave at most three times, and publishes at most ten private candidates.
 23. The child has independent Job, Attempt, budget, Checkpoint, cancellation, and Trace authority but cannot publish an Assistant Message.
 24. Parent waiting releases its Worker Lease; child success or failure durably requeues the parent.
-25. Research completion opens Source Discovery and the Leader publishes only a generic message that does not report candidate count.
+25. Research delegation immediately opens left-side Source Discovery in a searching state; completion shows the exact Session there and the Leader publishes only a generic message that does not report candidate count.
 26. Stop, Notebook deletion, Member removal, and role downgrade prevent late child, Candidate, Source, or Assistant publication.
 27. A later ordinary Chat turn pins only Ready, selected Sources and retrieves them through the existing scoped hybrid RAG pipeline.
 28. The final grounded response publishes only valid Source markers and Citations through the current Publication Barrier.
@@ -110,10 +110,10 @@ Search snippets are Candidate metadata. They are not Evidence Units, Retrieval C
 
 ### 6.1 Manual Web Discovery
 
-1. An Editor opens Add Sources and enters `怎么拍电影`.
+1. An Editor enters `怎么拍电影` in the persistent Web Search field at the top of the left Source panel.
 2. Nano creates a private Discovery Session and returns `202 Accepted`.
 3. The session completes through Brave Web Search with at most ten normalized candidates.
-4. The Add Sources dialog expands modestly and shows the candidate-set summary only in that state.
+4. The left panel enters Discovery mode, widens modestly, and shows the candidate-set summary only in that state.
 5. All importable results start selected; checkboxes remain at the far right.
 6. The Editor follows title hyperlinks in a new browser tab when desired; Nano provides no in-product page preview.
 7. The Editor clears unwanted results and clicks Import Selected.
@@ -129,7 +129,7 @@ Search snippets are Candidate metadata. They are not Evidence Units, Retrieval C
 4. The child produces at most three query variants and searches through the shared Discovery boundary.
 5. The child commits a private Discovery Session and completes without a Chat Message.
 6. The parent resumes and publishes a generic completion message.
-7. The UI opens the resulting Discovery Session automatically.
+7. The UI opens the left-side Discovery searching state when delegation begins and transitions the same exact Session to results automatically.
 8. The user selects and imports Sources through the same manual import path.
 
 ### 6.3 Later Grounded Research
@@ -161,8 +161,10 @@ Only an imported Source becomes shared. Neither private queries nor Candidate su
 
 ## 8. Source Discovery UI Contract
 
-- The feature extends the existing Add Sources dialog.
-- Desktop uses a bounded wider and taller dialog, not full screen.
+- Web Search is always visible at the top of the left Source panel.
+- A compact add control next to Search opens the existing file-upload and direct-URL dialog.
+- Search and Research delegation switch the left panel into a dedicated `Sources > Source Discovery` view.
+- Desktop widens the left panel to approximately 560 px; it is neither a centered dialog nor full screen.
 - Compact layouts remain usable without horizontal clipping.
 - Candidate Summary is absent before expansion and visible only in expanded results.
 - Select All appears at the list's upper right.
@@ -172,7 +174,7 @@ Only an imported Source becomes shared. Neither private queries nor Candidate su
 - Candidate state and linked Source state are distinct and visible.
 - Partial import keeps successful items and exposes per-item retry.
 - Reload restores the latest private Session for the current Notebook and Member.
-- Research completion opens the exact produced Session rather than relying only on latest-session ordering.
+- Research delegation opens the exact searching Session and completion updates it, rather than relying only on latest-session ordering.
 
 ## 9. Search Provider Contract
 
@@ -371,7 +373,7 @@ The credential, raw Brave envelope, unrestricted page body, and model chain of t
 
 - Brave Provider Adapter;
 - Discovery schema, RLS, job, store, service, and APIs;
-- expanded Add Sources UI;
+- persistent left-panel Search and dedicated expanding Discovery UI;
 - latest private Session restoration.
 
 ### Step 3: Candidate Import And Source Quality
