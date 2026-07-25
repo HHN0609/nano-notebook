@@ -149,3 +149,45 @@ test("loads the exact Research session requested by a completed Leader Run", asy
   expect(requests).toContain("/api/v1/source-discovery-sessions/dss_research");
   expect(requests).not.toContain("/api/v1/notebooks/nb_1/source-discovery-sessions/latest");
 });
+
+test("does not reactivate Discovery when clearing the pinned session reveals an already imported latest session", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const isLatest = String(input).endsWith("/latest");
+    return Response.json({ session: {
+      id: isLatest ? "dss_latest" : "dss_research",
+      notebook_id: "nb_1",
+      query: "film lighting",
+      status: "ready",
+      candidates: [{
+        id: "candidate_1",
+        ordinal: 0,
+        title: "Film lighting guide",
+        canonical_url: "https://example.com/lighting",
+        display_url: "example.com/lighting",
+        snippet: "Relevant material.",
+        selected: true,
+        status: isLatest ? "imported" : "discovered"
+      }]
+    } });
+  }));
+  const onSessionActive = vi.fn();
+  const props = {
+    notebookID: "nb_1",
+    active: true,
+    onExpandedChange: vi.fn(),
+    onSessionActive,
+    onImported: vi.fn(),
+    copy: {
+      label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
+      selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported"
+    }
+  };
+  const { rerender } = render(<SourceDiscovery {...props} requestedSessionID="dss_research" />);
+
+  await waitFor(() => expect(onSessionActive).toHaveBeenCalledTimes(1));
+  rerender(<SourceDiscovery {...props} requestedSessionID={undefined} />);
+
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/v1/notebooks/nb_1/source-discovery-sessions/latest", expect.anything()));
+  expect(onSessionActive).toHaveBeenCalledTimes(1);
+});

@@ -29,6 +29,12 @@ type DiscoverySession = {
   candidates: DiscoveryCandidate[];
 };
 
+function shouldActivateDiscovery(session: DiscoverySession) {
+  if (session.status !== "ready") return true;
+  if (session.candidates.length === 0) return true;
+  return session.candidates.some((candidate) => candidate.status === "discovered" || candidate.status === "importing");
+}
+
 export type SourceDiscoveryCopy = {
   label: string;
   placeholder: string;
@@ -81,7 +87,7 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
       if (!cancelled) {
         setSession(payload.session);
         setQuery(payload.session.query);
-        onSessionActive?.();
+        if (shouldActivateDiscovery(payload.session)) onSessionActive?.();
       }
     });
     return () => { cancelled = true; };
