@@ -100,6 +100,7 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
   const [removingSource, setRemovingSource] = useState<MemberSource | null>(null);
   const openedDiscoverySessionID = useRef<string | undefined>(undefined);
   const activateDiscovery = useCallback(() => setDiscoveryOpen(true), []);
+  const ignoreDiscoveryExpansion = useCallback(() => undefined, []);
 
   useEffect(() => onDiscoveryModeChange?.(discoveryOpen), [discoveryOpen, onDiscoveryModeChange]);
 
@@ -194,7 +195,7 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
           active
           showResults={discoveryOpen}
           hideLabel
-          onExpandedChange={() => undefined}
+          onExpandedChange={ignoreDiscoveryExpansion}
           onSessionActive={activateDiscovery}
           onImported={controller.refresh}
           copy={{

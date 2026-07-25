@@ -83,7 +83,7 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
       }
     });
     return () => { cancelled = true; };
-  }, [active, notebookID, onSessionActive, requestedSessionID]);
+  }, [active, notebookID, onExpandedChange, onSessionActive, requestedSessionID]);
 
   useEffect(() => {
     if (!active || session?.status !== "searching") return;
