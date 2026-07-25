@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { MaterialSymbol } from "../icons/material-symbol";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -44,22 +44,26 @@ export type SourceDiscoveryCopy = {
   imported: string;
 };
 
-export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, active, copy, onExpandedChange, onImported }: {
+export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, active, showResults = true, hideLabel = false, copy, onExpandedChange, onSessionActive, onImported }: {
   notebookID: string;
   originChatID?: string;
   requestedSessionID?: string;
   active: boolean;
+  showResults?: boolean;
+  hideLabel?: boolean;
   copy: SourceDiscoveryCopy;
   onExpandedChange: (expanded: boolean) => void;
+  onSessionActive?: () => void;
   onImported: () => void | Promise<unknown>;
 }) {
+  const searchInputID = useId();
   const [query, setQuery] = useState("");
   const [session, setSession] = useState<DiscoverySession | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const expanded = session?.status === "ready" && session.candidates.length > 0;
 
-  useEffect(() => onExpandedChange(Boolean(expanded)), [expanded, onExpandedChange]);
+  useEffect(() => onExpandedChange(Boolean(showResults && expanded)), [expanded, onExpandedChange, showResults]);
   useEffect(() => {
     if (!active) {
       onExpandedChange(false);
@@ -75,10 +79,11 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
       if (!cancelled) {
         setSession(payload.session);
         setQuery(payload.session.query);
+        onSessionActive?.();
       }
     });
     return () => { cancelled = true; };
-  }, [active, notebookID, onExpandedChange, requestedSessionID]);
+  }, [active, notebookID, onSessionActive, requestedSessionID]);
 
   useEffect(() => {
     if (!active || session?.status !== "searching") return;
@@ -102,6 +107,7 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
       });
       if (!response.ok) throw new Error(copy.failed);
       setSession(((await response.json()) as { session: DiscoverySession }).session);
+      onSessionActive?.();
     } catch {
       setError(copy.failed);
     } finally {
@@ -172,16 +178,16 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
   }
 
   return <section className="source-discovery">
-    <Label htmlFor="source-web-search">{copy.label}</Label>
+    <Label className={hideLabel ? "sr-only" : undefined} htmlFor={searchInputID}>{copy.label}</Label>
     <form className="source-discovery-search" onSubmit={(event) => { event.preventDefault(); void search(); }}>
-      <Input id="source-web-search" type="search" value={query} placeholder={copy.placeholder} onChange={(event) => setQuery(event.target.value)} />
+      <Input id={searchInputID} type="search" value={query} placeholder={copy.placeholder} onChange={(event) => setQuery(event.target.value)} />
       <Button type="submit" disabled={!query.trim() || busy}>{session?.status === "searching" ? copy.searching : copy.search}</Button>
     </form>
-    {session?.status === "searching" ? <p className="source-discovery-status" role="status">{copy.searching}</p> : null}
-    {error ? <p className="source-discovery-error" role="alert">{error}</p> : null}
-    {session?.status === "failed" ? <div><p className="source-discovery-error" role="alert">{copy.failed}</p><Button variant="outline" disabled={busy} onClick={() => void retrySearch()}>{copy.retry}</Button></div> : null}
-    {session?.status === "ready" && session.candidates.length === 0 ? <p className="source-discovery-status">{copy.noResults}</p> : null}
-    {expanded ? <div className="source-discovery-expanded">
+    {showResults && session?.status === "searching" ? <p className="source-discovery-status" role="status">{copy.searching}</p> : null}
+    {showResults && error ? <p className="source-discovery-error" role="alert">{error}</p> : null}
+    {showResults && session?.status === "failed" ? <div><p className="source-discovery-error" role="alert">{copy.failed}</p><Button variant="outline" disabled={busy} onClick={() => void retrySearch()}>{copy.retry}</Button></div> : null}
+    {showResults && session?.status === "ready" && session.candidates.length === 0 ? <p className="source-discovery-status">{copy.noResults}</p> : null}
+    {showResults && expanded ? <div className="source-discovery-expanded">
       {session.summary ? <p className="source-discovery-summary">{session.summary}</p> : null}
       <div className="source-discovery-toolbar">
         <label>{copy.selectAll}<input aria-label={copy.selectAll} type="checkbox" checked={allSelected} onChange={() => void replaceSelection(allSelected ? [] : importable.map((candidate) => candidate.id))} /></label>

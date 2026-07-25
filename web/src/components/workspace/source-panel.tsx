@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { IconButton } from "../icons/icon-button";
 import { MaterialSymbol } from "../icons/material-symbol";
@@ -34,6 +34,7 @@ type SourceView = {
 export type SourcePanelCopy = {
   title: string;
   addSourcesLabel: string;
+  discoveryTitle: string;
   emptyTitle: string;
   emptyBody: string;
   collapseLabel: string;
@@ -77,18 +78,19 @@ export type SourcePanelCopy = {
   failureReasonLabels: Record<NonNullable<MemberSource["failure_reason"]>, string>;
 };
 
-export function SourcePanelContent({ copy, notebookID, originChatID, requestedDiscoverySessionID, controller, canMaintain = true }: {
+export function SourcePanelContent({ copy, notebookID, originChatID, requestedDiscoverySessionID, controller, canMaintain = true, onDiscoveryModeChange }: {
   copy: SourcePanelCopy;
   notebookID: string;
   originChatID?: string;
   requestedDiscoverySessionID?: string;
   controller: SourcesController;
   canMaintain?: boolean;
+  onDiscoveryModeChange?: (active: boolean) => void;
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [addOpen, setAddOpen] = useState(false);
-  const [discoveryExpanded, setDiscoveryExpanded] = useState(false);
-	const [pinnedDiscoverySessionID, setPinnedDiscoverySessionID] = useState<string | undefined>(undefined);
+  const [discoveryOpen, setDiscoveryOpen] = useState(false);
+  const [pinnedDiscoverySessionID, setPinnedDiscoverySessionID] = useState<string | undefined>(undefined);
   const [url, setURL] = useState("");
   const [addingURL, setAddingURL] = useState(false);
   const [uploads, setUploads] = useState<Array<{ id: string; title: string; state: "uploading" | "failed" }>>([]);
@@ -97,12 +99,15 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
   const [editTitle, setEditTitle] = useState("");
   const [removingSource, setRemovingSource] = useState<MemberSource | null>(null);
   const openedDiscoverySessionID = useRef<string | undefined>(undefined);
+  const activateDiscovery = useCallback(() => setDiscoveryOpen(true), []);
+
+  useEffect(() => onDiscoveryModeChange?.(discoveryOpen), [discoveryOpen, onDiscoveryModeChange]);
 
   useEffect(() => {
     if (!requestedDiscoverySessionID || openedDiscoverySessionID.current === requestedDiscoverySessionID || !canMaintain) return;
     openedDiscoverySessionID.current = requestedDiscoverySessionID;
-	setPinnedDiscoverySessionID(requestedDiscoverySessionID);
-    setAddOpen(true);
+    setPinnedDiscoverySessionID(requestedDiscoverySessionID);
+    setDiscoveryOpen(true);
   }, [canMaintain, requestedDiscoverySessionID]);
 
   async function addFiles(files: FileList | null) {
@@ -176,23 +181,47 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
   return (
     <div className="workspace-panel-content source-panel-content">
       <div className="workspace-panel-header">
-        <h2>{copy.title}</h2>
-        <IconButton icon="right_panel_close" label={copy.collapseLabel} symbolSize={19} onClick={() => toast(copy.comingSoonMessage)} />
+        <h2>{discoveryOpen ? <span className="source-discovery-breadcrumb"><span>{copy.title}</span><MaterialSymbol name="chevron_right" size={18} /><span>{copy.discoveryTitle}</span></span> : copy.title}</h2>
+        {discoveryOpen
+          ? <IconButton icon="close" label={copy.closeLabel} symbolSize={19} onClick={() => { setDiscoveryOpen(false); setPinnedDiscoverySessionID(undefined); }} />
+          : <IconButton icon="right_panel_close" label={copy.collapseLabel} symbolSize={19} onClick={() => toast(copy.comingSoonMessage)} />}
       </div>
-      {canMaintain ? <div className="source-panel-controls">
-        <Button className="add-sources-action" variant="outline" onClick={() => setAddOpen(true)}>
-          <MaterialSymbol name="add" size={20} />
-          {copy.addSourcesLabel}
-        </Button>
+      {canMaintain ? <div className={`source-panel-controls${discoveryOpen ? " source-panel-controls--discovery" : ""}`}>
+        <SourceDiscovery
+          notebookID={notebookID}
+          originChatID={originChatID}
+          requestedSessionID={pinnedDiscoverySessionID}
+          active
+          showResults={discoveryOpen}
+          hideLabel
+          onExpandedChange={() => undefined}
+          onSessionActive={activateDiscovery}
+          onImported={controller.refresh}
+          copy={{
+            label: copy.webSearchLabel,
+            placeholder: copy.webSearchPlaceholder,
+            search: copy.webSearchActionLabel,
+            searching: copy.webSearchingLabel,
+            selectAll: copy.selectAllLabel,
+            importSelected: copy.importSelectedLabel,
+            failed: copy.webSearchFailedLabel,
+            noResults: copy.noSearchResultsLabel,
+            openResult: copy.openSearchResultLabel,
+            importFailed: copy.sourceImportFailedLabel,
+            retry: copy.retryLabel,
+            imported: copy.readyLabel
+          }}
+        />
+        {!discoveryOpen ? <IconButton className="source-add-action" icon="add" label={copy.addSourcesLabel} onClick={() => setAddOpen(true)} /> : null}
       </div> : null}
-      {controller.error ? <p className="source-panel-error" role="alert">{controller.error}</p> : null}
-      {!controller.isLoading && controller.sources.length === 0 ? (
+      {!discoveryOpen && controller.error ? <p className="source-panel-error" role="alert">{controller.error}</p> : null}
+      {!discoveryOpen && !controller.isLoading && controller.sources.length === 0 ? (
         <div className="panel-empty-state">
           <MaterialSymbol name="draft" size={28} />
           <strong>{copy.emptyTitle}</strong>
           <p>{copy.emptyBody}</p>
         </div>
-      ) : (
+      ) : !discoveryOpen ? (
         <div className="source-list">
           {controller.sources.map((source) => (
             <article className="source-list-item" key={source.id}>
@@ -213,35 +242,12 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
             </article>
           ))}
         </div>
-      )}
+      ) : null}
 
-      <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) { setDiscoveryExpanded(false); setPinnedDiscoverySessionID(undefined); } }}>
-        <DialogContent className={`source-dialog${discoveryExpanded ? " source-dialog--discovery" : ""}`} closeLabel={copy.closeLabel}>
+      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+        <DialogContent className="source-dialog" closeLabel={copy.closeLabel}>
           <DialogTitle>{copy.addDialogTitle}</DialogTitle>
           <DialogDescription>{copy.addDialogBody}</DialogDescription>
-          <SourceDiscovery
-            notebookID={notebookID}
-            originChatID={originChatID}
-            requestedSessionID={pinnedDiscoverySessionID}
-            active={addOpen}
-            onExpandedChange={setDiscoveryExpanded}
-            onImported={controller.refresh}
-            copy={{
-              label: copy.webSearchLabel,
-              placeholder: copy.webSearchPlaceholder,
-              search: copy.webSearchActionLabel,
-              searching: copy.webSearchingLabel,
-              selectAll: copy.selectAllLabel,
-              importSelected: copy.importSelectedLabel,
-              failed: copy.webSearchFailedLabel,
-              noResults: copy.noSearchResultsLabel,
-              openResult: copy.openSearchResultLabel,
-              importFailed: copy.sourceImportFailedLabel,
-              retry: copy.retryLabel,
-              imported: copy.readyLabel
-            }}
-          />
-          <div className="source-dialog-divider" />
           <input ref={fileInput} className="sr-only" type="file" multiple accept={acceptedSourceFormats} aria-label={copy.chooseFilesLabel} onChange={(event) => void addFiles(event.target.files)} />
           <Button variant="outline" onClick={() => fileInput.current?.click()}><MaterialSymbol name="upload_file" size={19} />{copy.chooseFilesLabel}</Button>
           <p className="source-format-help">{copy.supportedFormatsLabel}</p>

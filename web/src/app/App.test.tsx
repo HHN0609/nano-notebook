@@ -116,6 +116,7 @@ test("restores the private Chat and enables the composer", async () => {
   expect(screen.getByRole("region", { name: "Studio" })).toBeInTheDocument();
 
   expect(await within(sources).findByText("Saved sources will appear here")).toBeInTheDocument();
+  expect(within(sources).getByRole("searchbox", { name: "Search the web for new sources" })).toBeInTheDocument();
   expect(within(sources).getByRole("button", { name: "Add sources" })).toBeInTheDocument();
   expect(within(sources).queryByText("Fast Research")).not.toBeInTheDocument();
   expect(fetch).toHaveBeenCalledWith("/api/v1/notebooks/nb_test/chats", expect.anything());
@@ -212,6 +213,7 @@ test("adds a URL Source through the real admission flow", async () => {
   const sources = await screen.findByRole("region", { name: "Sources" });
   await user.click(within(sources).getByRole("button", { name: "Add sources" }));
   const dialog = await screen.findByRole("dialog", { name: "Add sources" });
+  expect(within(dialog).queryByRole("searchbox")).not.toBeInTheDocument();
   await user.type(within(dialog).getByLabelText("Web page or YouTube URL"), "https://example.com/research");
   await user.click(within(dialog).getByRole("button", { name: "Add URL" }));
 
@@ -536,6 +538,51 @@ test("submits one durable Message and projects the final answer from Run SSE", a
   expect(within(chat).queryByRole("status")).not.toBeInTheDocument();
   expect(FakeEventSource.instances[0]?.closed).toBe(true);
   expect(admittedMessageID).not.toBe("");
+});
+
+test("opens the exact delegated Research Session in left-side Discovery while it is searching", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  let admittedMessageID = "";
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic", role: "owner" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/source-discovery-sessions/latest")) return new Response(null, { status: 204 });
+    if (url.endsWith("/api/v1/source-discovery-sessions/dss_research")) return json({ session: {
+      id: "dss_research", notebook_id: "nb_test", query: "Go learning material", status: "searching", candidates: []
+    } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [] });
+    if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
+      const body = JSON.parse(String(init?.body)) as { id: string };
+      admittedMessageID = body.id;
+      return json({ message_id: body.id, run_id: "run_research", status: "queued" }, 202);
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  await user.type(await within(chat).findByRole("textbox", { name: "Message Nano Notebook" }), "Help me collect Go learning material");
+  await user.click(within(chat).getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+  act(() => {
+    FakeEventSource.instances[0]?.emit("run", {
+      run: { id: "run_research", input_message_id: admittedMessageID, status: "running", error_code: null, discovery_session_id: "dss_research" },
+      message: null
+    });
+  });
+
+  const sources = screen.getByRole("region", { name: "Sources" });
+  expect(await within(sources).findByText("Source discovery")).toBeInTheDocument();
+  expect(within(sources).getByDisplayValue("Go learning material")).toBeInTheDocument();
+  expect(within(sources).getByRole("status")).toHaveTextContent("Searching…");
+  expect(screen.queryByRole("dialog", { name: "Add sources" })).not.toBeInTheDocument();
+  expect(document.querySelector(".workspace-panels")).toHaveClass("workspace-panels--source-discovery");
 });
 
 test("creates the first private Chat with one bootstrap idempotency key", async () => {

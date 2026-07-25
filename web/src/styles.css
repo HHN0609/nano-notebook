@@ -1375,6 +1375,10 @@ h2 {
   padding: 0 6px 8px;
 }
 
+.workspace-panels--source-discovery {
+  grid-template-columns: minmax(520px, 560px) minmax(440px, 1.6fr) minmax(280px, 1fr);
+}
+
 .workspace-compact-tabs {
   display: none;
 }
@@ -1430,9 +1434,37 @@ h2 {
 
 .source-panel-controls {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   flex: none;
-  gap: 16px;
+  align-items: end;
+  gap: 8px;
   padding: 18px;
+}
+
+.source-panel-controls--discovery {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  min-height: 0;
+  overflow: hidden;
+  flex: 1;
+}
+
+.source-add-action {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.source-discovery-breadcrumb {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 3px;
+}
+
+.source-discovery-breadcrumb > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .source-list {
@@ -1534,12 +1566,6 @@ h2 {
   gap: 13px;
 }
 
-.source-dialog--discovery {
-  width: min(860px, calc(100vw - 32px));
-  max-height: min(820px, calc(100vh - 32px));
-  overflow-y: auto;
-}
-
 .source-dialog .nn-button {
   justify-self: start;
 }
@@ -1572,8 +1598,16 @@ h2 {
 
 .source-discovery {
   display: grid;
+  min-width: 0;
   min-height: 0;
   gap: 10px;
+}
+
+.source-panel-controls--discovery .source-discovery {
+  display: flex;
+  overflow: hidden;
+  flex: 1;
+  flex-direction: column;
 }
 
 .source-discovery-search {
@@ -1607,6 +1641,11 @@ h2 {
   gap: 10px;
 }
 
+.source-panel-controls--discovery .source-discovery-expanded {
+  overflow: hidden;
+  flex: 1;
+}
+
 .source-discovery-toolbar {
   display: flex;
   justify-content: flex-end;
@@ -1634,6 +1673,11 @@ h2 {
   flex-direction: column;
   border: 1px solid var(--border-subtle);
   border-radius: 14px;
+}
+
+.source-panel-controls--discovery .source-discovery-results {
+  max-height: none;
+  flex: 1;
 }
 
 .source-discovery-result {
@@ -1693,7 +1737,6 @@ h2 {
 .source-discovery-import { flex: none; }
 
 @media (max-width: 640px) {
-  .source-dialog--discovery { width: calc(100vw - 20px); }
   .source-discovery-result { padding-inline: 12px; }
 }
 

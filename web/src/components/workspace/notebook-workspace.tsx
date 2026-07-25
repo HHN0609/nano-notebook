@@ -1,4 +1,4 @@
-import type { ComponentProps, ReactNode } from "react";
+import { useState, type ComponentProps, type ReactNode } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { ChatPanelContent, type ChatPanelCopy } from "./chat-placeholder-panel";
 import { usePrivateChat } from "./private-chat";
@@ -24,18 +24,19 @@ type WorkspacePanelCopy = ChatPanelCopy & Omit<SourcePanelCopy, "title" | "addSo
 };
 
 export function NotebookWorkspace({ notebookID, copy, canMaintainSources = true }: { notebookID: string; copy: WorkspacePanelCopy; canMaintainSources?: boolean }) {
+  const [sourceDiscoveryOpen, setSourceDiscoveryOpen] = useState(false);
   const chatController = usePrivateChat(notebookID, copy);
   const sourcesController = useNotebookSources(notebookID, copy.sourceUnavailableLabel, chatController.snapshot?.chat.id, chatController.snapshot?.source_ids);
   const requestedDiscoverySessionID = chatController.snapshot?.runs.slice().reverse().find((run) => Boolean(run.discovery_session_id))?.discovery_session_id;
   const panels = {
-    sources: <SourcePanelContent notebookID={notebookID} originChatID={chatController.snapshot?.chat.id} requestedDiscoverySessionID={requestedDiscoverySessionID} controller={sourcesController} canMaintain={canMaintainSources} copy={{ ...copy, title: copy.sources, addSourcesLabel: copy.addSources, emptyTitle: copy.sourcesEmptyTitle, emptyBody: copy.sourcesEmptyBody, collapseLabel: copy.collapsePanel, comingSoonMessage: copy.comingSoon }} />,
+    sources: <SourcePanelContent notebookID={notebookID} originChatID={chatController.snapshot?.chat.id} requestedDiscoverySessionID={requestedDiscoverySessionID} controller={sourcesController} canMaintain={canMaintainSources} onDiscoveryModeChange={setSourceDiscoveryOpen} copy={{ ...copy, title: copy.sources, addSourcesLabel: copy.addSources, emptyTitle: copy.sourcesEmptyTitle, emptyBody: copy.sourcesEmptyBody, collapseLabel: copy.collapsePanel, comingSoonMessage: copy.comingSoon }} />,
     chat: <ChatPanelContent copy={copy} controller={chatController} selectedSourceCount={sourcesController.selectedSourceIDs.length} />,
     studio: <StudioPanelContent title={copy.studio} actions={copy.studioActions} betaLabel={copy.beta} emptyTitle={copy.studioEmptyTitle} emptyBody={copy.studioEmptyBody} addNoteLabel={copy.addNote} collapseLabel={copy.collapsePanel} comingSoonMessage={copy.comingSoon} />
   };
 
   return (
     <>
-      <div className="workspace-panels" aria-label={copy.panelsLabel}>
+      <div className={`workspace-panels${sourceDiscoveryOpen ? " workspace-panels--source-discovery" : ""}`} aria-label={copy.panelsLabel}>
         <WorkspaceRegion id="sources" title={copy.sources}>{panels.sources}</WorkspaceRegion>
         <WorkspaceRegion id="chat" title={copy.chat} chatFramework>{panels.chat}</WorkspaceRegion>
         <WorkspaceRegion id="studio" title={copy.studio}>{panels.studio}</WorkspaceRegion>
