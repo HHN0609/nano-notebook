@@ -8,16 +8,13 @@ import {
   type AssistantRuntime
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useMemo, useRef, type ComponentProps } from "react";
 import remarkGfm from "remark-gfm";
 import { MaterialSymbol } from "../icons/material-symbol";
 import { Button } from "../ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { appendMessageText, type ChatController, type ChatMessage, type Citation } from "./private-chat";
-import { SourceViewer } from "./source-panel";
-import { SourceImageViewer, type SourceImageRegion } from "./source-image-viewer";
+import { SourceOpenTarget } from "./source-open-target";
+import type { MemberSource } from "./sources";
 
 export type ChatPanelCopy = {
   title: string;
@@ -45,7 +42,7 @@ export type ChatPanelCopy = {
   coverageWarningLabel: string;
 };
 
-export function ChatPanelContent({ copy, controller, selectedSourceCount = 0 }: { copy: ChatPanelCopy; controller: ChatController; selectedSourceCount?: number }) {
+export function ChatPanelContent({ copy, controller, sources, onOpenSource, selectedSourceCount = 0 }: { copy: ChatPanelCopy; controller: ChatController; sources: MemberSource[]; onOpenSource: (source: MemberSource) => void; selectedSourceCount?: number }) {
   const messages = controller.snapshot?.messages ?? [];
   const runs = controller.snapshot?.runs ?? [];
   const run = runs.find((item) => item.status === "queued" || item.status === "running");
@@ -98,7 +95,7 @@ export function ChatPanelContent({ copy, controller, selectedSourceCount = 0 }: 
             <div className="chat-message-list">
               <ThreadPrimitive.Messages components={{
                 UserMessage: () => <UserMessage controller={controller} copy={copy} latestMessageID={latestMessageID} />,
-                AssistantMessage: () => <AssistantMessage controller={controller} copy={copy} />
+                AssistantMessage: () => <AssistantMessage controller={controller} copy={copy} sources={sources} onOpenSource={onOpenSource} />
               }} />
             </div>
             {run ? (
@@ -138,7 +135,7 @@ function UserMessage({ controller, copy, latestMessageID }: { controller: ChatCo
   );
 }
 
-function AssistantMessage({ controller, copy }: { controller: ChatController; copy: ChatPanelCopy }) {
+function AssistantMessage({ controller, copy, sources, onOpenSource }: { controller: ChatController; copy: ChatPanelCopy; sources: MemberSource[]; onOpenSource: (source: MemberSource) => void }) {
   const messageID = useAuiState((state) => state.message.id);
   const citations = controller.snapshot?.citations.filter((citation) => citation.message_id === messageID) ?? [];
   const sourceCitations = citations
@@ -148,14 +145,14 @@ function AssistantMessage({ controller, copy }: { controller: ChatController; co
   return (
     <MessagePrimitive.Root className="chat-message chat-message--assistant">
       <MessagePrimitive.Parts>
-        {({ part }) => part.type === "text" ? <AssistantMarkdownText citations={sourceCitations} copy={copy} /> : null}
+        {({ part }) => part.type === "text" ? <AssistantMarkdownText citations={sourceCitations} copy={copy} sources={sources} onOpenSource={onOpenSource} /> : null}
       </MessagePrimitive.Parts>
-      {preciseCitations.length ? <div className="chat-citations">{preciseCitations.map((citation, index) => <CitationButton key={citation.id} citation={citation} number={index + 1} copy={copy} />)}</div> : null}
+      {preciseCitations.length ? <div className="chat-citations">{preciseCitations.map((citation, index) => <CitationButton key={citation.id} citation={citation} number={index + 1} copy={copy} source={sources.find((item) => item.id === citation.source_id)} onOpenSource={onOpenSource} />)}</div> : null}
     </MessagePrimitive.Root>
   );
 }
 
-function AssistantMarkdownText({ citations, copy }: { citations: Citation[]; copy: ChatPanelCopy }) {
+function AssistantMarkdownText({ citations, copy, sources, onOpenSource }: { citations: Citation[]; copy: ChatPanelCopy; sources: MemberSource[]; onOpenSource: (source: MemberSource) => void }) {
   const bySource = useMemo(() => new Map(citations.map((citation) => [citation.source_id, citation])), [citations]);
   const citationTargets = useMemo(() => new Map(citations.map((citation) => [sourceCitationTarget(citation.source_id), citation])), [citations]);
   const preprocess = useCallback((text: string) => {
@@ -168,11 +165,11 @@ function AssistantMarkdownText({ citations, copy }: { citations: Citation[]; cop
   const components = useMemo<NonNullable<ComponentProps<typeof MarkdownTextPrimitive>["components"]>>(() => ({
     a: ({ href, children, title, className }) => {
       const citation = href ? citationTargets.get(href) : undefined;
-      if (citation) return <InlineSourceCitationButton citation={citation} copy={copy} />;
+      if (citation) return <InlineSourceCitationButton citation={citation} copy={copy} source={sources.find((item) => item.id === citation.source_id)} onOpenSource={onOpenSource} />;
       const external = href?.startsWith("https://") || href?.startsWith("http://");
       return <a href={href} title={title} className={className} {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}>{children}</a>;
     }
-  }), [citationTargets, copy]);
+  }), [citationTargets, copy, onOpenSource, sources]);
   return (
     <MarkdownTextPrimitive
       className="chat-markdown"
@@ -188,86 +185,16 @@ function sourceCitationTarget(sourceID: string) {
   return `#source-citation-${encodeURIComponent(sourceID)}`;
 }
 
-function InlineSourceCitationButton({ citation, copy }: { citation: Citation; copy: ChatPanelCopy }) {
-  const [open, setOpen] = useState(false);
+function InlineSourceCitationButton({ citation, copy, source, onOpenSource }: { citation: Citation; copy: ChatPanelCopy; source?: MemberSource; onOpenSource: (source: MemberSource) => void }) {
   const number = (citation.reference_ordinal ?? 0) + 1;
   const sourceLabel = citation.source_title ?? citation.source_id;
   return (
-    <>
-      <Button className="citation-chip citation-chip--inline" variant="outline" size="sm" aria-label={`${copy.citationLabel} ${number} for ${sourceLabel}`} onClick={() => setOpen(true)}>[{number}]</Button>
-      <SourceViewer sourceID={open ? citation.source_id : null} onOpenChange={setOpen} copy={copy} />
-    </>
+    <SourceOpenTarget source={source} className="nn-button nn-button--outline nn-button--size-sm citation-chip citation-chip--inline" ariaLabel={`${copy.citationLabel} ${number} for ${sourceLabel}`} onInlineOriginal={onOpenSource}>[{number}]</SourceOpenTarget>
   );
 }
 
-type Coordinate = { page?: number; slide?: number; start_ms?: number; end_ms?: number } & SourceImageRegion;
-
-type CitationView = {
-  citation: Citation;
-  source_title: string;
-  source_format: string;
-  unit_kind: string;
-  preview: string;
-  coordinate?: Coordinate;
-};
-
-function CitationButton({ citation, number, copy }: { citation: Citation; number: number; copy: ChatPanelCopy }) {
-  const [open, setOpen] = useState(false);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const view = useQuery({
-    queryKey: ["citation", citation.id],
-    enabled: open || previewOpen,
-    queryFn: async (): Promise<CitationView> => {
-      const response = await fetch(`/api/v1/citations/${citation.id}`, { credentials: "include" });
-      if (!response.ok) throw new Error(copy.citationUnavailableLabel);
-      return ((await response.json()) as { citation: CitationView }).citation;
-    },
-    retry: false
-  });
+function CitationButton({ citation, number, copy, source, onOpenSource }: { citation: Citation; number: number; copy: ChatPanelCopy; source?: MemberSource; onOpenSource: (source: MemberSource) => void }) {
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <Tooltip open={previewOpen} onOpenChange={setPreviewOpen}>
-        <TooltipTrigger asChild>
-          <Button className="citation-chip" variant="outline" size="sm" aria-label={`${copy.citationLabel} ${number} for ${citation.claim_text ?? citation.source_title ?? citation.source_id}`} onClick={() => setOpen(true)}>[{number}]</Button>
-        </TooltipTrigger>
-        <TooltipContent className="citation-hover-preview" side="top" sideOffset={8}>
-          {view.isError ? <span role="alert">{copy.citationUnavailableLabel}</span> : null}
-          {!view.data && !view.isError ? <span>{copy.citationPreviewLabel}</span> : null}
-          {view.data ? (
-            <>
-              <strong>{view.data.source_title}</strong>
-              <span>{citationLocation(view.data)}</span>
-              <p>{view.data.preview}</p>
-            </>
-          ) : null}
-        </TooltipContent>
-      </Tooltip>
-      <DialogContent className="citation-dialog" closeLabel={copy.closeLabel}>
-        <DialogTitle>{view.data?.source_title ?? copy.citationPreviewLabel}</DialogTitle>
-        <DialogDescription>{view.data ? citationLocation(view.data) : copy.citationPreviewLabel}</DialogDescription>
-        {view.isError ? <p role="alert">{copy.citationUnavailableLabel}</p> : null}
-        {view.data && isImageFormat(view.data.source_format) ? (
-          <SourceImageViewer sourceID={view.data.citation.source_id} title={view.data.source_title} regions={[view.data.coordinate ?? {}]} />
-        ) : null}
-        {view.data ? <blockquote>{view.data.preview}</blockquote> : null}
-      </DialogContent>
-    </Dialog>
+    <SourceOpenTarget source={source} className="nn-button nn-button--outline nn-button--size-sm citation-chip" ariaLabel={`${copy.citationLabel} ${number} for ${citation.claim_text ?? citation.source_title ?? citation.source_id}`} onInlineOriginal={onOpenSource}>[{number}]</SourceOpenTarget>
   );
-}
-
-function isImageFormat(format: string) {
-  return format === "png" || format === "jpeg" || format === "webp";
-}
-
-function citationLocation(view: CitationView) {
-  const coordinate = view.coordinate;
-  if (coordinate?.page) return `Page ${coordinate.page}`;
-  if (coordinate?.slide) return `Slide ${coordinate.slide}`;
-  if (coordinate?.start_ms !== undefined) return formatTimeRange(coordinate.start_ms, coordinate.end_ms);
-  return `${view.source_format.toUpperCase()} · ${view.unit_kind}`;
-}
-
-function formatTimeRange(startMS: number, endMS?: number) {
-  const seconds = (value: number) => `${Math.floor(value / 60000)}:${String(Math.floor(value / 1000) % 60).padStart(2, "0")}`;
-  return endMS === undefined ? seconds(startMS) : `${seconds(startMS)}–${seconds(endMS)}`;
 }

@@ -3,7 +3,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { ChatPanelContent, type ChatPanelCopy } from "./chat-placeholder-panel";
 import { usePrivateChat } from "./private-chat";
 import { SourcePanelContent, type SourcePanelCopy } from "./source-panel";
-import { useNotebookSources } from "./sources";
+import { useNotebookSources, type MemberSource } from "./sources";
 import { StudioPanelContent } from "./studio-panel";
 
 type WorkspacePanelCopy = ChatPanelCopy & Omit<SourcePanelCopy, "title" | "addSourcesLabel" | "emptyTitle" | "emptyBody" | "collapseLabel" | "comingSoonMessage"> & {
@@ -25,12 +25,20 @@ type WorkspacePanelCopy = ChatPanelCopy & Omit<SourcePanelCopy, "title" | "addSo
 
 export function NotebookWorkspace({ notebookID, copy, canMaintainSources = true }: { notebookID: string; copy: WorkspacePanelCopy; canMaintainSources?: boolean }) {
   const [sourceDiscoveryOpen, setSourceDiscoveryOpen] = useState(false);
+  const [viewSourceID, setViewSourceID] = useState<string | null>(null);
+  const [compactPanel, setCompactPanel] = useState("sources");
   const chatController = usePrivateChat(notebookID, copy);
   const sourcesController = useNotebookSources(notebookID, copy.sourceUnavailableLabel, chatController.snapshot?.chat.id, chatController.snapshot?.source_ids);
   const requestedDiscoverySessionID = chatController.snapshot?.runs.slice().reverse().find((run) => Boolean(run.discovery_session_id))?.discovery_session_id;
+  const viewingSource = sourcesController.sources.find((source) => source.id === viewSourceID && source.open_action?.kind === "inline_original");
+  const openInlineOriginal = (source: MemberSource) => {
+    if (source.open_action?.kind !== "inline_original") return;
+    setViewSourceID(source.id);
+    setCompactPanel("sources");
+  };
   const panels = {
-    sources: <SourcePanelContent notebookID={notebookID} originChatID={chatController.snapshot?.chat.id} requestedDiscoverySessionID={requestedDiscoverySessionID} controller={sourcesController} canMaintain={canMaintainSources} onDiscoveryModeChange={setSourceDiscoveryOpen} copy={{ ...copy, title: copy.sources, addSourcesLabel: copy.addSources, emptyTitle: copy.sourcesEmptyTitle, emptyBody: copy.sourcesEmptyBody, collapseLabel: copy.collapsePanel, comingSoonMessage: copy.comingSoon }} />,
-    chat: <ChatPanelContent copy={copy} controller={chatController} selectedSourceCount={sourcesController.selectedSourceIDs.length} />,
+    sources: <SourcePanelContent notebookID={notebookID} originChatID={chatController.snapshot?.chat.id} requestedDiscoverySessionID={requestedDiscoverySessionID} controller={sourcesController} viewingSource={viewingSource} onOpenSource={openInlineOriginal} onCloseSource={() => setViewSourceID(null)} canMaintain={canMaintainSources} onDiscoveryModeChange={setSourceDiscoveryOpen} copy={{ ...copy, title: copy.sources, addSourcesLabel: copy.addSources, emptyTitle: copy.sourcesEmptyTitle, emptyBody: copy.sourcesEmptyBody, collapseLabel: copy.collapsePanel, comingSoonMessage: copy.comingSoon }} />,
+    chat: <ChatPanelContent copy={copy} controller={chatController} sources={sourcesController.sources} onOpenSource={openInlineOriginal} selectedSourceCount={sourcesController.selectedSourceIDs.length} />,
     studio: <StudioPanelContent title={copy.studio} actions={copy.studioActions} betaLabel={copy.beta} emptyTitle={copy.studioEmptyTitle} emptyBody={copy.studioEmptyBody} addNoteLabel={copy.addNote} collapseLabel={copy.collapsePanel} comingSoonMessage={copy.comingSoon} />
   };
 
@@ -41,7 +49,7 @@ export function NotebookWorkspace({ notebookID, copy, canMaintainSources = true 
         <WorkspaceRegion id="chat" title={copy.chat} chatFramework>{panels.chat}</WorkspaceRegion>
         <WorkspaceRegion id="studio" title={copy.studio}>{panels.studio}</WorkspaceRegion>
       </div>
-      <Tabs defaultValue="sources" className="workspace-compact-tabs">
+      <Tabs value={compactPanel} onValueChange={setCompactPanel} className="workspace-compact-tabs">
         <TabsList className="workspace-tabs" aria-label={copy.panelsLabel}>
           <TabsTrigger value="sources">{copy.sources}</TabsTrigger>
           <TabsTrigger value="chat">{copy.chat}</TabsTrigger>

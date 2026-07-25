@@ -93,7 +93,7 @@ Documents include extracted text, document structure, readable tables, and usabl
 - Only `Ready` Sources can be selected for Chat.
 - Processing one Source does not block Members from using other ready Sources.
 - A failed Source displays a useful failure reason and can be retried or removed.
-- A ready Source can be opened directly from the Sources list in the same Source Viewer used by Citations. It exposes its original or normalized content and any Evidence Coverage warnings for inspection; the initial release does not generate a Source overview or offer original-file download.
+- A ready Source consumes a server-declared open action shared by the Sources list and Chat citations: web and YouTube Sources open their canonical page, allowlisted immutable originals render only in the left Sources panel, and unsupported originals are non-interactive. The product does not present normalized Evidence, Coverage, derived pages, or a download action.
 - A Source with usable evidence may become `Ready` when processing omitted only precisely identified regions. Its inspection view prominently identifies every known coverage gap; unknown coverage or loss of primary content makes the Source `Failed`.
 - Retrieval and Grounded Answers use only published evidence and never infer content from a processing gap.
 - Citations navigate to a page, slide, section, transcript timestamp, image region, or normalized passage appropriate to the Source type.
@@ -174,12 +174,11 @@ If selected Sources partially support an answer, the Agent uses only that Eviden
 - Key factual claims and synthesized conclusions require inline Citations.
 - A conclusion synthesized from multiple Sources cites each material supporting Source.
 - A Citation marker is not sufficient by itself: before publication, each factual or synthesized claim must pass support and coverage verification against the cited evidence. Unsupported claims are researched again, removed, or replaced by an explicit insufficient-evidence statement.
-- Hovering a Citation previews the supporting original passage.
-- Selecting a Citation opens one Source Viewer shell at the corresponding page region for PDF, rendered slide element for PPTX, original image region, audio or YouTube transcript interval, normalized HTML or DOCX block, or TXT/Markdown range. When precise coordinates are unavailable, the Viewer falls back to the real Evidence Unit and never fabricates a narrower highlight.
+- A Citation has no hover preview. It uses the addressed Source's declared open action: external Sources open their canonical page, inline originals replace the left Sources panel temporarily, and unsupported Sources are non-interactive.
 - A very short Source may be cited as a whole when a meaningful passage cannot be isolated.
 - Answers distinguish agreement, disagreement, and missing evidence across Sources.
 - Answers follow the language of the user's question. Source language does not restrict answer language.
-- The Viewer reads the immutable Source snapshot and never refreshes a URL or YouTube resource during Citation resolution; the initial release does not offer original-file download.
+- Inline original delivery reauthorizes the current Member and verifies immutable bytes before serving them; external resolution uses the persisted canonical URL. The app does not offer a download action.
 
 ### Sharing And Permissions
 

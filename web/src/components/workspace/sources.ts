@@ -1,6 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { csrfToken, memberAPI } from "./source-upload";
 
+export type SourceOpenAction =
+  | { kind: "external"; href: string }
+  | { kind: "inline_original"; href: string; media_type: string }
+  | { kind: "none" };
+
 export type MemberSource = {
   id: string;
   notebook_id: string;
@@ -8,6 +13,7 @@ export type MemberSource = {
   format: string;
   byte_size: number;
   state: "processing" | "ready" | "failed";
+  open_action: SourceOpenAction;
   failure_reason?: "limits_exceeded" | "source_unavailable" | "content_unreadable" | "indexing_failed" | "retrieval_unavailable" | "processing_interrupted" | "processing_failed";
 };
 

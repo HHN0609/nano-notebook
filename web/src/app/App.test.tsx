@@ -316,7 +316,7 @@ test("renames, retries, and confirms permanent Source removal", async () => {
   await waitFor(() => expect(actions).toEqual(["retry:src_failed", "rename:new-name.pdf", "delete:src_ready"]));
 });
 
-test("opens an immutable image Source with its Evidence region highlighted", async () => {
+test("opens an immutable image original only in the left Source panel", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   fetchHandler = async (input, init) => {
     const url = String(input);
@@ -324,7 +324,7 @@ test("opens an immutable image Source with its Evidence region highlighted", asy
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
     if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
-      { id: "src_image", notebook_id: "nb_test", title: "diagram.png", format: "png", byte_size: 1024, state: "ready" }
+      { id: "src_image", notebook_id: "nb_test", title: "diagram.png", format: "png", byte_size: 1024, state: "ready", open_action: { kind: "inline_original", href: "/api/v1/sources/src_image/original-asset", media_type: "image/png" } }
     ] });
     if (url.endsWith("/api/v1/sources/src_image") && method === "GET") return json({ source: {
       id: "src_image", title: "diagram.png", format: "png",
@@ -341,15 +341,15 @@ test("opens an immutable image Source with its Evidence region highlighted", asy
   const user = userEvent.setup();
   const sources = await screen.findByRole("region", { name: "Sources" });
   await user.click(await within(sources).findByRole("button", { name: "diagram.png" }));
-  const dialog = await screen.findByRole("dialog", { name: "diagram.png" });
-  const image = within(dialog).getByRole("img", { name: "diagram.png" });
-  expect(image).toHaveAttribute("src", "/api/v1/sources/src_image/viewer-asset");
-  Object.defineProperties(image, { naturalWidth: { value: 100 }, naturalHeight: { value: 100 } });
-  act(() => image.dispatchEvent(new Event("load")));
-  expect(dialog.querySelector(".source-image-highlight")).toHaveStyle({ left: "10%", top: "20%", width: "30%", height: "40%" });
+  const original = await within(sources).findByRole("region", { name: "Original source diagram.png" });
+  expect(within(original).getByRole("img", { name: "diagram.png" })).toHaveAttribute("src", "/api/v1/sources/src_image/original-asset");
+  expect(screen.queryByRole("dialog", { name: "diagram.png" })).not.toBeInTheDocument();
+  expect(within(original).queryByText("Architecture diagram")).not.toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Chat" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Studio" })).toBeInTheDocument();
 });
 
-test("opens immutable rendered PDF pages without exposing the original file", async () => {
+test("opens an immutable PDF original and returns to the Source list", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   fetchHandler = async (input, init) => {
     const url = String(input);
@@ -357,7 +357,7 @@ test("opens immutable rendered PDF pages without exposing the original file", as
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
     if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
-      { id: "src_pdf", notebook_id: "nb_test", title: "paper.pdf", format: "pdf", byte_size: 2048, state: "ready" }
+      { id: "src_pdf", notebook_id: "nb_test", title: "paper.pdf", format: "pdf", byte_size: 2048, state: "ready", open_action: { kind: "inline_original", href: "/api/v1/sources/src_pdf/original-asset", media_type: "application/pdf" } }
     ] });
     if (url.endsWith("/api/v1/sources/src_pdf") && method === "GET") return json({ source: {
       id: "src_pdf", title: "paper.pdf", format: "pdf",
@@ -374,11 +374,39 @@ test("opens immutable rendered PDF pages without exposing the original file", as
   const user = userEvent.setup();
   const sources = await screen.findByRole("region", { name: "Sources" });
   await user.click(await within(sources).findByRole("button", { name: "paper.pdf" }));
-  const dialog = await screen.findByRole("dialog", { name: "paper.pdf" });
-  expect(within(dialog).getByRole("img", { name: "paper.pdf, page 1" })).toHaveAttribute("src", "/api/v1/sources/src_pdf/viewer-asset?ordinal=1");
-  await user.click(within(dialog).getByRole("button", { name: "Next page" }));
-  expect(within(dialog).getByRole("img", { name: "paper.pdf, page 2" })).toHaveAttribute("src", "/api/v1/sources/src_pdf/viewer-asset?ordinal=2");
-  expect(within(dialog).queryByText(/original_object_key|download/i)).not.toBeInTheDocument();
+  const original = await within(sources).findByRole("region", { name: "Original source paper.pdf" });
+  expect(within(original).getByTitle("paper.pdf")).toHaveAttribute("src", "/api/v1/sources/src_pdf/original-asset");
+  expect(within(original).queryByText("Page evidence")).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "paper.pdf" })).not.toBeInTheDocument();
+  await user.click(within(sources).getByRole("button", { name: "Back to Sources" }));
+  expect(await within(sources).findByRole("button", { name: "paper.pdf" })).toBeInTheDocument();
+});
+
+test("uses external links and disables unsupported Source opening", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
+      { id: "src_web", notebook_id: "nb_test", title: "Go guide", format: "html", byte_size: 100, state: "ready", open_action: { kind: "external", href: "https://go.dev/doc/" } },
+      { id: "src_docx", notebook_id: "nb_test", title: "brief.docx", format: "docx", byte_size: 200, state: "ready", open_action: { kind: "none" } }
+    ] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+
+  const sources = await screen.findByRole("region", { name: "Sources" });
+  const link = await within(sources).findByRole("link", { name: "Go guide" });
+  expect(link).toHaveAttribute("href", "https://go.dev/doc/");
+  expect(link).toHaveAttribute("target", "_blank");
+  expect(link).toHaveAttribute("rel", "noreferrer noopener");
+  const unsupported = within(sources).getByText("brief.docx");
+  expect(unsupported.closest("a,button")).toBeNull();
 });
 
 test("opens a published Citation without exposing retrieval internals", async () => {
@@ -388,7 +416,10 @@ test("opens a published Citation without exposing retrieval internals", async ()
     const method = init?.method ?? "GET";
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
-    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
+      { id: "src_1", notebook_id: "nb_test", title: "transformer-notes.pdf", format: "pdf", byte_size: 100, state: "ready", open_action: { kind: "external", href: "https://example.com/transformer-notes" } },
+      { id: "src_image", notebook_id: "nb_test", title: "cache-diagram.png", format: "png", byte_size: 100, state: "ready", open_action: { kind: "inline_original", href: "/api/v1/sources/src_image/original-asset", media_type: "image/png" } }
+    ] });
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
     if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({
       chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
@@ -415,30 +446,18 @@ test("opens a published Citation without exposing retrieval internals", async ()
   render(<App />);
   const user = userEvent.setup();
   const chat = await screen.findByRole("region", { name: "Chat" });
-  const citation = await within(chat).findByRole("button", { name: "Citation 1 for KV caching avoids recomputing prior keys and values." });
-  act(() => citation.focus());
-  expect(citation).toHaveFocus();
-  await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent("transformer-notes.pdf"));
-  act(() => citation.blur());
-  await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
-  await user.hover(citation);
-  const tooltip = await screen.findByRole("tooltip");
-  expect(within(tooltip).getByText("transformer-notes.pdf")).toBeInTheDocument();
-  expect(within(tooltip).getByText("The cache stores keys and values from all prior token positions.")).toBeInTheDocument();
-  expect(within(tooltip).getByText("Page 12")).toBeInTheDocument();
-  expect(screen.queryByRole("dialog", { name: "transformer-notes.pdf" })).not.toBeInTheDocument();
-  await user.click(citation);
-
-  const dialog = await screen.findByRole("dialog", { name: "transformer-notes.pdf" });
+  const citation = await within(chat).findByRole("link", { name: "Citation 1 for KV caching avoids recomputing prior keys and values." });
+  expect(citation).toHaveAttribute("href", "https://example.com/transformer-notes");
+  expect(citation).toHaveAttribute("target", "_blank");
   expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
-  expect(within(dialog).getByText("The cache stores keys and values from all prior token positions.")).toBeInTheDocument();
-  expect(within(dialog).getByText("Page 12")).toBeInTheDocument();
-  expect(within(dialog).queryByText(/rev_1|unit_1/)).not.toBeInTheDocument();
-  await user.click(within(dialog).getByRole("button", { name: "Close" }));
+  await user.click(screen.getByRole("tab", { name: "Chat" }));
+  expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute("aria-selected", "true");
   await user.click(within(chat).getByRole("button", { name: "Citation 2 for KV caching avoids recomputing prior keys and values." }));
-  const imageDialog = await screen.findByRole("dialog", { name: "cache-diagram.png" });
-  const image = within(imageDialog).getByRole("img", { name: "cache-diagram.png" });
-  expect(image).toHaveAttribute("src", "/api/v1/sources/src_image/viewer-asset");
+  expect(screen.getByRole("tab", { name: "Sources" })).toHaveAttribute("aria-selected", "true");
+  const sources = screen.getByRole("region", { name: "Sources" });
+  const original = await within(sources).findByRole("region", { name: "Original source cache-diagram.png" });
+  expect(within(original).getByRole("img", { name: "cache-diagram.png" })).toHaveAttribute("src", "/api/v1/sources/src_image/original-asset");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
 test("renders assistant responses as GitHub Flavored Markdown", async () => {
@@ -524,7 +543,9 @@ test("renders Source references inline and opens the normal Source viewer", asyn
     const method = init?.method ?? "GET";
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
-    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
+      { id: "src_degree", notebook_id: "nb_test", title: "degree-plan.pdf", format: "pdf", byte_size: 100, state: "ready", open_action: { kind: "inline_original", href: "/api/v1/sources/src_degree/original-asset", media_type: "application/pdf" } }
+    ] });
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
     if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({
       chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
@@ -551,9 +572,11 @@ test("renders Source references inline and opens the normal Source viewer", asyn
   expect(references[0]).toHaveTextContent("[1]");
   expect(within(chat).queryByText("[2]")).not.toBeInTheDocument();
   await user.click(references[0]);
-  const viewer = await screen.findByRole("dialog", { name: "degree-plan.pdf" });
-  expect(within(viewer).getByText("Complete 120 credits and keep a 2.0 GPA.")).toBeInTheDocument();
-  expect(within(viewer).queryByText(/Citation preview|The cache stores/)).not.toBeInTheDocument();
+  const sources = screen.getByRole("region", { name: "Sources" });
+  const original = await within(sources).findByRole("region", { name: "Original source degree-plan.pdf" });
+  expect(within(original).getByTitle("degree-plan.pdf")).toHaveAttribute("src", "/api/v1/sources/src_degree/original-asset");
+  expect(within(original).queryByText("Complete 120 credits and keep a 2.0 GPA.")).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
 test("submits one durable Message and projects the final answer from Run SSE", async () => {

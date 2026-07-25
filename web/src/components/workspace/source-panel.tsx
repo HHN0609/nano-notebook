@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { IconButton } from "../icons/icon-button";
@@ -9,27 +8,8 @@ import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { acceptedSourceFormats, csrfToken, memberAPI, uploadSourceFile } from "./source-upload";
 import type { MemberSource, SourcesController } from "./sources";
-import { SourceImageViewer, type SourceImageRegion } from "./source-image-viewer";
 import { SourceDiscovery } from "./source-discovery";
-
-type SourceCoordinate = {
-  page_number?: number;
-  slide_number?: number;
-  start_seconds?: number;
-  end_seconds?: number;
-  kind?: string;
-} & SourceImageRegion;
-
-type SourceView = {
-  id: string;
-  title: string;
-  format: string;
-  revision: {
-    coverage: { status: string; gaps: Array<{ reason: string; impact: string }> };
-    units: Array<{ id: string; kind: string; text: string; coordinate?: SourceCoordinate }>;
-	viewer?: { kind: "pages"; page_count: number };
-  };
-};
+import { SourceOpenTarget } from "./source-open-target";
 
 export type SourcePanelCopy = {
   title: string;
@@ -66,6 +46,9 @@ export type SourcePanelCopy = {
   sourceUnavailableLabel: string;
   uploadFailedLabel: string;
   closeLabel: string;
+  backToSourcesLabel: string;
+  sourceOriginalLabel: string;
+  sourceOriginalUnavailableLabel: string;
   sourcePreviewLabel: string;
   renameDialogTitle: string;
   sourceTitleLabel: string;
@@ -78,12 +61,15 @@ export type SourcePanelCopy = {
   failureReasonLabels: Record<NonNullable<MemberSource["failure_reason"]>, string>;
 };
 
-export function SourcePanelContent({ copy, notebookID, originChatID, requestedDiscoverySessionID, controller, canMaintain = true, onDiscoveryModeChange }: {
+export function SourcePanelContent({ copy, notebookID, originChatID, requestedDiscoverySessionID, controller, viewingSource, onOpenSource, onCloseSource, canMaintain = true, onDiscoveryModeChange }: {
   copy: SourcePanelCopy;
   notebookID: string;
   originChatID?: string;
   requestedDiscoverySessionID?: string;
   controller: SourcesController;
+  viewingSource?: MemberSource;
+  onOpenSource: (source: MemberSource) => void;
+  onCloseSource: () => void;
   canMaintain?: boolean;
   onDiscoveryModeChange?: (active: boolean) => void;
 }) {
@@ -94,7 +80,6 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
   const [url, setURL] = useState("");
   const [addingURL, setAddingURL] = useState(false);
   const [uploads, setUploads] = useState<Array<{ id: string; title: string; state: "uploading" | "failed" }>>([]);
-  const [viewSourceID, setViewSourceID] = useState<string | null>(null);
   const [editingSource, setEditingSource] = useState<{ id: string; title: string } | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [removingSource, setRemovingSource] = useState<MemberSource | null>(null);
@@ -199,7 +184,7 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
                   onChange={() => controller.toggle(source.id)}
                 />
               ) : <MaterialSymbol name={source.state === "failed" ? "error" : "hourglass_top"} size={18} />}
-              <button className="source-list-title" type="button" disabled={source.state !== "ready"} onClick={() => setViewSourceID(source.id)}>{source.title}</button>
+              <SourceOpenTarget source={source.state === "ready" ? source : undefined} className="source-list-title" onInlineOriginal={onOpenSource}>{source.title}</SourceOpenTarget>
               <span className={`source-state source-state--${source.state}`}>{statusLabels[source.state]}</span>
               {canMaintain && source.state === "failed" ? <IconButton icon="refresh" label={`${copy.retryLabel} ${source.title}`} onClick={() => void sourceAction(source.id, "retry")} /> : null}
               {canMaintain ? <IconButton icon="edit" label={`${copy.renameLabel} ${source.title}`} onClick={() => { setEditingSource(source); setEditTitle(source.title); }} /> : null}
@@ -211,6 +196,10 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
       )}
     </>
   );
+
+  if (viewingSource) {
+    return <SourceOriginalViewer key={viewingSource.id} source={viewingSource} onBack={onCloseSource} copy={copy} />;
+  }
 
   return (
     <div className="workspace-panel-content source-panel-content">
@@ -272,8 +261,6 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
         </DialogContent>
       </Dialog>
 
-      <SourceViewer sourceID={viewSourceID} onOpenChange={(open) => !open && setViewSourceID(null)} copy={copy} />
-
       <Dialog open={Boolean(editingSource)} onOpenChange={(open) => !open && setEditingSource(null)}>
         <DialogContent className="source-dialog" closeLabel={copy.closeLabel}>
           <DialogTitle>{copy.renameDialogTitle}</DialogTitle>
@@ -304,73 +291,25 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
   );
 }
 
-export type SourceViewerCopy = Pick<SourcePanelCopy,
-  "closeLabel" | "sourcePreviewLabel" | "processingLabel" | "sourceUnavailableLabel" | "coverageWarningLabel"
->;
-
-export function SourceViewer({ sourceID, onOpenChange, copy }: {
-  sourceID: string | null;
-  onOpenChange: (open: boolean) => void;
-  copy: SourceViewerCopy;
-}) {
-  const view = useQuery({
-    queryKey: ["source-view", sourceID],
-    enabled: Boolean(sourceID),
-    queryFn: async (): Promise<SourceView> => {
-      const response = await memberAPI(`/api/v1/sources/${sourceID}`);
-      if (!response.ok) throw new Error(copy.sourceUnavailableLabel);
-      return ((await response.json()) as { source: SourceView }).source;
-    },
-    retry: false
-  });
+function SourceOriginalViewer({ source, onBack, copy }: { source: MemberSource; onBack: () => void; copy: SourcePanelCopy }) {
+  const [failed, setFailed] = useState(false);
+  const action = source.open_action;
+  const content = action.kind !== "inline_original" || failed
+    ? <p className="source-original-unavailable" role="alert">{copy.sourceOriginalUnavailableLabel}</p>
+    : action.media_type.startsWith("image/")
+      ? <img src={action.href} alt={source.title} onError={() => setFailed(true)} />
+      : action.media_type.startsWith("audio/")
+        ? <audio src={action.href} controls aria-label={source.title} onError={() => setFailed(true)} />
+        : <iframe src={action.href} title={source.title} onError={() => setFailed(true)} />;
   return (
-    <Dialog open={Boolean(sourceID)} onOpenChange={onOpenChange}>
-      <DialogContent className="source-viewer-dialog" closeLabel={copy.closeLabel}>
-        <DialogTitle>{view.data?.title ?? copy.sourcePreviewLabel}</DialogTitle>
-        <DialogDescription>{view.data ? `${view.data.format.toUpperCase()} · ${view.data.revision.coverage.status}` : copy.processingLabel}</DialogDescription>
-        {view.isError ? <p role="alert">{copy.sourceUnavailableLabel}</p> : null}
-        {view.data?.revision.coverage.gaps.length ? (
-          <div className="source-coverage-warning" role="note">
-            <strong>{copy.coverageWarningLabel}</strong>
-            {view.data.revision.coverage.gaps.map((gap, index) => <p key={index}>{gap.reason} · {gap.impact}</p>)}
-          </div>
-        ) : null}
-        {view.data && isImageFormat(view.data.format) ? (
-          <SourceImageViewer
-            sourceID={view.data.id}
-            title={view.data.title}
-            regions={view.data.revision.units.map((unit) => unit.coordinate ?? {}).filter((coordinate) => coordinate.kind === "image_region")}
-          />
-        ) : null}
-		{view.data?.revision.viewer?.kind === "pages" ? (
-		  <SourceDocumentViewer sourceID={view.data.id} title={view.data.title} pageCount={view.data.revision.viewer.page_count} />
-		) : null}
-        <div className="source-viewer-content">
-          {view.data?.revision.units.map((unit) => <section key={unit.id}><small>{unit.kind}</small><p>{unit.text}</p></section>)}
-        </div>
-      </DialogContent>
-    </Dialog>
+    <div className="workspace-panel-content source-panel-content source-original-viewer">
+      <div className="workspace-panel-header">
+        <h2 className="source-original-breadcrumb"><span>{copy.title}</span><MaterialSymbol name="chevron_right" size={18} /><span>{source.title}</span></h2>
+        <IconButton icon="arrow_back" label={copy.backToSourcesLabel} symbolSize={19} onClick={onBack} />
+      </div>
+      <section className="source-original-viewer-body" role="region" aria-label={`${copy.sourceOriginalLabel} ${source.title}`}>
+        {content}
+      </section>
+    </div>
   );
-}
-
-function SourceDocumentViewer({ sourceID, title, pageCount }: { sourceID: string; title: string; pageCount: number }) {
-	const [page, setPage] = useState(1);
-	return (
-		<div className="source-document-viewer">
-			<div className="source-document-viewer-controls">
-				<Button variant="outline" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))} aria-label="Previous page">
-					<MaterialSymbol name="chevron_left" />
-				</Button>
-				<span role="status">{page} / {pageCount}</span>
-				<Button variant="outline" disabled={page >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))} aria-label="Next page">
-					<MaterialSymbol name="chevron_right" />
-				</Button>
-			</div>
-			<img src={`/api/v1/sources/${sourceID}/viewer-asset?ordinal=${page}`} alt={`${title}, page ${page}`} />
-		</div>
-	);
-}
-
-function isImageFormat(format: string) {
-  return format === "png" || format === "jpeg" || format === "webp";
 }

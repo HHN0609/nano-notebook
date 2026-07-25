@@ -340,6 +340,8 @@ One transaction revalidates current Run authority, lease fence, Chat ownership, 
 
 ## 15. Source Viewer And Citations
 
+> **Superseded interaction (Sprint 8):** the processed Viewer, Evidence hover preview, coordinate focus, derived-page rendering, and Coverage presentation below remain historical Sprint 6 behavior. The active opening contract is defined by [Left Source Original Viewer](../superpowers/specs/2026-07-25-left-source-original-viewer-design.md): external web and YouTube Sources open their canonical page; allowlisted immutable originals render only in the left Sources panel; unsupported originals have no open action; Chat citations use the same routing. Ingestion, Evidence authority, Citation persistence, deletion, and authorization semantics remain unchanged.
+
 One Viewer shell supports two entry modes:
 
 - direct Source inspection from the Sources list;
