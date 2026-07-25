@@ -22,6 +22,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
+	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/mailoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -85,6 +86,7 @@ type workerConfig struct {
 	DocumentRenderMaxOutputBytes   int64
 	SourceProcessingMaxBytes       int64
 	SourceProcessingMaxRunes       int
+	FetcherURL                     string
 	BraveSearchAPIKey              string
 	SourceDiscoveryLease           time.Duration
 	SourceDiscoveryPoll            time.Duration
@@ -271,10 +273,27 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	remoteFetcher, err := fetcher.NewRemoteClient(
+		config.FetcherURL,
+		&http.Client{Timeout: 30 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+		config.SourceProcessingMaxBytes,
+	)
+	if err != nil {
+		slog.Error("Source Discovery Fetcher client invalid", "error", err)
+		os.Exit(1)
+	}
+	sourceExtractor := sourceprocessing.NewNativeExtractor(modelClient, sourceprocessing.NativeExtractorConfig{
+		VisionModel: config.SourceVisionModel, TranscriptionModel: config.SourceTranscriptionModel,
+		VisionPromptVersion: config.SourceVisionPromptVersion, MaxVisionPages: config.SourceMaxVisionPages,
+	})
+	candidateValidator := sourcediscovery.NewImportabilityValidator(remoteFetcher, sourceExtractor, sourcediscovery.ImportabilityValidatorConfig{
+		ExtractionConfigID: config.SourceExtractionConfigID,
+		MaxBytes:           config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
+	})
 	leaderExecutor := agent.NewLeaderExecutor(
 		db.Pool(), controller, agent.NewModelLeaderRouter(modelClient),
 		agent.NewModelResearchPlanner(modelClient), searchProvider, agent.WithLeaderTraceSink(traceExporter),
-		agent.WithLeaderReplayStager(replayStager),
+		agent.WithLeaderReplayStager(replayStager), agent.WithResearchCandidateValidator(candidateValidator),
 	)
 	mailSender := mailoutbox.NewSender(
 		mailoutbox.NewQueue(db.Pool(), config.MailLeaseDuration),
@@ -310,10 +329,7 @@ func main() {
 	sourceProcessor := sourceprocessing.NewProcessorWithExtractorTraceAndRenderer(
 		db.Pool(), sourceQueue, evidence.NewPublisher(db.Pool(), sourceObjects), sourceObjects,
 		sourceprojection.New(db.Pool(), qdrant, modelClient),
-		sourceprocessing.NewNativeExtractor(modelClient, sourceprocessing.NativeExtractorConfig{
-			VisionModel: config.SourceVisionModel, TranscriptionModel: config.SourceTranscriptionModel,
-			VisionPromptVersion: config.SourceVisionPromptVersion, MaxVisionPages: config.SourceMaxVisionPages,
-		}), documentRenderer, traceExporter,
+		sourceExtractor, documentRenderer, traceExporter,
 		sourceprocessing.Config{
 			ExtractionConfigID: config.SourceExtractionConfigID,
 			ExtractorAdapterID: "native-with-isolated-renderer",
@@ -329,7 +345,7 @@ func main() {
 	sourceProcessingDone := make(chan error, 1)
 	go func() { sourceProcessingDone <- sourceProcessingService.Run(ctx) }()
 	discoveryQueue := sourcediscovery.NewQueue(db.Pool(), config.SourceDiscoveryLease)
-	discoveryProcessor := sourcediscovery.NewProcessor(db.Pool(), discoveryQueue, searchProvider)
+	discoveryProcessor := sourcediscovery.NewProcessorWithValidator(db.Pool(), discoveryQueue, searchProvider, candidateValidator)
 	discoveryService := sourcediscovery.NewService(discoveryProcessor, config.SourceDiscoveryPoll)
 	discoveryDone := make(chan error, 1)
 	go func() { discoveryDone <- discoveryService.Run(ctx) }()
@@ -655,6 +671,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		DocumentRenderDPI: documentRenderDPI, DocumentRenderMaxPixelsPerPage: int64(documentRenderMaxPixels),
 		DocumentRenderMaxOutputBytes: int64(documentRenderMaxOutput),
 		SourceProcessingMaxBytes:     int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
+		FetcherURL:           strings.TrimRight(env("NANO_FETCHER_URL", "http://127.0.0.1:8083"), "/"),
 		BraveSearchAPIKey:    strings.TrimSpace(os.Getenv("NANO_BRAVE_SEARCH_API_KEY")),
 		SourceDiscoveryLease: sourceDiscoveryLease, SourceDiscoveryPoll: sourceDiscoveryPoll,
 		AgentInteractiveConcurrency: agentInteractiveConcurrency, SourceProcessingConcurrency: sourceProcessingConcurrency,
@@ -686,7 +703,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.DocumentRenderMaxPages < 1 || config.DocumentRenderMaxPages > 500 || config.DocumentRenderDPI < 72 || config.DocumentRenderDPI > 300 ||
 		config.DocumentRenderMaxPixelsPerPage < 1 || config.DocumentRenderMaxPixelsPerPage > 100_000_000 ||
 		config.DocumentRenderMaxOutputBytes < 1 || config.DocumentRenderMaxOutputBytes > 2<<30 ||
-		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
+		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 || strings.TrimSpace(config.FetcherURL) == "" ||
 		config.SourceDiscoveryLease <= 0 || config.SourceDiscoveryPoll <= 0 ||
 		workload.ValidateInteractiveCapacity(config.AgentInteractiveConcurrency, config.SourceProcessingConcurrency) != nil ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 ||

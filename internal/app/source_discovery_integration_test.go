@@ -154,6 +154,54 @@ func TestSourceDiscoveryImportsPersistedSelectionThroughURLSourcePipeline(t *tes
 	}
 }
 
+func TestSourceDiscoveryDropsCandidateWhenImportAdmissionFails(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "discovery-import-failure@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "discovery-import-failure")
+	ownerID := sourceTestUserID(t, api, "discovery-import-failure@example.com")
+	ctx := context.Background()
+	if err := api.db.WithRequestPrincipal(ctx, ownerID, func(tx pgx.Tx) error {
+		_, err := sourcediscovery.NewStore(tx).CreateSession(ctx, sourcediscovery.CreateSessionCommand{
+			ID: "dsc_import_failure", JobID: "dscjob_import_failure", NotebookID: notebookID, UserID: ownerID,
+			Origin: sourcediscovery.OriginManual, Query: "blocked source",
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update source_discovery_sessions set status='ready',completed_at=now() where id='dsc_import_failure'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update source_discovery_jobs set status='succeeded' where id='dscjob_import_failure'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into source_discovery_candidates(id,session_id,ordinal,title,canonical_url,display_url,snippet,selected)
+		values('dscand_import_failure','dsc_import_failure',0,'Blocked','https://blocked.example','blocked.example','Blocked',true)
+	`); err != nil {
+		t.Fatal(err)
+	}
+	api.server = app.NewServer(app.Config{
+		CookieSecure: false, SourceFetcher: &recordingSourceFetcher{err: fetcher.ErrUnsafeDestination},
+		SourceSnapshots: objectstore.NewMemoryStore(),
+	}, api.db)
+	api.handler = api.server.Handler()
+	response := api.postJSONWithCookieAndCSRF(t,
+		"/api/v1/source-discovery-sessions/dsc_import_failure/imports", map[string]any{},
+		owner, csrf, csrf.Value, "discovery-import-failure-1",
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("import status=%d body=%s", response.Code, response.Body.String())
+	}
+	var candidateCount int
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from source_discovery_candidates where id='dscand_import_failure'`).Scan(&candidateCount); err != nil {
+		t.Fatal(err)
+	}
+	if candidateCount != 0 {
+		t.Fatalf("failed candidate count=%d", candidateCount)
+	}
+}
+
 func TestSourceDiscoveryImportDeduplicatesNormalizedRedirectTargetAcrossSessions(t *testing.T) {
 	api := newTestAPI(t)
 	owner, csrf := api.registerWithCSRF(t, "discovery-redirect-dedupe@example.com")
@@ -282,7 +330,9 @@ func TestSourceDiscoverySelectionReplacementPersists(t *testing.T) {
 		update source_discovery_jobs set status='succeeded' where id='dscjob_selection';
 		insert into source_discovery_candidates(id,session_id,ordinal,title,canonical_url,display_url,snippet)
 		values('dscand_select_1','dsc_selection',0,'First','https://first.example','first.example','First'),
-		      ('dscand_select_2','dsc_selection',1,'Second','https://second.example','second.example','Second');
+		      ('dscand_select_2','dsc_selection',1,'Second','https://second.example','second.example','Second'),
+		      ('dscand_select_failed','dsc_selection',2,'Failed','https://failed.example','failed.example','Failed');
+		update source_discovery_candidates set status='import_failed',selected=false where id='dscand_select_failed';
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -299,6 +349,13 @@ func TestSourceDiscoverySelectionReplacementPersists(t *testing.T) {
 	decodeBody(t, response, &body)
 	if body.Session.Candidates[0].Selected || !body.Session.Candidates[1].Selected {
 		t.Fatalf("selection = %+v", body.Session.Candidates)
+	}
+
+	response = api.patchJSONWithCookie(t, "/api/v1/source-discovery-sessions/dsc_selection/selection",
+		map[string]any{"candidate_ids": []string{"dscand_select_failed"}}, owner,
+	)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("failed candidate selection status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 
@@ -351,6 +408,48 @@ func TestSourceDiscoveryProcessorExecutesQueuedBraveCompatibleSearch(t *testing.
 	}
 }
 
+func TestSourceDiscoveryProcessorPublishesOnlyValidatedCandidates(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "discovery-validation@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "discovery-validation")
+	ownerID := sourceTestUserID(t, api, "discovery-validation@example.com")
+	ctx := context.Background()
+	if err := api.db.WithRequestPrincipal(ctx, ownerID, func(tx pgx.Tx) error {
+		_, err := sourcediscovery.NewStore(tx).CreateSession(ctx, sourcediscovery.CreateSessionCommand{
+			ID: "dsc_validation", JobID: "dscjob_validation", NotebookID: notebookID, UserID: ownerID,
+			Origin: sourcediscovery.OriginManual, Query: "validated sources",
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	provider := &stubWebSearchProvider{candidates: []websearch.Candidate{
+		{Title: "Usable", URL: "https://usable.example/article", DisplayURL: "usable.example/article", Rank: 1},
+		{Title: "Blocked", URL: "https://blocked.example/article", DisplayURL: "blocked.example/article", Rank: 2},
+	}}
+	validator := &stubDiscoveryCandidateValidator{accepted: map[string]bool{"https://usable.example/article": true}}
+	processor := sourcediscovery.NewProcessorWithValidator(
+		api.db.Pool(), sourcediscovery.NewQueue(api.db.Pool(), 30*time.Second), provider, validator,
+	)
+	if processed, err := processor.ProcessNext(ctx); err != nil || !processed {
+		t.Fatalf("ProcessNext processed=%v err=%v", processed, err)
+	}
+	var session sourcediscovery.Session
+	if err := api.db.WithRequestPrincipal(ctx, ownerID, func(tx pgx.Tx) error {
+		var readErr error
+		session, readErr = sourcediscovery.NewStore(tx).GetSession(ctx, "dsc_validation")
+		return readErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Candidates) != 1 || session.Candidates[0].Title != "Usable" {
+		t.Fatalf("validated candidates = %+v", session.Candidates)
+	}
+	if len(validator.urls) != 2 {
+		t.Fatalf("validated URLs = %+v", validator.urls)
+	}
+}
+
 func TestSourceDiscoveryProcessorPersistsSafeProviderFailure(t *testing.T) {
 	api := newTestAPI(t)
 	owner := api.register(t, "discovery-failure@example.com")
@@ -394,6 +493,16 @@ type stubWebSearchProvider struct {
 	requests   []websearch.Request
 	candidates []websearch.Candidate
 	err        error
+}
+
+type stubDiscoveryCandidateValidator struct {
+	accepted map[string]bool
+	urls     []string
+}
+
+func (v *stubDiscoveryCandidateValidator) Validate(_ context.Context, rawURL string) bool {
+	v.urls = append(v.urls, rawURL)
+	return v.accepted[rawURL]
 }
 
 func (p *stubWebSearchProvider) Search(_ context.Context, request websearch.Request) ([]websearch.Candidate, error) {

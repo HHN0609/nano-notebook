@@ -10,13 +10,22 @@ import (
 )
 
 type Processor struct {
-	pool     *pgxpool.Pool
-	queue    *Queue
-	provider websearch.Provider
+	pool      *pgxpool.Pool
+	queue     *Queue
+	provider  websearch.Provider
+	validator CandidateValidator
+}
+
+type CandidateValidator interface {
+	Validate(context.Context, string) bool
 }
 
 func NewProcessor(pool *pgxpool.Pool, queue *Queue, provider websearch.Provider) *Processor {
 	return &Processor{pool: pool, queue: queue, provider: provider}
+}
+
+func NewProcessorWithValidator(pool *pgxpool.Pool, queue *Queue, provider websearch.Provider, validator CandidateValidator) *Processor {
+	return &Processor{pool: pool, queue: queue, provider: provider, validator: validator}
 }
 
 func (p *Processor) ProcessNext(ctx context.Context) (bool, error) {
@@ -54,6 +63,16 @@ func (p *Processor) ProcessNext(ctx context.Context) (bool, error) {
 			ID: "dscand_" + uuid.NewString(), Title: result.Title, URL: result.URL,
 			DisplayURL: result.DisplayURL, Snippet: result.Description, ProviderRank: result.Rank,
 		})
+	}
+	candidates = canonicalCandidates(candidates)
+	if p.validator != nil {
+		validated := make([]DiscoveredCandidate, 0, len(candidates))
+		for _, candidate := range candidates {
+			if p.validator.Validate(ctx, candidate.URL) {
+				validated = append(validated, candidate)
+			}
+		}
+		candidates = validated
 	}
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {

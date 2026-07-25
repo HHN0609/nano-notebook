@@ -1553,7 +1553,7 @@ grant select, insert, update, delete on
 	agent_draft_source_references,
 	chat_citations
 to nano_worker;
-grant select, update on source_sources to nano_worker;
+grant select, update, delete on source_sources to nano_worker;
 grant select, update on source_upload_intents to nano_worker;
 grant select, insert, update, delete on source_processing_jobs to nano_worker;
 grant select, insert, update, delete on source_purge_jobs to nano_worker;
@@ -1935,6 +1935,11 @@ create policy source_sources_worker_update on source_sources
 	for update to nano_worker
 	using (true)
 	with check (true);
+
+drop policy if exists source_sources_worker_delete on source_sources;
+create policy source_sources_worker_delete on source_sources
+	for delete to nano_worker
+	using (true);
 
 drop policy if exists source_upload_intents_app_read on source_upload_intents;
 create policy source_upload_intents_app_read on source_upload_intents

@@ -35,6 +35,9 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	if config.RetrievalBootstrapMode != "development" || config.RetrievalBootstrapConfigPath != "evals/rag/pinned-config-v1.json" {
 		t.Fatalf("Retrieval bootstrap defaults=%q/%q", config.RetrievalBootstrapMode, config.RetrievalBootstrapConfigPath)
 	}
+	if config.FetcherURL != "http://127.0.0.1:8083" {
+		t.Fatalf("Fetcher URL default=%q", config.FetcherURL)
+	}
 }
 
 func TestLoadWorkerConfigAcceptsRequiredRetrievalAuthority(t *testing.T) {

@@ -103,7 +103,12 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 		"剧本 拍摄 后期": {{Title: "Film workflow duplicate", URL: "https://example.com/workflow#part", DisplayURL: "example.com/workflow", Description: "Duplicate", Rank: 1}, {Title: "Editing", URL: "https://example.org/editing", DisplayURL: "example.org/editing", Description: "Editing", Rank: 2}},
 	}}
 	normal := &recordingNormalExecutor{}
-	executor := agent.NewLeaderExecutor(api.db.Pool(), normal, fixedLeaderRouter{route: agent.LeaderDelegateResearch}, fixedResearchPlanner{queries: []string{"电影制作流程", "剧本 拍摄 后期"}}, provider)
+	validator := &researchCandidateValidator{accepted: map[string]bool{"https://example.com/workflow?utm_source=one": true}}
+	executor := agent.NewLeaderExecutor(
+		api.db.Pool(), normal, fixedLeaderRouter{route: agent.LeaderDelegateResearch},
+		fixedResearchPlanner{queries: []string{"电影制作流程", "剧本 拍摄 后期"}}, provider,
+		agent.WithResearchCandidateValidator(validator),
+	)
 	queue := jobs.NewQueue(api.db.Pool())
 
 	parentJob, ok, err := queue.ClaimNext(context.Background())
@@ -166,8 +171,11 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	`, childRunID).Scan(&sessionID, &childStatus, &requeuedStatus, &candidateCount); err != nil {
 		t.Fatal(err)
 	}
-	if sessionID == "" || childStatus != "completed" || requeuedStatus != "queued" || candidateCount != 2 {
+	if sessionID == "" || childStatus != "completed" || requeuedStatus != "queued" || candidateCount != 1 {
 		t.Fatalf("child=%q parent job=%q session=%q candidates=%d", childStatus, requeuedStatus, sessionID, candidateCount)
+	}
+	if len(validator.urls) != 2 {
+		t.Fatalf("validated Research URLs=%+v", validator.urls)
 	}
 	if sessionID != *parentSessionID {
 		t.Fatalf("completed Session=%q, want delegated Session=%q", sessionID, *parentSessionID)
@@ -198,6 +206,16 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	if projection.Code != http.StatusOK || !strings.Contains(projection.Body.String(), sessionID) || strings.Contains(projection.Body.String(), childRunID) {
 		t.Fatalf("member projection status=%d body=%s", projection.Code, projection.Body.String())
 	}
+}
+
+type researchCandidateValidator struct {
+	accepted map[string]bool
+	urls     []string
+}
+
+func (v *researchCandidateValidator) Validate(_ context.Context, rawURL string) bool {
+	v.urls = append(v.urls, rawURL)
+	return v.accepted[rawURL]
 }
 
 func TestLeaderAndResearchModelUsageAndReplayAppearInTheirRunTraces(t *testing.T) {

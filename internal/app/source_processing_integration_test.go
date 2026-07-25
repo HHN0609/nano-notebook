@@ -71,6 +71,63 @@ func TestFreshDatabaseBootstrapProcessesFirstTextSourceToReady(t *testing.T) {
 	}
 }
 
+func TestTerminalFailurePurgesDiscoveredURLSource(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "failed-discovery-source@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "failed-discovery-source")
+	ownerID := sourceTestUserID(t, api, "failed-discovery-source@example.com")
+	payload := []byte("content that later fails processing")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_discovery_failed", "srcjob_discovery_failed", source.FormatTXT, payload)
+	identity, err := source.CanonicalURLIdentity("https://example.com/unreadable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set input_kind='url',origin_url='https://example.com/unreadable',
+			final_url='https://example.com/unreadable',origin_url_identity=$1,final_url_identity=$1
+		where id='src_discovery_failed'
+	`, identity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_discovery_sessions(id,notebook_id,user_id,origin,query,status,completed_at)
+		values('dsc_failed_source',$1,$2,'manual','unreadable','ready',now())
+	`, notebookID, ownerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_discovery_candidates(
+			id,session_id,ordinal,title,canonical_url,display_url,snippet,selected,status,source_id
+		) values(
+			'dscand_failed_source','dsc_failed_source',0,'Unreadable','https://example.com/unreadable',
+			'example.com/unreadable','Unreadable',true,'imported','src_discovery_failed'
+		)
+	`); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok || lease.SourceID != "src_discovery_failed" {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	if err := queue.Fail(context.Background(), lease.ID, lease.LeaseToken, "extraction_invalid"); err != nil {
+		t.Fatal(err)
+	}
+	var sourceCount, candidateCount, purgeCount int
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select
+			(select count(*) from source_sources where id='src_discovery_failed'),
+			(select count(*) from source_discovery_candidates where id='dscand_failed_source'),
+			(select count(*) from source_purge_jobs where source_id='src_discovery_failed' and state='pending'
+				and original_object_key=$1 and object_keys @> jsonb_build_array($1::text))
+	`, objectKey).Scan(&sourceCount, &candidateCount, &purgeCount); err != nil {
+		t.Fatal(err)
+	}
+	if sourceCount != 0 || candidateCount != 0 || purgeCount != 1 {
+		t.Fatalf("source=%d candidate=%d purge=%d", sourceCount, candidateCount, purgeCount)
+	}
+}
+
 func TestTextSourceProcessorPublishesActiveEvidenceAndReadyAtomically(t *testing.T) {
 	api := newTestAPI(t)
 	owner := api.register(t, "source-processing@example.com")

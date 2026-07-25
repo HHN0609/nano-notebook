@@ -26,13 +26,14 @@ type AttemptExecutor interface {
 // Leader Runs either continue through the normal controller or suspend while a
 // durable, non-member-visible Research child gathers Source candidates.
 type LeaderExecutor struct {
-	pool         *pgxpool.Pool
-	normal       AttemptExecutor
-	router       LeaderRouter
-	planner      ResearchPlanner
-	provider     websearch.Provider
-	traceSink    TraceSink
-	replayStager ReplayStager
+	pool               *pgxpool.Pool
+	normal             AttemptExecutor
+	router             LeaderRouter
+	planner            ResearchPlanner
+	provider           websearch.Provider
+	candidateValidator sourcediscovery.CandidateValidator
+	traceSink          TraceSink
+	replayStager       ReplayStager
 }
 
 type LeaderExecutorOption func(*LeaderExecutor)
@@ -43,6 +44,10 @@ func WithLeaderTraceSink(sink TraceSink) LeaderExecutorOption {
 
 func WithLeaderReplayStager(stager ReplayStager) LeaderExecutorOption {
 	return func(executor *LeaderExecutor) { executor.replayStager = stager }
+}
+
+func WithResearchCandidateValidator(validator sourcediscovery.CandidateValidator) LeaderExecutorOption {
+	return func(executor *LeaderExecutor) { executor.candidateValidator = validator }
 }
 
 func NewLeaderExecutor(pool *pgxpool.Pool, normal AttemptExecutor, router LeaderRouter, planner ResearchPlanner, provider websearch.Provider, options ...LeaderExecutorOption) *LeaderExecutor {
@@ -330,7 +335,17 @@ func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, r
 		}
 		resultGroups = append(resultGroups, results)
 	}
-	return e.completeResearch(ctx, attempt, mergeResearchCandidates(resultGroups))
+	candidates := mergeResearchCandidates(resultGroups)
+	if e.candidateValidator != nil {
+		validated := make([]sourcediscovery.DiscoveredCandidate, 0, len(candidates))
+		for _, candidate := range candidates {
+			if e.candidateValidator.Validate(ctx, candidate.URL) {
+				validated = append(validated, candidate)
+			}
+		}
+		candidates = validated
+	}
+	return e.completeResearch(ctx, attempt, candidates)
 }
 
 func mergeResearchCandidates(groups [][]websearch.Candidate) []sourcediscovery.DiscoveredCandidate {

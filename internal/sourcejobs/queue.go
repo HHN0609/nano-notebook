@@ -2,6 +2,7 @@ package sourcejobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -317,15 +318,21 @@ func (q *Queue) finish(ctx context.Context, jobID, leaseToken string, succeeded 
 	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
 		return err
 	}
-	var sourceID string
+	var sourceID, notebookID, inputKind, originalObjectKey string
+	var discoveryUserID *string
 	var current source.State
 	err = tx.QueryRow(ctx, `
-		select s.id, s.state
+		select s.id, s.state, s.notebook_id, s.input_kind, s.original_object_key,
+			(select session.user_id
+			 from source_discovery_candidates candidate
+			 join source_discovery_sessions session on session.id=candidate.session_id
+			 where candidate.source_id=s.id
+			 order by candidate.updated_at desc,candidate.id limit 1)
 		from source_processing_jobs j
 		join source_sources s on s.id=j.source_id
 		where j.id=$1 and j.status='running' and j.lease_token=$2::uuid and j.lease_expires_at > now()
 		for update of j, s
-	`, jobID, leaseToken).Scan(&sourceID, &current)
+	`, jobID, leaseToken).Scan(&sourceID, &current, &notebookID, &inputKind, &originalObjectKey, &discoveryUserID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrLeaseLost
 	}
@@ -353,7 +360,101 @@ func (q *Queue) finish(ctx context.Context, jobID, leaseToken string, succeeded 
 	`, jobID, nextJob, persistedError); err != nil {
 		return err
 	}
+	if !succeeded && inputKind == "url" && discoveryUserID != nil {
+		if err := purgeDiscoveredURLSource(ctx, tx, sourceID, notebookID, *discoveryUserID, originalObjectKey); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
+}
+
+func purgeDiscoveredURLSource(ctx context.Context, tx pgx.Tx, sourceID, notebookID, userID, originalObjectKey string) error {
+	objectKeys := []string{originalObjectKey}
+	rows, err := tx.Query(ctx, `
+		select artifact_object_key from source_evidence_revisions where source_id=$1 order by revision_no
+	`, sourceID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var objectKey string
+		if err := rows.Scan(&objectKey); err != nil {
+			rows.Close()
+			return err
+		}
+		objectKeys = append(objectKeys, objectKey)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `
+		select object_key from source_viewer_artifacts where source_id=$1 order by revision_id,ordinal
+	`, sourceID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var objectKey string
+		if err := rows.Scan(&objectKey); err != nil {
+			rows.Close()
+			return err
+		}
+		objectKeys = append(objectKeys, objectKey)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	type projectionScope struct {
+		NotebookID     string `json:"notebook_id"`
+		SourceID       string `json:"source_id"`
+		RevisionID     string `json:"revision_id"`
+		IndexVersionID string `json:"index_version_id"`
+	}
+	projectionScopes := make([]projectionScope, 0)
+	rows, err = tx.Query(ctx, `
+		select notebook_id,source_id,revision_id,index_version_id
+		from retrieval_source_index_builds where source_id=$1 order by index_version_id,revision_id
+	`, sourceID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var scope projectionScope
+		if err := rows.Scan(&scope.NotebookID, &scope.SourceID, &scope.RevisionID, &scope.IndexVersionID); err != nil {
+			rows.Close()
+			return err
+		}
+		projectionScopes = append(projectionScopes, scope)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	objectManifest, err := json.Marshal(objectKeys)
+	if err != nil {
+		return err
+	}
+	projectionManifest, err := json.Marshal(projectionScopes)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `delete from source_discovery_candidates where source_id=$1`, sourceID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into source_purge_jobs(
+			id,source_id,notebook_id,created_by_user_id,original_object_key,object_keys,projection_scopes,state
+		) values($1,$2,$3,$4,$5,$6,$7,'pending')
+	`, "srcpurge_"+uuid.NewString(), sourceID, notebookID, userID, originalObjectKey, objectManifest, projectionManifest); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `delete from source_sources where id=$1`, sourceID)
+	return err
 }
 
 func validErrorCode(value string) bool {

@@ -195,7 +195,7 @@ func sourceDiscoveryImports(w http.ResponseWriter, r *http.Request, s *Server, u
 		if importErr != nil {
 			code := discoveryImportErrorCode(importErr)
 			_ = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
-				return sourcediscovery.NewStore(tx).FailCandidateImport(r.Context(), sessionID, candidate.ID, code)
+				return sourcediscovery.NewStore(tx).DropCandidateImport(r.Context(), sessionID, candidate.ID)
 			})
 			outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "import_failed", ErrorCode: &code})
 			continue

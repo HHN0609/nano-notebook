@@ -316,7 +316,7 @@ func (s *Store) ReplaceSelection(ctx context.Context, sessionID string, candidat
 		var validCount int
 		if err := s.db.QueryRow(ctx, `
 			select count(*) from source_discovery_candidates
-			where session_id=$1 and id=any($2::text[]) and status in ('discovered','import_failed')
+			where session_id=$1 and id=any($2::text[]) and status='discovered'
 		`, sessionID, selected).Scan(&validCount); err != nil {
 			return Session{}, err
 		}
@@ -347,7 +347,7 @@ func (s *Store) BeginCandidateImport(ctx context.Context, sessionID, candidateID
 		set status='importing',import_error_code=null,updated_at=now()
 		from source_discovery_sessions s
 		where c.id=$2 and c.session_id=$1 and c.session_id=s.id and c.selected=true
-		  and c.status in ('discovered','import_failed') and s.status='ready'
+		  and c.status='discovered' and s.status='ready'
 		returning c.id,s.notebook_id,c.canonical_url
 	`, sessionID, candidateID).Scan(&candidate.CandidateID, &candidate.NotebookID, &candidate.URL)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -371,12 +371,11 @@ func (s *Store) CompleteCandidateImport(ctx context.Context, sessionID, candidat
 	return nil
 }
 
-func (s *Store) FailCandidateImport(ctx context.Context, sessionID, candidateID, errorCode string) error {
+func (s *Store) DropCandidateImport(ctx context.Context, sessionID, candidateID string) error {
 	result, err := s.db.Exec(ctx, `
-		update source_discovery_candidates
-		set status='import_failed',source_id=null,import_error_code=$3,updated_at=now()
+		delete from source_discovery_candidates
 		where session_id=$1 and id=$2 and status='importing'
-	`, sessionID, candidateID, errorCode)
+	`, sessionID, candidateID)
 	if err != nil {
 		return err
 	}
