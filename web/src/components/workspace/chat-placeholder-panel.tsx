@@ -7,8 +7,10 @@ import {
   useExternalStoreRuntime,
   type AssistantRuntime
 } from "@assistant-ui/react";
+import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
+import remarkGfm from "remark-gfm";
 import { MaterialSymbol } from "../icons/material-symbol";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
@@ -139,35 +141,51 @@ function UserMessage({ controller, copy, latestMessageID }: { controller: ChatCo
 function AssistantMessage({ controller, copy }: { controller: ChatController; copy: ChatPanelCopy }) {
   const messageID = useAuiState((state) => state.message.id);
   const citations = controller.snapshot?.citations.filter((citation) => citation.message_id === messageID) ?? [];
-  const message = controller.snapshot?.messages.find((candidate) => candidate.id === messageID);
   const sourceCitations = citations
     .filter((citation) => citation.reference_kind === "source")
     .sort((left, right) => (left.reference_ordinal ?? 0) - (right.reference_ordinal ?? 0));
   const preciseCitations = citations.filter((citation) => citation.reference_kind !== "source");
   return (
     <MessagePrimitive.Root className="chat-message chat-message--assistant">
-      {sourceCitations.length && message ? <InlineSourceAnswer text={message.content} citations={sourceCitations} copy={copy} /> : <MessagePrimitive.Parts />}
+      <MessagePrimitive.Parts>
+        {({ part }) => part.type === "text" ? <AssistantMarkdownText citations={sourceCitations} copy={copy} /> : null}
+      </MessagePrimitive.Parts>
       {preciseCitations.length ? <div className="chat-citations">{preciseCitations.map((citation, index) => <CitationButton key={citation.id} citation={citation} number={index + 1} copy={copy} />)}</div> : null}
     </MessagePrimitive.Root>
   );
 }
 
-function InlineSourceAnswer({ text, citations, copy }: { text: string; citations: Citation[]; copy: ChatPanelCopy }) {
-  const bySource = new Map(citations.map((citation) => [citation.source_id, citation]));
-  const parts: Array<{ text: string } | { citation: Citation }> = [];
-  const marker = /\[source:([A-Za-z0-9_.-]{1,255})\]/g;
-  let cursor = 0;
-  for (const match of text.matchAll(marker)) {
-    const index = match.index ?? 0;
-    if (index > cursor) parts.push({ text: text.slice(cursor, index) });
-    const citation = bySource.get(match[1]);
-    if (citation) parts.push({ citation });
-    cursor = index + match[0].length;
-  }
-  if (cursor < text.length) parts.push({ text: text.slice(cursor) });
-  return <p className="chat-inline-answer">{parts.map((part, index) => "text" in part
-    ? <span key={index}>{part.text}</span>
-    : <InlineSourceCitationButton key={`${part.citation.id}-${index}`} citation={part.citation} copy={copy} />)}</p>;
+function AssistantMarkdownText({ citations, copy }: { citations: Citation[]; copy: ChatPanelCopy }) {
+  const bySource = useMemo(() => new Map(citations.map((citation) => [citation.source_id, citation])), [citations]);
+  const citationTargets = useMemo(() => new Map(citations.map((citation) => [sourceCitationTarget(citation.source_id), citation])), [citations]);
+  const preprocess = useCallback((text: string) => {
+    return text.replace(/\[source:([A-Za-z0-9_.-]{1,255})\]/g, (marker, sourceID: string) => {
+      const citation = bySource.get(sourceID);
+      if (!citation) return marker;
+      return `[${(citation.reference_ordinal ?? 0) + 1}](${sourceCitationTarget(sourceID)})`;
+    });
+  }, [bySource]);
+  const components = useMemo<NonNullable<ComponentProps<typeof MarkdownTextPrimitive>["components"]>>(() => ({
+    a: ({ href, children, title, className }) => {
+      const citation = href ? citationTargets.get(href) : undefined;
+      if (citation) return <InlineSourceCitationButton citation={citation} copy={copy} />;
+      const external = href?.startsWith("https://") || href?.startsWith("http://");
+      return <a href={href} title={title} className={className} {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}>{children}</a>;
+    }
+  }), [citationTargets, copy]);
+  return (
+    <MarkdownTextPrimitive
+      className="chat-markdown"
+      components={components}
+      preprocess={preprocess}
+      remarkPlugins={[remarkGfm]}
+      smooth={false}
+    />
+  );
+}
+
+function sourceCitationTarget(sourceID: string) {
+  return `#source-citation-${encodeURIComponent(sourceID)}`;
 }
 
 function InlineSourceCitationButton({ citation, copy }: { citation: Citation; copy: ChatPanelCopy }) {

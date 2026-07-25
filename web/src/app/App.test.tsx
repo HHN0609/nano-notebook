@@ -441,6 +441,82 @@ test("opens a published Citation without exposing retrieval internals", async ()
   expect(image).toHaveAttribute("src", "/api/v1/sources/src_image/viewer-asset");
 });
 
+test("renders assistant responses as GitHub Flavored Markdown", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = markdownWorkspaceHandler([
+    {
+      id: "msg_markdown",
+      role: "assistant",
+      content: [
+        "## Study plan",
+        "",
+        "Use **retrieval** with ~~duplicate work~~ `cached context`.",
+        "",
+        "- Read the notes",
+        "- [x] Keep citations",
+        "",
+        "| Topic | Status |",
+        "| --- | --- |",
+        "| Cache | Ready |",
+        "",
+        "> Verify the evidence.",
+        "",
+        "[Open the guide](https://example.com/guide)",
+        "",
+        "```ts",
+        "const cached = true;",
+        "```"
+      ].join("\n"),
+      created_at: "2026-07-25T12:00:00Z"
+    }
+  ]);
+
+  render(<App />);
+
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  expect(await within(chat).findByRole("heading", { name: "Study plan", level: 2 })).toBeInTheDocument();
+  expect(within(chat).getByText("retrieval").tagName).toBe("STRONG");
+  expect(within(chat).getByText("duplicate work").tagName).toBe("DEL");
+  expect(within(chat).getByText("cached context").tagName).toBe("CODE");
+  expect(within(chat).getByRole("list")).toBeInTheDocument();
+  const taskCheckbox = within(chat).getByRole("checkbox");
+  expect(taskCheckbox).toBeChecked();
+  expect(taskCheckbox.closest("li")).toHaveTextContent("Keep citations");
+  expect(within(chat).getByRole("table")).toHaveTextContent("CacheReady");
+  expect(within(chat).getByText("Verify the evidence.").closest("blockquote")).toBeInTheDocument();
+  const guideLink = within(chat).getByRole("link", { name: "Open the guide" });
+  expect(guideLink).toHaveAttribute("href", "https://example.com/guide");
+  expect(guideLink).toHaveAttribute("target", "_blank");
+  expect(guideLink).toHaveAttribute("rel", "noopener noreferrer");
+  expect(within(chat).getByText("const cached = true;").tagName).toBe("CODE");
+});
+
+test("keeps user Markdown syntax as literal text", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = markdownWorkspaceHandler([
+    { id: "msg_user_markdown", role: "user", content: "## Literal **question**", created_at: "2026-07-25T12:00:00Z" }
+  ]);
+
+  render(<App />);
+
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  expect(await within(chat).findByText("## Literal **question**")).toBeInTheDocument();
+  expect(within(chat).queryByRole("heading", { name: "Literal question" })).not.toBeInTheDocument();
+});
+
+test("does not turn raw assistant HTML into DOM elements", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = markdownWorkspaceHandler([
+    { id: "msg_raw_html", role: "assistant", content: "Before <img src=x alt=unsafe onerror=alert(1)> after", created_at: "2026-07-25T12:00:00Z" }
+  ]);
+
+  render(<App />);
+
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  expect(await within(chat).findByText(/Before/)).toHaveTextContent("Before <img src=x alt=unsafe onerror=alert(1)> after");
+  expect(within(chat).queryByRole("img", { name: "unsafe" })).not.toBeInTheDocument();
+});
+
 test("renders Source references inline and opens the normal Source viewer", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   fetchHandler = async (input, init) => {
@@ -452,7 +528,7 @@ test("renders Source references inline and opens the normal Source viewer", asyn
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
     if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({
       chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
-      messages: [{ id: "msg_source_answer", role: "assistant", content: "Complete 120 credits [source:src_degree]. Keep a 2.0 GPA [source:src_degree].", created_at: "2026-07-22T12:00:00Z" }],
+      messages: [{ id: "msg_source_answer", role: "assistant", content: "**Complete 120 credits** [source:src_degree]. Keep a 2.0 GPA [source:src_degree].", created_at: "2026-07-22T12:00:00Z" }],
       runs: [],
       citations: [{ id: "cit_source", message_id: "msg_source_answer", reference_kind: "source", reference_ordinal: 0, source_id: "src_degree", source_title: "degree-plan.pdf" }]
     });
@@ -471,6 +547,7 @@ test("renders Source references inline and opens the normal Source viewer", asyn
   expect(within(chat).queryByText(/\[source:/)).not.toBeInTheDocument();
   const references = await within(chat).findAllByRole("button", { name: "Citation 1 for degree-plan.pdf" });
   expect(references).toHaveLength(2);
+  expect(within(chat).getByText("Complete 120 credits").tagName).toBe("STRONG");
   expect(references[0]).toHaveTextContent("[1]");
   expect(within(chat).queryByText("[2]")).not.toBeInTheDocument();
   await user.click(references[0]);
@@ -1493,6 +1570,24 @@ function authenticatedWorkspaceHandler() {
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
     if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
     if (url.endsWith("/api/v1/auth/sign-out") && method === "POST") return new Response(null, { status: 204 });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+}
+
+function markdownWorkspaceHandler(messages: Array<{ id: string; role: "user" | "assistant"; content: string; created_at: string }>) {
+  return async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({
+      chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
+      messages,
+      runs: [],
+      citations: []
+    });
     return json({ error: { code: "not_found" } }, 404);
   };
 }
