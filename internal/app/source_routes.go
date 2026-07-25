@@ -11,11 +11,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/jackc/pgx/v5"
+	xhtml "golang.org/x/net/html"
 )
 
 type memberSource struct {
@@ -159,7 +161,7 @@ func (s *Server) createURLSource(w http.ResponseWriter, r *http.Request, userID,
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.source_url_invalid")
 		return
 	}
-	created, reused, err := s.importURLSource(r.Context(), userID, notebookID, key, requestURL)
+	created, reused, err := s.importURLSource(r.Context(), userID, notebookID, key, requestURL, "")
 	if errors.Is(err, source.ErrIdempotencyMismatch) {
 		writeError(w, r, http.StatusConflict, "idempotency_mismatch", "error.idempotency_mismatch")
 		return
@@ -207,7 +209,7 @@ var (
 	errSourceObjectWrite     = errors.New("Source snapshot object write failed")
 )
 
-func (s *Server) importURLSource(ctx context.Context, userID, notebookID, key, requestURL string) (source.Source, bool, error) {
+func (s *Server) importURLSource(ctx context.Context, userID, notebookID, key, requestURL, preferredTitle string) (source.Source, bool, error) {
 	admissionID, err := newOpaqueID("urladm")
 	if err != nil {
 		return source.Source{}, false, err
@@ -265,8 +267,13 @@ func (s *Server) importURLSource(ctx context.Context, userID, notebookID, key, r
 	if err != nil {
 		return source.Source{}, false, err
 	}
-	parsedFinalURL, _ := url.Parse(snapshot.FinalURL)
-	title := parsedFinalURL.Hostname()
+	title := boundedSourceTitle(preferredTitle)
+	if title == "" && format == source.FormatHTML {
+		title = boundedSourceTitle(htmlSnapshotTitle(snapshot.Payload))
+	}
+	if title == "" {
+		title = boundedSourceTitle(snapshot.FinalURL)
+	}
 	if title == "" {
 		title = "Web source"
 	}
@@ -286,6 +293,52 @@ func (s *Server) importURLSource(ctx context.Context, userID, notebookID, key, r
 		_ = s.cfg.SourceSnapshots.Delete(ctx, objectKey)
 	}
 	return created, finalizedReused, err
+}
+
+func boundedSourceTitle(value string) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) > 255 {
+		runes = runes[:255]
+	}
+	return string(runes)
+}
+
+func htmlSnapshotTitle(payload []byte) string {
+	if len(payload) == 0 || !utf8.Valid(payload) {
+		return ""
+	}
+	document, err := xhtml.Parse(strings.NewReader(string(payload)))
+	if err != nil {
+		return ""
+	}
+	var find func(*xhtml.Node) string
+	find = func(node *xhtml.Node) string {
+		if node.Type == xhtml.ElementNode && strings.EqualFold(node.Data, "title") {
+			var text strings.Builder
+			var collect func(*xhtml.Node)
+			collect = func(current *xhtml.Node) {
+				if current.Type == xhtml.TextNode {
+					text.WriteString(current.Data)
+				}
+				for child := current.FirstChild; child != nil; child = child.NextSibling {
+					collect(child)
+				}
+			}
+			collect(node)
+			return text.String()
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			if title := find(child); title != "" {
+				return title
+			}
+		}
+		return ""
+	}
+	return find(document)
 }
 
 func canonicalSourceURL(rawURL string) (string, error) {

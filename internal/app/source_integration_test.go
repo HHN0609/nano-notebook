@@ -446,10 +446,11 @@ func TestCreateURLSourceIsIdempotentAndRepeatedURLReusesNotebookSource(t *testin
 	api := newTestAPI(t)
 	owner, csrf := api.registerWithCSRF(t, "source-url-api@example.com")
 	notebookID := createSourceTestNotebook(t, api, owner, "source-url-api")
+	payload := []byte("<html><head><title>Example reference</title></head><body><main>same immutable page</main></body></html>")
+	digest := sha256.Sum256(payload)
 	remote := &recordingSourceFetcher{snapshot: fetcher.Snapshot{
 		FinalURL: "https://example.com/final", MediaType: "text/html",
-		Payload:       []byte("<main>same immutable page</main>"),
-		ContentSHA256: "9e88e59fef7fc7a4e0b3b9c4fd1d50bb9d33ca46ecd77697b82c7e0e500e0791",
+		Payload: payload, ContentSHA256: hex.EncodeToString(digest[:]),
 	}}
 	objects := objectstore.NewMemoryStore()
 	api.server = app.NewServer(app.Config{
@@ -470,12 +471,13 @@ func TestCreateURLSourceIsIdempotentAndRepeatedURLReusesNotebookSource(t *testin
 	var firstBody struct {
 		Source struct {
 			ID     string `json:"id"`
+			Title  string `json:"title"`
 			Format string `json:"format"`
 			State  string `json:"state"`
 		} `json:"source"`
 	}
 	decodeBody(t, first, &firstBody)
-	if firstBody.Source.ID == "" || firstBody.Source.Format != "html" || firstBody.Source.State != "processing" {
+	if firstBody.Source.ID == "" || firstBody.Source.Title != "Example reference" || firstBody.Source.Format != "html" || firstBody.Source.State != "processing" {
 		t.Fatalf("first URL Source = %+v", firstBody.Source)
 	}
 	replayed := create("url-snapshot-1")
@@ -527,12 +529,13 @@ func TestCreateYouTubeURLSourcePersistsCaptionSnapshotFormat(t *testing.T) {
 	}
 	var body struct {
 		Source struct {
+			Title  string `json:"title"`
 			Format string `json:"format"`
 			State  string `json:"state"`
 		} `json:"source"`
 	}
 	decodeBody(t, response, &body)
-	if body.Source.Format != "youtube" || body.Source.State != "processing" {
+	if body.Source.Title != "https://www.youtube.com/watch?v=dQw4w9WgXcQ" || body.Source.Format != "youtube" || body.Source.State != "processing" {
 		t.Fatalf("YouTube Source=%+v", body.Source)
 	}
 }

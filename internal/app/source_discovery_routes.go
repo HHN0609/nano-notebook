@@ -191,7 +191,7 @@ func sourceDiscoveryImports(w http.ResponseWriter, r *http.Request, s *Server, u
 		}
 		digest := sha256.Sum256([]byte(key + "\x00" + candidate.ID))
 		candidateKey := "discovery:" + hex.EncodeToString(digest[:])
-		created, _, importErr := s.importURLSource(r.Context(), userID, admission.NotebookID, candidateKey, admission.URL)
+		created, _, importErr := s.importURLSource(r.Context(), userID, admission.NotebookID, candidateKey, admission.URL, admission.Title)
 		if importErr != nil {
 			code := discoveryImportErrorCode(importErr)
 			_ = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {

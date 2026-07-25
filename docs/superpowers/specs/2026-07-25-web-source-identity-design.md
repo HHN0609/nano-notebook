@@ -8,7 +8,7 @@ Discovery results and imported URL Sources consistently show a website favicon a
 
 Discovery already owns the provider-supplied page title, canonical URL, and optional favicon reference. Importing a candidate passes its title into the existing URL Source admission path, which persists that title instead of replacing it with the hostname. Manual URL admission extracts a bounded HTML `<title>` from the fetched immutable snapshot. If neither a candidate title nor an HTML title is available, the final URL becomes the Source title.
 
-Historical Discovery imports are backfilled only when their current title is still the generated hostname or `Web source`. The matching imported Discovery candidate supplies the page title. This condition preserves titles that users renamed.
+Historical Discovery imports resolve the matching imported candidate title for display only when their current title is still the generated hostname or `Web source`. This condition preserves titles that users renamed.
 
 ## Favicon presentation
 
@@ -22,7 +22,7 @@ Each ready URL Source row renders, in order: selection checkbox, favicon, title,
 
 1. A newly imported Discovery Source persists and returns the candidate page title rather than its hostname.
 2. A manually imported HTML URL uses the document title and falls back to the final URL when the title is absent.
-3. Historical Discovery Sources with generated hostname titles are backfilled without overwriting renamed Sources.
+3. Historical Discovery Sources with generated hostname titles display their candidate title without overwriting renamed Sources.
 4. Discovery and URL Source rows render a site favicon with a globe fallback when the image fails.
 5. Uploaded files, Source opening behavior, selection, status, edit, and deletion remain unchanged.
 

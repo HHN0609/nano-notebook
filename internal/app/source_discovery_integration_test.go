@@ -109,7 +109,7 @@ func TestSourceDiscoveryImportsPersistedSelectionThroughURLSourcePipeline(t *tes
 		update source_discovery_jobs set status='succeeded' where id='dscjob_import';
 		insert into source_discovery_candidates(id,session_id,ordinal,title,canonical_url,display_url,snippet,selected)
 		values('dscand_import_skip','dsc_import',0,'Skip','https://skip.example','skip.example','Skip',false),
-		      ('dscand_import_yes','dsc_import',1,'Import','https://import.example/article','import.example/article','Import',true);
+		      ('dscand_import_yes','dsc_import',1,'Import Article','https://import.example/article','import.example/article','Import',true);
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +151,35 @@ func TestSourceDiscoveryImportsPersistedSelectionThroughURLSourcePipeline(t *tes
 	}
 	if candidateStatus != "imported" || linkedSourceID != body.Outcomes[0].SourceID {
 		t.Fatalf("candidate status/source = %q/%q", candidateStatus, linkedSourceID)
+	}
+	var sourceTitle string
+	if err := api.db.Pool().QueryRow(ctx, `select title from source_sources where id=$1`, linkedSourceID).Scan(&sourceTitle); err != nil {
+		t.Fatal(err)
+	}
+	if sourceTitle != "Import Article" {
+		t.Fatalf("Source title = %q, want imported candidate title", sourceTitle)
+	}
+
+	if _, err := api.db.Pool().Exec(ctx, `update source_sources set title='import.example' where id=$1`, linkedSourceID); err != nil {
+		t.Fatal(err)
+	}
+	listed := api.getWithCookie(t, "/api/v1/notebooks/"+notebookID+"/sources", owner)
+	var listedBody struct {
+		Sources []struct {
+			Title string `json:"title"`
+		} `json:"sources"`
+	}
+	decodeBody(t, listed, &listedBody)
+	if len(listedBody.Sources) != 1 || listedBody.Sources[0].Title != "Import Article" {
+		t.Fatalf("historical Source titles = %+v, want candidate title", listedBody.Sources)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update source_sources set title='My renamed source' where id=$1`, linkedSourceID); err != nil {
+		t.Fatal(err)
+	}
+	listed = api.getWithCookie(t, "/api/v1/notebooks/"+notebookID+"/sources", owner)
+	decodeBody(t, listed, &listedBody)
+	if len(listedBody.Sources) != 1 || listedBody.Sources[0].Title != "My renamed source" {
+		t.Fatalf("renamed Source titles = %+v, want user title", listedBody.Sources)
 	}
 }
 

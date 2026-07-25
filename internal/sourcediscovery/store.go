@@ -127,6 +127,7 @@ type ResearchSessionCommand struct {
 type CandidateImport struct {
 	CandidateID string
 	NotebookID  string
+	Title       string
 	URL         string
 }
 
@@ -348,8 +349,8 @@ func (s *Store) BeginCandidateImport(ctx context.Context, sessionID, candidateID
 		from source_discovery_sessions s
 		where c.id=$2 and c.session_id=$1 and c.session_id=s.id and c.selected=true
 		  and c.status='discovered' and s.status='ready'
-		returning c.id,s.notebook_id,c.canonical_url
-	`, sessionID, candidateID).Scan(&candidate.CandidateID, &candidate.NotebookID, &candidate.URL)
+		returning c.id,s.notebook_id,c.title,c.canonical_url
+	`, sessionID, candidateID).Scan(&candidate.CandidateID, &candidate.NotebookID, &candidate.Title, &candidate.URL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return CandidateImport{}, ErrCandidate
 	}

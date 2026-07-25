@@ -886,9 +886,22 @@ func (s *Store) ListForNotebook(ctx context.Context, notebookID string) ([]Sourc
 		return nil, err
 	}
 	rows, err := s.db.Query(ctx, `
-		select s.id, s.notebook_id, s.input_kind, s.title, s.format, s.media_type, s.byte_size,
+		select s.id, s.notebook_id, s.input_kind,
+			case
+				when s.input_kind='url' and (
+					lower(trim(s.title))='web source'
+					or lower(trim(s.title))=lower(split_part(split_part(regexp_replace(coalesce(s.final_url,''), '^https?://', '', 'i'), '/', 1), ':', 1))
+				) then coalesce(nullif(trim(c.title),''),s.title)
+				else s.title
+			end,
+			s.format, s.media_type, s.byte_size,
 			s.content_sha256, s.original_object_key, coalesce(s.final_url,''), s.state, coalesce(j.last_error_code,''), s.created_at, s.updated_at
 		from source_sources s
+		left join lateral (
+			select title from source_discovery_candidates
+			where source_id=s.id and status='imported'
+			order by updated_at desc,id desc limit 1
+		) c on true
 		left join lateral (
 			select last_error_code from source_processing_jobs where source_id=s.id order by created_at desc, id desc limit 1
 		) j on true
