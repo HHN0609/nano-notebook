@@ -569,7 +569,7 @@ test("renders Source references inline and opens the normal Source viewer", asyn
   const references = await within(chat).findAllByRole("button", { name: "Citation 1 for degree-plan.pdf" });
   expect(references).toHaveLength(2);
   expect(within(chat).getByText("Complete 120 credits").tagName).toBe("STRONG");
-  expect(references[0]).toHaveTextContent("[1]");
+  expect(references[0]).toHaveTextContent("[1] degree-plan.pdf");
   expect(within(chat).queryByText("[2]")).not.toBeInTheDocument();
   await user.click(references[0]);
   const sources = screen.getByRole("region", { name: "Sources" });

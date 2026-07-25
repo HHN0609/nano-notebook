@@ -187,14 +187,16 @@ function sourceCitationTarget(sourceID: string) {
 
 function InlineSourceCitationButton({ citation, copy, source, onOpenSource }: { citation: Citation; copy: ChatPanelCopy; source?: MemberSource; onOpenSource: (source: MemberSource) => void }) {
   const number = (citation.reference_ordinal ?? 0) + 1;
-  const sourceLabel = citation.source_title ?? citation.source_id;
+  const sourceLabel = source?.title ?? citation.source_title ?? `${copy.citationLabel} ${number}`;
   return (
-    <SourceOpenTarget source={source} className="nn-button nn-button--outline nn-button--size-sm citation-chip citation-chip--inline" ariaLabel={`${copy.citationLabel} ${number} for ${sourceLabel}`} onInlineOriginal={onOpenSource}>[{number}]</SourceOpenTarget>
+    <SourceOpenTarget source={source} className="nn-button nn-button--outline nn-button--size-sm citation-chip citation-chip--inline" ariaLabel={`${copy.citationLabel} ${number} for ${sourceLabel}`} onInlineOriginal={onOpenSource}>[{number}] {sourceLabel}</SourceOpenTarget>
   );
 }
 
 function CitationButton({ citation, number, copy, source, onOpenSource }: { citation: Citation; number: number; copy: ChatPanelCopy; source?: MemberSource; onOpenSource: (source: MemberSource) => void }) {
+  const sourceLabel = source?.title ?? citation.source_title ?? `${copy.citationLabel} ${number}`;
+  const accessibleContext = citation.claim_text ?? sourceLabel;
   return (
-    <SourceOpenTarget source={source} className="nn-button nn-button--outline nn-button--size-sm citation-chip" ariaLabel={`${copy.citationLabel} ${number} for ${citation.claim_text ?? citation.source_title ?? citation.source_id}`} onInlineOriginal={onOpenSource}>[{number}]</SourceOpenTarget>
+    <SourceOpenTarget source={source} className="nn-button nn-button--outline nn-button--size-sm citation-chip" ariaLabel={`${copy.citationLabel} ${number} for ${accessibleContext}`} onInlineOriginal={onOpenSource}>[{number}] {sourceLabel}</SourceOpenTarget>
   );
 }
