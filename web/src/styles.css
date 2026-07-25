@@ -1667,8 +1667,12 @@ h2 {
 }
 
 .source-discovery-error,
-.source-discovery-result small {
+.source-discovery-import-failed {
   color: var(--destructive);
+}
+
+.source-discovery-imported {
+  color: #28704d;
 }
 
 .source-discovery-expanded {

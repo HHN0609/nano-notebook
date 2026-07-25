@@ -249,10 +249,10 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
         {!discoveryOpen ? <IconButton className="source-add-action" icon="add" label={copy.addSourcesLabel} onClick={() => setAddOpen(true)} /> : null}
       </div> : null}
       {discoveryOpen ? (
-        <section className="source-panel-existing-peek" aria-label={copy.title}>
+        <div className="source-panel-existing-peek">
           <h3>{copy.title}</h3>
           {sourceCollection}
-        </section>
+        </div>
       ) : sourceCollection}
 
       <Dialog open={addOpen} onOpenChange={setAddOpen}>

@@ -201,8 +201,8 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
             <a href={candidate.canonical_url} target="_blank" rel="noreferrer noopener" aria-label={`${candidate.title} · ${copy.openResult}`}>{candidate.title} ↗</a>
             <span>{candidate.display_url}</span>
             <p>{candidate.snippet}</p>
-            {candidate.status === "import_failed" ? <small>{copy.importFailed}</small> : null}
-            {candidate.status === "imported" ? <small>{copy.imported}</small> : null}
+            {candidate.status === "import_failed" ? <small className="source-discovery-import-failed">{copy.importFailed}</small> : null}
+            {candidate.status === "imported" ? <small className="source-discovery-imported">{copy.imported}</small> : null}
           </div>
           <input
             className="source-discovery-checkbox"

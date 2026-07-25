@@ -71,6 +71,30 @@ test("shows a safe error when search admission fails", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent("Search failed");
 });
 
+test("distinguishes imported candidates from failed imports", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ session: {
+    id: "dsc_status", notebook_id: "nb_1", query: "film", status: "ready",
+    candidates: [
+      { id: "candidate_ready", ordinal: 0, title: "Imported guide", canonical_url: "https://example.com/ready", display_url: "example.com/ready", snippet: "Ready.", selected: true, status: "imported" },
+      { id: "candidate_failed", ordinal: 1, title: "Failed guide", canonical_url: "https://example.com/failed", display_url: "example.com/failed", snippet: "Failed.", selected: true, status: "import_failed" }
+    ]
+  } })));
+  render(<SourceDiscovery
+    notebookID="nb_1"
+    active
+    onExpandedChange={vi.fn()}
+    onImported={vi.fn()}
+    copy={{
+      label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
+      selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Ready"
+    }}
+  />);
+
+  expect(await screen.findByText("Ready")).toHaveClass("source-discovery-imported");
+  expect(screen.getByText("Import failed")).toHaveClass("source-discovery-import-failed");
+});
+
 test("loads the exact Research session requested by a completed Leader Run", async () => {
   const requests: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
