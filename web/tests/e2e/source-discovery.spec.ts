@@ -61,6 +61,7 @@ test("keeps ready Research compact until View opens every source", async ({ page
   await expect(sources.getByText("Additional sources: 7")).toBeVisible();
   await expect(sources.getByText("Saved notebook source 1")).toBeVisible();
   await expect(page.locator(".workspace-panels")).not.toHaveClass(/workspace-panels--source-discovery/);
+  const compactPanelWidth = await sources.evaluate((element) => element.getBoundingClientRect().width);
   await expectNoPageOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("research-compact.png") });
 
@@ -69,9 +70,35 @@ test("keeps ready Research compact until View opens every source", async ({ page
   await expect(sources.getByRole("link", { name: /UCSD Research source 10/ })).toBeVisible();
   await expect(sources.getByRole("checkbox", { name: "UCSD Research source 10" })).toBeVisible();
   await expect(sources.getByText("Saved notebook source 1")).toHaveCount(0);
-  if (!compact) await expect(page.locator(".workspace-panels")).toHaveClass(/workspace-panels--source-discovery/);
+  const detailMetrics = await sources.evaluate((element) => {
+    const title = element.querySelector<HTMLElement>(".source-discovery-result-copy a");
+    const supporting = element.querySelector<HTMLElement>(".source-discovery-result-copy p");
+    return {
+      width: element.getBoundingClientRect().width,
+      titleFontSize: title ? getComputedStyle(title).fontSize : "",
+      supportingFontSize: supporting ? getComputedStyle(supporting).fontSize : ""
+    };
+  });
+  if (compact) {
+    expect(detailMetrics.titleFontSize).toBe("14px");
+    expect(detailMetrics.supportingFontSize).toBe("12px");
+  } else {
+    await expect(page.locator(".workspace-panels")).toHaveClass(/workspace-panels--source-discovery/);
+    expect(detailMetrics.width).toBeGreaterThan(compactPanelWidth);
+    expect(detailMetrics.width).toBeGreaterThanOrEqual(640);
+    expect(detailMetrics.width).toBeLessThanOrEqual(720);
+    expect(detailMetrics.titleFontSize).toBe("15px");
+    expect(detailMetrics.supportingFontSize).toBe("13px");
+  }
   await expectNoPageOverflow(page);
   await page.screenshot({ path: testInfo.outputPath("research-detail.png") });
+
+  if (!compact) {
+    await page.setViewportSize({ width: 1100, height: 800 });
+    const intermediateDetailWidth = await sources.evaluate((element) => element.getBoundingClientRect().width);
+    expect(intermediateDetailWidth).toBeGreaterThanOrEqual(560);
+    await expectNoPageOverflow(page);
+  }
 
   await sources.getByRole("button", { name: "Close" }).click();
   await expect(sources.getByText("Research completed")).toBeVisible();

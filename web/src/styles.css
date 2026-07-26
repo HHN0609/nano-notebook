@@ -1376,7 +1376,7 @@ h2 {
 }
 
 .workspace-panels--source-discovery {
-  grid-template-columns: minmax(520px, 560px) minmax(440px, 1.6fr) minmax(280px, 1fr);
+  grid-template-columns: clamp(640px, 48vw, 720px) minmax(320px, 1fr) minmax(220px, 0.75fr);
 }
 
 .workspace-compact-tabs {
@@ -1882,6 +1882,17 @@ span.source-list-title {
   flex: 1;
 }
 
+.source-panel-controls--discovery .source-discovery-summary,
+.source-panel-controls--discovery .source-discovery-toolbar label {
+  font-size: 13px;
+}
+
+.source-panel-controls--discovery .source-discovery-toolbar input,
+.source-panel-controls--discovery .source-discovery-checkbox {
+  width: 19px;
+  height: 19px;
+}
+
 .source-discovery-result {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr) 24px;
@@ -1889,6 +1900,12 @@ span.source-list-title {
   gap: 16px;
   padding: 13px 16px;
   border-bottom: 1px solid var(--border-subtle);
+}
+
+.source-panel-controls--discovery .source-discovery-result {
+  grid-template-columns: 32px minmax(0, 1fr) 28px;
+  gap: 18px;
+  padding: 16px 18px;
 }
 
 .source-discovery-result:last-child { border-bottom: 0; }
@@ -1905,6 +1922,16 @@ span.source-list-title {
 }
 
 .source-site-icon img { width: 20px; height: 20px; object-fit: contain; }
+
+.source-panel-controls--discovery .source-discovery-result .source-discovery-site-icon {
+  width: 32px;
+  height: 32px;
+}
+
+.source-panel-controls--discovery .source-discovery-result .source-discovery-site-icon img {
+  width: 22px;
+  height: 22px;
+}
 
 .source-discovery-result-copy {
   display: grid;
@@ -1923,6 +1950,10 @@ span.source-list-title {
 
 .source-discovery-result-copy a:hover { text-decoration: underline; }
 
+.source-panel-controls--discovery .source-discovery-result-copy a {
+  font-size: 15px;
+}
+
 .source-discovery-result-copy span,
 .source-discovery-result-copy p,
 .source-discovery-result-copy small {
@@ -1931,6 +1962,12 @@ span.source-list-title {
   font-size: 11px;
   line-height: 1.45;
   text-overflow: ellipsis;
+}
+
+.source-panel-controls--discovery .source-discovery-result-copy span,
+.source-panel-controls--discovery .source-discovery-result-copy p,
+.source-panel-controls--discovery .source-discovery-result-copy small {
+  font-size: 13px;
 }
 
 .source-discovery-result-copy span { color: var(--muted-foreground); }
@@ -2672,6 +2709,35 @@ span.source-list-title {
   .source-add-action {
     top: 14px;
     right: 14px;
+  }
+
+  .source-panel-controls--discovery .source-discovery-summary,
+  .source-panel-controls--discovery .source-discovery-toolbar label,
+  .source-panel-controls--discovery .source-discovery-result-copy span,
+  .source-panel-controls--discovery .source-discovery-result-copy p,
+  .source-panel-controls--discovery .source-discovery-result-copy small {
+    font-size: 12px;
+  }
+
+  .source-panel-controls--discovery .source-discovery-result-copy a {
+    font-size: 14px;
+  }
+
+  .source-panel-controls--discovery .source-discovery-result {
+    grid-template-columns: 30px minmax(0, 1fr) 24px;
+    gap: 12px;
+    padding: 14px 12px;
+  }
+
+  .source-panel-controls--discovery .source-discovery-result .source-discovery-site-icon {
+    width: 30px;
+    height: 30px;
+  }
+
+  .source-panel-controls--discovery .source-discovery-toolbar input,
+  .source-panel-controls--discovery .source-discovery-checkbox {
+    width: 18px;
+    height: 18px;
   }
 
   .source-search-actions {
