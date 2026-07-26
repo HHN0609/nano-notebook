@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 )
 
@@ -916,7 +917,15 @@ func newTestAPI(t *testing.T) *testAPI {
 	if err := app.RunMigrations(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	server := app.NewServer(app.Config{CookieSecure: false}, db)
+	runConfig := agent.DefaultRunConfig("nano-interactive-v1")
+	promptSet, configuration, err := agent.DefaultAgentConfigurationBundle("nano-interactive-v1", "aliyun/qwen-plus", "aliyun/qwen-plus", runConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RegisterAgentConfiguration(ctx, db, promptSet, configuration); err != nil {
+		t.Fatal(err)
+	}
+	server := app.NewServer(app.Config{CookieSecure: false, AgentRun: runConfig, AgentConfiguration: configuration}, db)
 	return &testAPI{handler: server.Handler(), server: server, db: db, csrfBySession: map[string]*http.Cookie{}}
 }
 

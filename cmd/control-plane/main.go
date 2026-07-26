@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
@@ -37,6 +38,8 @@ type controlPlaneConfig struct {
 	CookieSecure          bool
 	Version               string
 	DefaultModel          string
+	ResearchModel         string
+	AgentConfigurationID  string
 	SourceS3              objectstore.S3Config
 	FetcherURL            string
 }
@@ -58,6 +61,16 @@ func main() {
 	defer db.Close()
 	if err := app.RunMigrations(ctx, db); err != nil {
 		slog.Error("migrations failed", "error", err)
+		os.Exit(1)
+	}
+	runConfig := agent.DefaultRunConfig(config.AgentConfigurationID)
+	promptSet, agentConfiguration, err := agent.DefaultAgentConfigurationBundle(config.AgentConfigurationID, config.DefaultModel, config.ResearchModel, runConfig)
+	if err != nil {
+		slog.Error("Agent Configuration registration failed", "error", err)
+		os.Exit(1)
+	}
+	if err := app.RegisterAgentConfiguration(ctx, db, promptSet, agentConfiguration); err != nil {
+		slog.Error("Agent Configuration registration failed", "error", err)
 		os.Exit(1)
 	}
 	sourceStore, err := objectstore.NewS3Store(config.SourceS3)
@@ -125,6 +138,7 @@ func main() {
 	}
 	server := app.NewServer(app.Config{
 		CookieSecure: config.CookieSecure, Version: config.Version, DefaultModel: config.DefaultModel,
+		AgentRun: runConfig, AgentConfiguration: agentConfiguration,
 		AdminTraces: queryClient, ReplaySealer: replaySealer, TraceSink: traceExporter,
 		SourceUploads: sourceStore,
 		SourceFetcher: remoteFetcher, SourceSnapshots: sourceStore,
@@ -181,7 +195,9 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 		ProducerID:            env("NANO_CONTROL_PLANE_PRODUCER_ID", "nano-control-plane"),
 		ReplayKeyID:           env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 		CookieSecure: os.Getenv("NANO_COOKIE_SECURE") == "true", Version: env("NANO_VERSION", "dev"),
-		DefaultModel: env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
+		DefaultModel:         env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
+		ResearchModel:        env("NANO_RESEARCH_MODEL", env("NANO_CHAT_MODEL", "aliyun/qwen-plus")),
+		AgentConfigurationID: env("NANO_AGENT_CONFIGURATION_ID", "nano-interactive-v1"),
 		SourceS3: objectstore.S3Config{
 			Endpoint:        env("NANO_SOURCE_S3_ENDPOINT", "127.0.0.1:59000"),
 			AccessKeyID:     env("NANO_SOURCE_S3_ACCESS_KEY_ID", "nano"),

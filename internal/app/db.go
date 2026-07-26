@@ -813,6 +813,57 @@ create trigger agent_prompt_versions_immutable
 revoke all on agent_prompt_versions from nano_app, nano_worker;
 grant select on agent_prompt_versions to nano_worker;
 
+create table if not exists agent_prompt_sets (
+	id text primary key check (char_length(id) between 3 and 255),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	bindings jsonb not null check (jsonb_typeof(bindings)='object'),
+	registered_at timestamptz not null default now()
+);
+
+create table if not exists agent_configuration_sets (
+	id text primary key check (char_length(id) between 3 and 255),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	prompt_set_id text not null references agent_prompt_sets(id),
+	prompt_set_sha256 text not null check (prompt_set_sha256 ~ '^[0-9a-f]{64}$'),
+	registered_at timestamptz not null default now()
+);
+
+create table if not exists agent_role_profiles (
+	configuration_set_id text not null references agent_configuration_sets(id),
+	role text not null check (role in ('leader','research')),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	executor_version text not null check (char_length(executor_version) between 3 and 255),
+	model text not null check (char_length(model) between 1 and 255),
+	prompt_purposes jsonb not null check (jsonb_typeof(prompt_purposes)='array'),
+	tool_allowlist jsonb not null check (jsonb_typeof(tool_allowlist)='array'),
+	run_config jsonb not null check (jsonb_typeof(run_config)='object'),
+	max_attempts integer not null check (max_attempts between 1 and 10),
+	registered_at timestamptz not null default now(),
+	primary key (configuration_set_id,role)
+);
+
+create or replace function nano_reject_agent_configuration_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+	raise exception 'Agent configuration records are immutable';
+end
+$$;
+
+drop trigger if exists agent_prompt_sets_immutable on agent_prompt_sets;
+create trigger agent_prompt_sets_immutable before update or delete on agent_prompt_sets
+	for each row execute function nano_reject_agent_configuration_mutation();
+drop trigger if exists agent_configuration_sets_immutable on agent_configuration_sets;
+create trigger agent_configuration_sets_immutable before update or delete on agent_configuration_sets
+	for each row execute function nano_reject_agent_configuration_mutation();
+drop trigger if exists agent_role_profiles_immutable on agent_role_profiles;
+create trigger agent_role_profiles_immutable before update or delete on agent_role_profiles
+	for each row execute function nano_reject_agent_configuration_mutation();
+
+revoke all on agent_prompt_sets,agent_configuration_sets,agent_role_profiles from nano_app,nano_worker;
+grant select on agent_prompt_sets,agent_configuration_sets,agent_role_profiles to nano_worker;
+
 create table if not exists agent_runs (
 	id text primary key,
 	user_id text not null references identity_users(id) on delete cascade,
@@ -823,6 +874,7 @@ create table if not exists agent_runs (
 	model text not null,
 	prompt_version text not null,
 	agent_config_id text not null default 'nano-interactive-v1' check (char_length(agent_config_id) between 1 and 255),
+	executor_version text not null default 'leader-executor-v1' check (char_length(executor_version) between 3 and 255),
 	time_zone text not null default 'UTC',
 	deadline_at timestamptz not null default (now() + interval '10 minutes'),
 	action_decision_limit integer not null default 4,
@@ -841,6 +893,9 @@ create table if not exists agent_runs (
 alter table agent_runs add column if not exists agent_config_id text not null default 'nano-interactive-v1';
 alter table agent_runs drop constraint if exists agent_runs_agent_config_id_check;
 alter table agent_runs add constraint agent_runs_agent_config_id_check check (char_length(agent_config_id) between 1 and 255);
+alter table agent_runs add column if not exists executor_version text not null default 'leader-executor-v1';
+alter table agent_runs drop constraint if exists agent_runs_executor_version_check;
+alter table agent_runs add constraint agent_runs_executor_version_check check (char_length(executor_version) between 3 and 255);
 
 alter table agent_runs add column if not exists selected_source_count integer not null default 0
 	check (selected_source_count between 0 and 50);
@@ -862,8 +917,26 @@ create unique index if not exists agent_runs_one_research_child_idx
 create table if not exists agent_run_routes (
 	run_id text primary key references agent_runs(id) on delete cascade,
 	route text not null check (route in ('continue_chat','delegate_research')),
+	requested_route text not null check (requested_route in ('continue_chat','delegate_research')),
+	effective_route text not null check (effective_route in ('continue_chat','delegate_research')),
+	intent_reason_code text not null check (char_length(intent_reason_code) between 3 and 80),
+	policy_reason_code text not null check (char_length(policy_reason_code) between 3 and 80),
 	created_at timestamptz not null default now()
 );
+
+alter table agent_run_routes add column if not exists requested_route text;
+alter table agent_run_routes add column if not exists effective_route text;
+alter table agent_run_routes add column if not exists intent_reason_code text;
+alter table agent_run_routes add column if not exists policy_reason_code text;
+update agent_run_routes set
+	requested_route=coalesce(requested_route,route),
+	effective_route=coalesce(effective_route,route),
+	intent_reason_code=coalesce(intent_reason_code,case when route='delegate_research' then 'explicit_source_discovery' else 'ordinary_conversation' end),
+	policy_reason_code=coalesce(policy_reason_code,'legacy_adopted');
+alter table agent_run_routes alter column requested_route set not null;
+alter table agent_run_routes alter column effective_route set not null;
+alter table agent_run_routes alter column intent_reason_code set not null;
+alter table agent_run_routes alter column policy_reason_code set not null;
 
 create table if not exists agent_research_delegations (
 	parent_run_id text primary key references agent_runs(id) on delete cascade,

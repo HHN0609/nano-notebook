@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -52,6 +53,21 @@ func TestModelLeaderRouterRequiresTypedClosedDecision(t *testing.T) {
 	}
 	if len(model.requests) != 1 || model.requests[0].RequiredActionName != "select_leader_route" || len(model.requests[0].ActionDefinitions) != 1 {
 		t.Fatalf("request=%+v", model.requests)
+	}
+}
+
+func TestModelLeaderRouterBoundsRecentPairsAsReferenceOnly(t *testing.T) {
+	model := &leaderDecisionModel{outcome: actionOutcome("select_leader_route", json.RawMessage(`{"route":"continue_chat","reason_code":"ordinary_conversation"}`))}
+	pairs := []LeaderConversationPair{
+		{User: "old-1", Assistant: "answer-1"}, {User: "old-2", Assistant: "answer-2"},
+		{User: "old-3", Assistant: "answer-3"}, {User: "old-4", Assistant: "answer-4"},
+	}
+	if _, err := NewModelLeaderRouter(model).DecideRoute(context.Background(), LeaderRouteRequest{Model: "route-model", UserMessage: "current-authority", RecentPairs: pairs}); err != nil {
+		t.Fatal(err)
+	}
+	content := model.requests[0].Messages[1].Content
+	if strings.Contains(content, "old-1") || !strings.Contains(content, "old-2") || !strings.Contains(content, "old-4") || !strings.Contains(content, "CURRENT MESSAGE (authoritative):\ncurrent-authority") {
+		t.Fatalf("router context=%q", content)
 	}
 }
 

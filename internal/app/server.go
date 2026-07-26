@@ -40,16 +40,17 @@ type SourceSnapshotStore interface {
 }
 
 type Config struct {
-	CookieSecure    bool
-	Version         string
-	DefaultModel    string
-	AgentRun        agent.RunConfig
-	AdminTraces     collector.QueryClient
-	ReplaySealer    *replay.Sealer
-	TraceSink       agent.TraceSink
-	SourceUploads   SourceUploadStore
-	SourceFetcher   fetcher.SnapshotFetcher
-	SourceSnapshots SourceSnapshotStore
+	CookieSecure       bool
+	Version            string
+	DefaultModel       string
+	AgentRun           agent.RunConfig
+	AgentConfiguration agent.AgentConfigurationSet
+	AdminTraces        collector.QueryClient
+	ReplaySealer       *replay.Sealer
+	TraceSink          agent.TraceSink
+	SourceUploads      SourceUploadStore
+	SourceFetcher      fetcher.SnapshotFetcher
+	SourceSnapshots    SourceSnapshotStore
 }
 
 type Server struct {
@@ -71,6 +72,18 @@ func NewServer(cfg Config, db *DB) *Server {
 		cfg.DefaultModel = "aliyun/qwen-plus"
 	}
 	cfg.AgentRun = normalizedRunConfig(cfg.AgentRun)
+	if cfg.AgentConfiguration.ID == "" {
+		configuration, err := agent.DefaultAgentConfigurationSet(cfg.AgentRun.ID, cfg.DefaultModel, cfg.DefaultModel, cfg.AgentRun)
+		if err != nil {
+			panic(err)
+		}
+		cfg.AgentConfiguration = configuration
+	}
+	leaderProfile := cfg.AgentConfiguration.Profiles[agent.RoleLeader]
+	cfg.DefaultModel = leaderProfile.Model
+	cfg.AgentRun = leaderProfile.Run
+	cfg.AgentRun.ID = cfg.AgentConfiguration.ID
+	cfg.AgentRun.ExecutorVersion = leaderProfile.ExecutorVersion
 	s := &Server{cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(), runHub: newRunHub(), adminTraces: cfg.AdminTraces, replaySealer: cfg.ReplaySealer}
 	s.routes()
 	return s
@@ -1285,7 +1298,10 @@ func normalizeBrowserTimeZone(value string) string {
 
 func normalizedRunConfig(value agent.RunConfig) agent.RunConfig {
 	if value.ID == "" {
-		value.ID = "nano-interactive-v1"
+		value.ID = agent.DefaultRunConfig("").ID
+	}
+	if value.ExecutorVersion == "" {
+		value.ExecutorVersion = "leader-executor-v1"
 	}
 	if value.ActionDecisionLimit <= 0 {
 		value.ActionDecisionLimit = 4

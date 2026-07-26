@@ -45,6 +45,9 @@ import (
 
 type workerConfig struct {
 	DatabaseURL                    string
+	AgentConfigurationID           string
+	LeaderModel                    string
+	ResearchModel                  string
 	Addr                           string
 	CollectorEndpoint              string
 	CollectorServiceToken          string
@@ -108,6 +111,8 @@ type traceFlusher interface {
 
 type notConfiguredWebSearchProvider struct{}
 
+func (notConfiguredWebSearchProvider) ResearchAvailable() bool { return false }
+
 func (notConfiguredWebSearchProvider) Search(context.Context, websearch.Request) ([]websearch.Candidate, error) {
 	return nil, websearch.ErrNotConfigured
 }
@@ -139,6 +144,17 @@ func main() {
 	defer db.Close()
 	if err := app.VerifyEmbeddedPromptCatalog(ctx, db); err != nil {
 		slog.Error("worker Prompt Catalog readiness failed", "error", err)
+		os.Exit(1)
+	}
+	_, supportedAgentConfiguration, err := agent.DefaultAgentConfigurationBundle(
+		config.AgentConfigurationID, config.LeaderModel, config.ResearchModel, agent.DefaultRunConfig(config.AgentConfigurationID),
+	)
+	if err != nil {
+		slog.Error("worker Agent Configuration readiness failed", "error", err)
+		os.Exit(1)
+	}
+	if err := app.VerifyAgentConfigurationReady(ctx, db, supportedAgentConfiguration); err != nil {
+		slog.Error("worker Agent Configuration readiness failed", "error", err)
 		os.Exit(1)
 	}
 	indexVersion, bootstrapped, err := prepareRetrievalAuthority(ctx, retrieval.NewVersionStore(db.Pool()), config)
@@ -294,11 +310,24 @@ func main() {
 		ExtractionConfigID: config.SourceExtractionConfigID,
 		MaxBytes:           config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
 	})
-	leaderExecutor := agent.NewLeaderExecutor(
+	roleRuntime := agent.NewLeaderExecutor(
 		db.Pool(), controller, agent.NewModelLeaderRouter(modelClient),
 		agent.NewModelResearchPlanner(modelClient), searchProvider, agent.WithLeaderTraceSink(traceExporter),
 		agent.WithLeaderReplayStager(replayStager), agent.WithResearchCandidateValidator(candidateValidator),
 	)
+	roleRegistry, err := agent.NewRoleRegistry(
+		agent.RoleRegistration{Role: agent.RoleLeader, ExecutorVersion: supportedAgentConfiguration.Profiles[agent.RoleLeader].ExecutorVersion, Executor: agent.NewLeaderRoleExecutor(roleRuntime)},
+		agent.RoleRegistration{Role: agent.RoleResearch, ExecutorVersion: supportedAgentConfiguration.Profiles[agent.RoleResearch].ExecutorVersion, Executor: agent.NewResearchRoleExecutor(roleRuntime)},
+	)
+	if err != nil {
+		slog.Error("Agent Role Registry invalid", "error", err)
+		os.Exit(1)
+	}
+	executionHost, err := agent.NewAgentExecutionHost(db.Pool(), roleRegistry)
+	if err != nil {
+		slog.Error("Agent Execution Host invalid", "error", err)
+		os.Exit(1)
+	}
 	mailSender := mailoutbox.NewSender(
 		mailoutbox.NewQueue(db.Pool(), config.MailLeaseDuration),
 		mailoutbox.NewSMTPMailer(config.MailSMTPAddr, config.MailFrom, config.MailSMTPTimeout),
@@ -306,7 +335,7 @@ func main() {
 	)
 	mailDone := make(chan error, 1)
 	go func() { mailDone <- mailSender.Run(ctx, config.MailPollInterval) }()
-	workerService := agentworker.NewServiceWithConcurrency(db.Pool(), jobs.NewQueueWithTraceSink(db.Pool(), traceExporter), leaderExecutor, 5*time.Second, 210*time.Second, config.AgentInteractiveConcurrency)
+	workerService := agentworker.NewServiceWithConcurrency(db.Pool(), jobs.NewQueueWithTraceSink(db.Pool(), traceExporter), executionHost, 5*time.Second, 210*time.Second, config.AgentInteractiveConcurrency)
 	workerDone := make(chan error, 1)
 	go func() {
 		err := workerService.Run(ctx)
@@ -633,6 +662,9 @@ func loadWorkerConfig() (workerConfig, error) {
 	collectorURL := strings.TrimRight(env("NANO_COLLECTOR_URL", "http://127.0.0.1:8082"), "/")
 	config := workerConfig{
 		DatabaseURL:           env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
+		AgentConfigurationID:  env("NANO_AGENT_CONFIGURATION_ID", "nano-interactive-v1"),
+		LeaderModel:           env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
+		ResearchModel:         env("NANO_RESEARCH_MODEL", env("NANO_CHAT_MODEL", "aliyun/qwen-plus")),
 		Addr:                  env("NANO_WORKER_ADDR", ":8081"),
 		CollectorEndpoint:     collectorURL + "/internal/agent-observability/v2/batches",
 		CollectorServiceToken: env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
@@ -685,7 +717,8 @@ func loadWorkerConfig() (workerConfig, error) {
 		WebBaseURL:        strings.TrimRight(env("NANO_WEB_BASE_URL", "http://localhost:5173"), "/"),
 		MailLeaseDuration: mailLeaseDuration, MailPollInterval: mailPollInterval, MailSMTPTimeout: mailSMTPTimeout,
 	}
-	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
+	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.AgentConfigurationID) == "" ||
+		strings.TrimSpace(config.LeaderModel) == "" || strings.TrimSpace(config.ResearchModel) == "" || strings.TrimSpace(config.Addr) == "" ||
 		strings.TrimSpace(collectorURL) == "" || strings.TrimSpace(config.CollectorServiceToken) == "" ||
 		strings.TrimSpace(config.ProducerID) == "" || config.BatchMaxRecords < 1 ||
 		config.BatchMaxEncodedBytes < 1 || config.BatchMaxDelay < 0 || config.HTTPTimeout <= 0 ||

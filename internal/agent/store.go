@@ -643,17 +643,20 @@ func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMe
 	if config.ID == "" {
 		config.ID = "nano-interactive-v1"
 	}
+	if config.ExecutorVersion == "" {
+		config.ExecutorVersion = "leader-executor-v1"
+	}
 	_, err := s.db.Exec(ctx, `
 		insert into agent_runs(
-			id, user_id, chat_id, input_message_id, status, model, prompt_version, agent_config_id,
+			id, user_id, chat_id, input_message_id, status, model, prompt_version, agent_config_id, executor_version,
 			time_zone, deadline_at, action_decision_limit, final_decision_limit,
 			action_limit, action_batch_limit, action_result_byte_limit, action_results_byte_limit
 		)
 		values(
-			$1, $2, $3, $4, 'queued', $5, $6, $7,
-			$8, now() + ($9 * interval '1 millisecond'), $10, $11, $12, $13, $14, $15
+			$1, $2, $3, $4, 'queued', $5, $6, $7, $8,
+			$9, now() + ($10 * interval '1 millisecond'), $11, $12, $13, $14, $15, $16
 		)`,
-		runID, userID, chatID, inputMessageID, model, promptVersion, config.ID,
+		runID, userID, chatID, inputMessageID, model, promptVersion, config.ID, config.ExecutorVersion,
 		timeZone, config.Deadline.Milliseconds(), config.ActionDecisionLimit, config.FinalDecisionLimit,
 		config.ActionLimit, config.ActionBatchLimit, config.ActionResultByteLimit, config.ActionResultsByteLimit,
 	)

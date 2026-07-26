@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -39,6 +40,12 @@ type LeaderRouteDecision struct {
 type LeaderRouteRequest struct {
 	Model       string
 	UserMessage string
+	RecentPairs []LeaderConversationPair
+}
+
+type LeaderConversationPair struct {
+	User      string
+	Assistant string
 }
 
 type LeaderRouter interface {
@@ -82,7 +89,7 @@ func (r *ModelLeaderRouter) decideRoute(ctx context.Context, tracer *agentobs.Tr
 	}
 	modelRequest := models.ModelRequest{Model: request.Model, Messages: []models.ModelMessage{
 		{Role: models.RoleSystem, Content: mustPromptContent("agent.leader-router", 1)},
-		{Role: models.RoleUser, Content: request.UserMessage},
+		{Role: models.RoleUser, Content: buildLeaderRouteMessage(request.UserMessage, request.RecentPairs)},
 	}, ActionDefinitions: []models.ActionDefinition{leaderRouteActionDefinition()}, RequiredActionName: "select_leader_route"}
 	var outcome models.ModelOutcome
 	var err error
@@ -102,6 +109,26 @@ func (r *ModelLeaderRouter) decideRoute(ctx context.Context, tracer *agentobs.Tr
 		return LeaderRouteDecision{}, ErrInvalidLeaderRoute
 	}
 	return decision, nil
+}
+
+func buildLeaderRouteMessage(current string, pairs []LeaderConversationPair) string {
+	internalPairs := make([]completedConversationPair, 0, len(pairs))
+	for _, pair := range pairs {
+		internalPairs = append(internalPairs, completedConversationPair{user: pair.User, assistant: pair.Assistant})
+	}
+	bounded := boundConversationPairs(internalPairs, 3, 4000, 1200)
+	var message strings.Builder
+	message.WriteString("RECENT COMPLETED CONTEXT (reference only):\n")
+	if len(bounded) == 0 {
+		message.WriteString("(none)\n")
+	} else {
+		for index, pair := range bounded {
+			_, _ = fmt.Fprintf(&message, "Pair %d user: %s\nPair %d assistant: %s\n", index+1, pair.user, index+1, pair.assistant)
+		}
+	}
+	message.WriteString("\nCURRENT MESSAGE (authoritative):\n")
+	message.WriteString(truncateRunes(strings.TrimSpace(current), 4000))
+	return message.String()
 }
 
 type ModelResearchPlanner struct{ model DecisionModel }
