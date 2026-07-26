@@ -33,6 +33,12 @@ func TestProductRunExecutorDerivesObservationFromDurableProductFacts(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	chunks, err := retrieval.BuildChunks(version.ID, "evr_product_fixture", []retrieval.Unit{{
+		ID: "unit_product_launch", Ordinal: 0, Kind: "paragraph", Text: "The launch date is 20 July.",
+	}}, config.Chunk)
+	if err != nil || len(chunks) != 1 {
+		t.Fatalf("build product fixture chunk=%+v err=%v", chunks, err)
+	}
 	fixtureSHA := strings.Repeat("a", 64)
 	statements := []struct {
 		query string
@@ -51,7 +57,7 @@ func TestProductRunExecutorDerivesObservationFromDurableProductFacts(t *testing.
 		{`insert into agent_run_grounding_plans(run_id,draft_sha256,outcome,research_performed,research_complete,retrieval_degraded) values('run_product_observer',$1,'source_cited',true,true,false)`, []any{strings.Repeat("d", 64)}},
 		{`insert into chat_citations(message_id,citation_id,run_id,reference_kind,reference_ordinal,notebook_id,source_id) values('msg_product_answer','cite_product','run_product_observer','source',0,$1,'src_product_fixture')`, []any{notebookID}},
 		{`insert into agent_run_checkpoints(run_id,sequence_no,identity_key,kind,decision_no,payload,payload_sha256) values('run_product_observer',1,'decision:1','action_proposal',1,$1,$2)`, []any{`{"actions":[{"action_id":"decision:1/action:0","index":0,"name":"search_evidence","input":{"query":"launch date","purpose":"answer"}}]}`, strings.Repeat("e", 64)}},
-		{`insert into agent_run_checkpoints(run_id,sequence_no,identity_key,kind,decision_no,action_index,action_id,payload,payload_sha256) values('run_product_observer',2,'decision:1/action:0','action_result',1,0,'decision:1/action:0',$1,$2)`, []any{`{"action_id":"decision:1/action:0","status":"succeeded","output":{"complete_empty":false,"degraded":false,"degradations":[],"evidence":[{"source_id":"src_product_fixture","evidence_revision_id":"evr_product_fixture","source_title":"Fixture","preview":"The launch date is 20 July.","evidence_ranges":[{"unit_id":"unit_product_launch","start_rune":0,"end_rune":27}]}]}}`, strings.Repeat("f", 64)}},
+		{`insert into agent_run_checkpoints(run_id,sequence_no,identity_key,kind,decision_no,action_index,action_id,payload,payload_sha256) values('run_product_observer',2,'decision:1/action:0','action_result',1,0,'decision:1/action:0',$1,$2)`, []any{fmt.Sprintf(`{"action_id":"decision:1/action:0","status":"succeeded","output":{"result_version":2,"complete_empty":false,"degraded":false,"degradations":[],"evidence":[{"chunk_id":%q,"source_id":"src_product_fixture","evidence_revision_id":"evr_product_fixture"}]}}`, chunks[0].ID), strings.Repeat("f", 64)}},
 	}
 	for _, statement := range statements {
 		if _, err := api.db.Pool().Exec(ctx, statement.query, statement.args...); err != nil {

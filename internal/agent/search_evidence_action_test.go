@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
@@ -16,6 +18,33 @@ type evidenceSearchStub struct {
 	purpose string
 	result  retrieval.SearchResult
 	err     error
+}
+
+func TestSearchEvidenceCheckpointStaysSmallWhenAuthoritativeCandidatesAreLarge(t *testing.T) {
+	candidates := make([]retrieval.EvidenceCandidate, 0, maxSearchEvidenceCandidates)
+	for index := 0; index < maxSearchEvidenceCandidates; index++ {
+		refs := make([]retrieval.UnitRef, 0, 100)
+		for range 100 {
+			refs = append(refs, retrieval.UnitRef{UnitID: strings.Repeat("unit", 20), StartRune: 0, EndRune: 100})
+		}
+		candidates = append(candidates, retrieval.EvidenceCandidate{
+			ID: fmt.Sprintf("chunk_%064d", index), SourceID: fmt.Sprintf("src_%d", index), RevisionID: fmt.Sprintf("evr_%d", index),
+			SourceTitle: strings.Repeat("title", 100), Preview: strings.Repeat("large evidence body ", 1000), UnitRefs: refs,
+		})
+	}
+	result, err := NewSearchEvidenceAction(&evidenceSearchStub{result: retrieval.SearchResult{Candidates: candidates}}).Execute(
+		context.Background(), ActionRequest{Input: json.RawMessage(`{"query":"q","purpose":"p"}`), Attempt: Attempt{RunID: "run"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := NewActionResultCheckpoint(1, 0, "decision:1/action:0", result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checkpoint.Payload) >= 4*1024 {
+		t.Fatalf("compact checkpoint bytes=%d payload=%s", len(checkpoint.Payload), checkpoint.Payload)
+	}
 }
 
 func (s *evidenceSearchStub) SearchEvidence(_ context.Context, attempt Attempt, query, purpose string) (retrieval.SearchResult, error) {
@@ -42,21 +71,24 @@ func TestSearchEvidenceActionUsesServerBoundAttemptAndReturnsEvidenceAddresses(t
 		t.Fatalf("result/backend=%+v/%+v", result, backend)
 	}
 	var output struct {
-		Evidence []struct {
-			SourceID           string              `json:"source_id"`
-			EvidenceRevisionID string              `json:"evidence_revision_id"`
-			EvidenceRanges     []retrieval.UnitRef `json:"evidence_ranges"`
+		ResultVersion int `json:"result_version"`
+		Evidence      []struct {
+			SourceID           string `json:"source_id"`
+			EvidenceRevisionID string `json:"evidence_revision_id"`
+			ChunkID            string `json:"chunk_id"`
 		} `json:"evidence"`
 	}
 	if err := json.Unmarshal(result.Output, &output); err != nil {
 		t.Fatal(err)
 	}
-	if len(output.Evidence) != 1 || output.Evidence[0].SourceID != "src_a" || output.Evidence[0].EvidenceRevisionID != "evr_a" ||
-		len(output.Evidence[0].EvidenceRanges) != 1 || output.Evidence[0].EvidenceRanges[0].UnitID != "unit_a" {
+	if output.ResultVersion != 2 || len(output.Evidence) != 1 || output.Evidence[0].SourceID != "src_a" ||
+		output.Evidence[0].EvidenceRevisionID != "evr_a" || output.Evidence[0].ChunkID != "chunk_internal" {
 		t.Fatalf("output=%s", result.Output)
 	}
-	if string(result.Output) == "" || bytes.Contains(result.Output, []byte(`"chunk_id"`)) || bytes.Contains(result.Output, []byte(`"index_version_id"`)) {
-		t.Fatalf("Action leaked projection identity: %s", result.Output)
+	for _, forbidden := range [][]byte{[]byte(`"source_title"`), []byte(`"preview"`), []byte(`"evidence_ranges"`), []byte(`"index_version_id"`), []byte("unit_a"), []byte("Grounded passage")} {
+		if bytes.Contains(result.Output, forbidden) {
+			t.Fatalf("Action persisted model-only evidence data %q: %s", forbidden, result.Output)
+		}
 	}
 }
 

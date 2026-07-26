@@ -36,6 +36,10 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 	if err != nil {
 		return models.ModelRequest{}, err
 	}
+	searchCandidates, err := r.loadSearchEvidenceModelCandidates(ctx, execution, prefix)
+	if err != nil {
+		return models.ModelRequest{}, fmt.Errorf("load search evidence model projection: %w", err)
+	}
 	for _, proposal := range prefix.Proposals {
 		if err := ctx.Err(); err != nil {
 			return models.ModelRequest{}, err
@@ -54,7 +58,14 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 		}
 		request.Messages = append(request.Messages, proposalMessage)
 		for _, action := range proposal.Actions {
-			checkpoint, err := NewActionResultCheckpoint(proposal.DecisionNo, action.Index, action.ActionID, *action.Result)
+			modelResult := *action.Result
+			if action.Name == "search_evidence" && modelResult.Status == ActionSucceeded {
+				modelResult.Output, err = projectSearchEvidenceForModel(execution, modelResult.Output, searchCandidates)
+				if err != nil {
+					return models.ModelRequest{}, fmt.Errorf("project Action Result %q: %w", action.ActionID, err)
+				}
+			}
+			checkpoint, err := NewActionResultCheckpoint(proposal.DecisionNo, action.Index, action.ActionID, modelResult)
 			if err != nil {
 				return models.ModelRequest{}, fmt.Errorf("reconstruct Action Result %q: %w", action.ActionID, err)
 			}

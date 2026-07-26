@@ -26,12 +26,10 @@ type GroundingService struct {
 	pool *pgxpool.Pool
 }
 
-type researchRange struct {
+type researchEvidence struct {
 	SourceID   string
 	RevisionID string
-	UnitID     string
-	StartRune  int
-	EndRune    int
+	ChunkID    string
 }
 
 type researchState struct {
@@ -39,7 +37,7 @@ type researchState struct {
 	complete     bool
 	degraded     bool
 	evidenceSeen bool
-	ranges       []researchRange
+	evidence     []researchEvidence
 }
 
 func NewGroundingService(pool *pgxpool.Pool) *GroundingService {
@@ -140,13 +138,13 @@ func (s *GroundingService) prepare(ctx context.Context, attempt Attempt, prefix 
 		return result, ErrGroundingIncomplete
 	}
 	allowed := make(map[string]struct{})
-	for _, item := range research.ranges {
+	for _, item := range research.evidence {
 		allowed[item.SourceID] = struct{}{}
 	}
 	result.eligibleSourceCount = len(allowed)
 	normalizedText, references, discarded := normalizeSourceMarkers(draft.Text, allowed)
 	if len(references) == 0 && research.evidenceSeen {
-		normalizedText = appendRetrievedSourceMarkers(normalizedText, research.ranges)
+		normalizedText = appendRetrievedSourceMarkers(normalizedText, research.evidence)
 		var fallbackDiscarded int
 		normalizedText, references, fallbackDiscarded = normalizeSourceMarkers(normalizedText, allowed)
 		discarded += fallbackDiscarded
@@ -169,10 +167,10 @@ func (s *GroundingService) prepare(ctx context.Context, attempt Attempt, prefix 
 	return result, nil
 }
 
-func appendRetrievedSourceMarkers(text string, ranges []researchRange) string {
+func appendRetrievedSourceMarkers(text string, evidence []researchEvidence) string {
 	var markers strings.Builder
 	seen := make(map[string]struct{})
-	for _, item := range ranges {
+	for _, item := range evidence {
 		if _, duplicate := seen[item.SourceID]; duplicate {
 			continue
 		}
@@ -203,35 +201,26 @@ func parseResearchState(prefix CheckpointPrefix) (researchState, error) {
 				state.degraded = true
 				continue
 			}
-			var output struct {
-				CompleteEmpty bool `json:"complete_empty"`
-				Degraded      bool `json:"degraded"`
-				Evidence      []struct {
-					SourceID           string `json:"source_id"`
-					EvidenceRevisionID string `json:"evidence_revision_id"`
-					EvidenceRanges     []struct {
-						UnitID    string `json:"unit_id"`
-						StartRune int    `json:"start_rune"`
-						EndRune   int    `json:"end_rune"`
-					} `json:"evidence_ranges"`
-				} `json:"evidence"`
-			}
-			if json.Unmarshal(action.Result.Output, &output) != nil {
-				return researchState{}, ErrGroundingInvalid
+			output, err := decodeSearchEvidenceResult(action.Result.Output)
+			if err != nil {
+				return researchState{}, err
 			}
 			state.degraded = state.degraded || output.Degraded
 			if len(output.Evidence) == 0 && !output.CompleteEmpty {
 				state.complete = false
 			}
 			for _, evidence := range output.Evidence {
-				for _, item := range evidence.EvidenceRanges {
-					if evidence.SourceID == "" || evidence.EvidenceRevisionID == "" || item.UnitID == "" || item.StartRune < 0 || item.EndRune <= item.StartRune {
-						return researchState{}, ErrGroundingInvalid
-					}
+				if !output.Legacy {
 					state.evidenceSeen = true
-					state.ranges = append(state.ranges, researchRange{
-						SourceID: evidence.SourceID, RevisionID: evidence.EvidenceRevisionID, UnitID: item.UnitID,
-						StartRune: item.StartRune, EndRune: item.EndRune,
+					state.evidence = append(state.evidence, researchEvidence{
+						SourceID: evidence.SourceID, RevisionID: evidence.EvidenceRevisionID, ChunkID: evidence.ChunkID,
+					})
+					continue
+				}
+				for range evidence.EvidenceRanges {
+					state.evidenceSeen = true
+					state.evidence = append(state.evidence, researchEvidence{
+						SourceID: evidence.SourceID, RevisionID: evidence.EvidenceRevisionID,
 					})
 				}
 			}

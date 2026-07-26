@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 	"github.com/jackc/pgx/v5"
@@ -134,7 +135,7 @@ func (e *ProductRunExecutor) ExecuteCase(ctx context.Context, evalCase Case, con
 			unitAliases[unitID] = alias
 		}
 	}
-	retrievedUnits, err := loadRetrievedUnits(ctx, tx, manifestCase.RunID)
+	retrievedUnits, err := loadRetrievedUnits(ctx, tx, manifestCase.RunID, version)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -214,7 +215,13 @@ func loadFixtureIdentity(ctx context.Context, tx pgx.Tx, manifestCase ProductRun
 	return coveragePassed, nil
 }
 
-func loadRetrievedUnits(ctx context.Context, tx pgx.Tx, runID string) ([]string, error) {
+type retrievedChunkReference struct {
+	ChunkID    string
+	SourceID   string
+	RevisionID string
+}
+
+func loadRetrievedUnits(ctx context.Context, tx pgx.Tx, runID string, version retrieval.IndexVersion) ([]string, error) {
 	rows, err := tx.Query(ctx, `select kind,payload from agent_run_checkpoints where run_id=$1 and kind in ('action_proposal','action_result') order by sequence_no`, runID)
 	if err != nil {
 		return nil, err
@@ -251,13 +258,18 @@ func loadRetrievedUnits(ctx context.Context, tx pgx.Tx, runID string) ([]string,
 		return nil, err
 	}
 	units := make([]string, 0)
+	chunkReferences := make([]retrievedChunkReference, 0)
 	for _, payload := range results {
 		var result struct {
 			ActionID string `json:"action_id"`
 			Status   string `json:"status"`
 			Output   struct {
-				Evidence []struct {
-					Ranges []retrieval.UnitRef `json:"evidence_ranges"`
+				ResultVersion int `json:"result_version"`
+				Evidence      []struct {
+					ChunkID    string              `json:"chunk_id"`
+					SourceID   string              `json:"source_id"`
+					RevisionID string              `json:"evidence_revision_id"`
+					Ranges     []retrieval.UnitRef `json:"evidence_ranges"`
 				} `json:"evidence"`
 			} `json:"output"`
 		}
@@ -267,13 +279,100 @@ func loadRetrievedUnits(ctx context.Context, tx pgx.Tx, runID string) ([]string,
 		if !searchActions[result.ActionID] || result.Status != "succeeded" {
 			continue
 		}
+		if result.Output.ResultVersion != 0 && result.Output.ResultVersion != agent.SearchEvidenceResultVersion {
+			return nil, errors.New("unsupported product Run search evidence result")
+		}
 		for _, evidence := range result.Output.Evidence {
+			if result.Output.ResultVersion == agent.SearchEvidenceResultVersion {
+				if strings.TrimSpace(evidence.ChunkID) == "" || strings.TrimSpace(evidence.SourceID) == "" || strings.TrimSpace(evidence.RevisionID) == "" {
+					return nil, errors.New("invalid product Run compact search evidence")
+				}
+				chunkReferences = append(chunkReferences, retrievedChunkReference{
+					ChunkID: evidence.ChunkID, SourceID: evidence.SourceID, RevisionID: evidence.RevisionID,
+				})
+				continue
+			}
 			for _, ref := range evidence.Ranges {
 				units = append(units, ref.UnitID)
 			}
 		}
 	}
+	resolved, err := resolveRetrievedChunkUnits(ctx, tx, runID, version, chunkReferences)
+	if err != nil {
+		return nil, err
+	}
+	for _, reference := range chunkReferences {
+		unitIDs, ok := resolved[reference.ChunkID]
+		if !ok {
+			return nil, errors.New("product Run compact search evidence no longer resolves")
+		}
+		units = append(units, unitIDs...)
+	}
 	return units, nil
+}
+
+func resolveRetrievedChunkUnits(ctx context.Context, tx pgx.Tx, runID string, version retrieval.IndexVersion, references []retrievedChunkReference) (map[string][]string, error) {
+	type evidenceKey struct {
+		SourceID   string
+		RevisionID string
+	}
+	wanted := make(map[evidenceKey]map[string]struct{})
+	for _, reference := range references {
+		key := evidenceKey{SourceID: reference.SourceID, RevisionID: reference.RevisionID}
+		if wanted[key] == nil {
+			wanted[key] = make(map[string]struct{})
+		}
+		wanted[key][reference.ChunkID] = struct{}{}
+	}
+	resolved := make(map[string][]string, len(references))
+	for key, chunkIDs := range wanted {
+		var pinned bool
+		if err := tx.QueryRow(ctx, `
+			select exists(select 1 from agent_run_evidence_set
+				where run_id=$1 and source_id=$2 and evidence_revision_id=$3 and index_version_id=$4)
+		`, runID, key.SourceID, key.RevisionID, version.ID).Scan(&pinned); err != nil {
+			return nil, err
+		}
+		if !pinned {
+			return nil, errors.New("product Run compact search evidence is outside pinned scope")
+		}
+		rows, err := tx.Query(ctx, `
+			select id,ordinal,kind,text_content from source_evidence_units
+			where source_id=$1 and revision_id=$2 order by ordinal
+		`, key.SourceID, key.RevisionID)
+		if err != nil {
+			return nil, err
+		}
+		units := make([]retrieval.Unit, 0)
+		for rows.Next() {
+			var unit retrieval.Unit
+			if err := rows.Scan(&unit.ID, &unit.Ordinal, &unit.Kind, &unit.Text); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			units = append(units, unit)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		chunks, err := retrieval.BuildChunks(version.ID, key.RevisionID, units, version.Config.Chunk)
+		if err != nil {
+			return nil, err
+		}
+		for _, chunk := range chunks {
+			if _, ok := chunkIDs[chunk.ID]; !ok {
+				continue
+			}
+			unitIDs := make([]string, 0, len(chunk.UnitRefs))
+			for _, ref := range chunk.UnitRefs {
+				unitIDs = append(unitIDs, ref.UnitID)
+			}
+			resolved[chunk.ID] = unitIDs
+		}
+	}
+	return resolved, nil
 }
 
 func loadCitationSources(ctx context.Context, tx pgx.Tx, manifestCase ProductRunCase, observation *Observation) ([]string, error) {

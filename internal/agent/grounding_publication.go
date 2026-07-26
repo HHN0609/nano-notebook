@@ -135,7 +135,7 @@ func validateSourceReferenceDraft(
 		return ErrGroundingInvalid
 	}
 	allowed := make(map[string]struct{})
-	for _, item := range research.ranges {
+	for _, item := range research.evidence {
 		allowed[item.SourceID] = struct{}{}
 	}
 	normalized, parsedReferences, discarded := normalizeSourceMarkers(text, allowed)

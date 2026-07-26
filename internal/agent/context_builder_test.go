@@ -36,10 +36,10 @@ func TestGroundedRequiredActionDependsOnDurableSearchAttempt(t *testing.T) {
 		{name: "no search", want: "search_evidence"},
 		{name: "complete empty search", prefix: groundedSearchPrefix(t, true, false, nil)},
 		{name: "degraded empty search", prefix: groundedSearchPrefix(t, false, true, nil)},
-		{name: "evidence metadata without citeable range", prefix: groundedSearchPrefix(t, false, false, []map[string]any{{
-			"source_id": "src_a", "evidence_revision_id": "evr_a", "evidence_ranges": []map[string]any{},
+		{name: "compact evidence manifest", prefix: groundedCompactSearchPrefix(t, false, true, []map[string]any{{
+			"chunk_id": "chunk_a", "source_id": "src_a", "evidence_revision_id": "evr_a",
 		}})},
-		{name: "citeable evidence", prefix: groundedSearchPrefix(t, false, true, []map[string]any{{
+		{name: "legacy citeable evidence", prefix: groundedSearchPrefix(t, false, true, []map[string]any{{
 			"source_id": "src_a", "evidence_revision_id": "evr_a", "evidence_ranges": []map[string]any{{
 				"unit_id": "unit_a", "start_rune": 2, "end_rune": 9,
 			}},
@@ -53,6 +53,24 @@ func TestGroundedRequiredActionDependsOnDurableSearchAttempt(t *testing.T) {
 			}
 		})
 	}
+}
+
+func groundedCompactSearchPrefix(t *testing.T, completeEmpty, degraded bool, evidence []map[string]any) CheckpointPrefix {
+	t.Helper()
+	output, err := json.Marshal(map[string]any{
+		"result_version": SearchEvidenceResultVersion,
+		"complete_empty": completeEmpty,
+		"degraded":       degraded,
+		"degradations":   []string{},
+		"evidence":       evidence,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := ActionResult{Status: ActionSucceeded, Output: output}
+	return CheckpointPrefix{Proposals: []AcceptedProposal{{DecisionNo: 1, Actions: []AcceptedAction{{
+		ActionID: "decision:1/action:0", Index: 0, Name: "search_evidence", Result: &result,
+	}}}}}
 }
 
 func groundedSearchPrefix(t *testing.T, completeEmpty, degraded bool, evidence []map[string]any) CheckpointPrefix {

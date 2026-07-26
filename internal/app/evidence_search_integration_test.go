@@ -1,9 +1,12 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
@@ -30,6 +33,14 @@ func (s *evidenceVectorSearchStub) SearchSparse(_ context.Context, _ retrieval.S
 
 type evidenceModelsStub struct {
 	embeddingRequests []models.EmbeddingRequest
+}
+
+type fixedEvidenceSearchBackend struct {
+	result retrieval.SearchResult
+}
+
+func (b fixedEvidenceSearchBackend) SearchEvidence(context.Context, agent.Attempt, string, string) (retrieval.SearchResult, error) {
+	return b.result, nil
 }
 
 func (s *evidenceModelsStub) Embed(_ context.Context, request models.EmbeddingRequest) (models.EmbeddingOutcome, error) {
@@ -100,6 +111,44 @@ func TestSearchEvidenceTraversesPinnedScopeAndReloadsAuthoritativeEvidenceRanges
 		if scope.NotebookID != notebookID || scope.IndexVersionID != "riv_pin_active" || len(scope.Evidence) != 1 ||
 			scope.Evidence[0] != (qdrantstore.EvidenceRef{SourceID: "src_search", RevisionID: "evr_search"}) {
 			t.Fatalf("forged Qdrant scope=%+v", scope)
+		}
+	}
+
+	actionResult, err := agent.NewSearchEvidenceAction(fixedEvidenceSearchBackend{result: result}).Execute(context.Background(), agent.ActionRequest{
+		Input: json.RawMessage(`{"query":"launch date","purpose":"answer the user's date question"}`), Attempt: attemptFromClaim(claimed),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(actionResult.Output) >= 1024 || bytes.Contains(actionResult.Output, []byte("The launch date")) ||
+		bytes.Contains(actionResult.Output, []byte(`"evidence_ranges"`)) || !bytes.Contains(actionResult.Output, []byte(chunks[0].ID)) {
+		t.Fatalf("durable search checkpoint output=%s", actionResult.Output)
+	}
+	prefix := agent.CheckpointPrefix{Proposals: []agent.AcceptedProposal{{DecisionNo: 1, Actions: []agent.AcceptedAction{{
+		ActionID: "decision:1/action:0", Index: 0, Name: "search_evidence",
+		Input: json.RawMessage(`{"query":"launch date","purpose":"answer the user's date question"}`), Result: &actionResult,
+	}}}}}
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "", nil)
+	execution, err := runtime.Load(context.Background(), attemptFromClaim(claimed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := runtime.BuildDecisionRequest(context.Background(), execution, prefix, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var modelActionContent string
+	for _, message := range request.Messages {
+		if message.Role == models.RoleAction {
+			modelActionContent = message.Content
+		}
+	}
+	if !strings.Contains(modelActionContent, "The launch date is 20 July.") || !strings.Contains(modelActionContent, `"source_title":"src_search"`) {
+		t.Fatalf("model search projection=%s", modelActionContent)
+	}
+	for _, forbidden := range []string{chunks[0].ID, "unit_search", `"evidence_ranges"`} {
+		if strings.Contains(modelActionContent, forbidden) {
+			t.Fatalf("model projection leaked %q: %s", forbidden, modelActionContent)
 		}
 	}
 }

@@ -204,7 +204,7 @@ func TestActionAdapterStagesReplayAndBindsBothSidesOfThePhysicalCall(t *testing.
 func TestSearchEvidenceActionRecordsRAGMetadataWithoutQueryOrEvidenceBodies(t *testing.T) {
 	tracer, exporter, ctx := instrumentationTestTracer(t)
 	backend := &evidenceSearchStub{result: retrieval.SearchResult{
-		Candidates: []retrieval.EvidenceCandidate{{ID: "chunk_a", Preview: "secret evidence"}},
+		Candidates: []retrieval.EvidenceCandidate{{ID: "chunk_a", SourceID: "src_a", RevisionID: "evr_a", Preview: "secret evidence"}},
 		Degraded:   true, Degradations: []string{"reranker_unavailable"},
 		Diagnostics: retrieval.SearchDiagnostics{
 			Dense:        retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_a", "chunk_b"}},

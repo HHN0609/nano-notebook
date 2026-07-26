@@ -68,28 +68,9 @@ func (a searchEvidenceAction) Execute(ctx context.Context, request ActionRequest
 		}
 		return ActionResult{}, err
 	}
-	type evidenceOutput struct {
-		SourceID           string              `json:"source_id"`
-		EvidenceRevisionID string              `json:"evidence_revision_id"`
-		SourceTitle        string              `json:"source_title"`
-		Preview            string              `json:"preview"`
-		EvidenceRanges     []retrieval.UnitRef `json:"evidence_ranges"`
-	}
-	output := struct {
-		CompleteEmpty bool             `json:"complete_empty"`
-		Degraded      bool             `json:"degraded"`
-		Degradations  []string         `json:"degradations"`
-		Evidence      []evidenceOutput `json:"evidence"`
-	}{
-		CompleteEmpty: result.CompleteEmpty, Degraded: result.Degraded,
-		Degradations: append([]string(nil), result.Degradations...), Evidence: make([]evidenceOutput, 0, len(result.Candidates)),
-	}
-	for _, candidate := range result.Candidates {
-		output.Evidence = append(output.Evidence, evidenceOutput{
-			SourceID: candidate.SourceID, EvidenceRevisionID: candidate.RevisionID,
-			SourceTitle: candidate.SourceTitle, Preview: candidate.Preview,
-			EvidenceRanges: append([]retrieval.UnitRef(nil), candidate.UnitRefs...),
-		})
+	output, err := newSearchEvidenceResult(result)
+	if err != nil {
+		return ActionResult{}, err
 	}
 	encoded, err := json.Marshal(output)
 	if err != nil {
