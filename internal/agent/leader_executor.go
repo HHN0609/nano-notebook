@@ -586,15 +586,11 @@ func (e *LeaderExecutor) resumeDelegated(ctx context.Context, attempt Attempt, r
 	if err != nil {
 		return err
 	}
-	jobTag, err := tx.Exec(ctx, `
-		update agent_jobs set status='succeeded',lease_token=null,lease_expires_at=null,finished_at=now(),updated_at=now()
-		where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid
-	`, attempt.JobID, attempt.RunID, attempt.LeaseToken)
-	if err != nil {
-		return err
-	}
-	if runTag.RowsAffected() != 1 || jobTag.RowsAffected() != 1 {
+	if runTag.RowsAffected() != 1 {
 		return ErrLeaseLost
+	}
+	if err := (DelegationKernel{}).CompleteParentJobInTx(ctx, tx, attempt); err != nil {
+		return err
 	}
 	if err := (DelegationKernel{}).ConsumeInTx(ctx, tx, attempt.RunID, DelegationSucceeded); err != nil {
 		return err
@@ -620,10 +616,7 @@ func (e *LeaderExecutor) failLeaderInTx(ctx context.Context, tx pgx.Tx, attempt 
 	`, childRunID, errorCode); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `update agent_runs set status='failed',error_code=$2,finished_at=now(),updated_at=now() where id=$1 and status='running'`, attempt.RunID, errorCode); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `update agent_jobs set status='failed',lease_token=null,lease_expires_at=null,finished_at=now(),updated_at=now() where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid`, attempt.JobID, attempt.RunID, attempt.LeaseToken); err != nil {
+	if err := (DelegationKernel{}).FailParentInTx(ctx, tx, attempt, errorCode); err != nil {
 		return err
 	}
 	var terminal DelegationState

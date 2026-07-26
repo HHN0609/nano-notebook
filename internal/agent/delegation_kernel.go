@@ -198,6 +198,48 @@ func (DelegationKernel) ConsumeInTx(ctx context.Context, tx pgx.Tx, parentRunID 
 	return RecordDelegationConsumedInTx(ctx, tx, parentRunID, childRunID, terminal)
 }
 
+func (DelegationKernel) CompleteParentJobInTx(ctx context.Context, tx pgx.Tx, attempt Attempt) error {
+	if tx == nil {
+		return errors.New("parent Job completion requires a transaction")
+	}
+	tag, err := tx.Exec(ctx, `
+		update agent_jobs set status='succeeded',lease_token=null,lease_expires_at=null,finished_at=now(),updated_at=now()
+		where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid
+		  and exists(select 1 from agent_runs where id=$2 and agent_role='leader' and status='completed')
+	`, attempt.JobID, attempt.RunID, attempt.LeaseToken)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
+func (DelegationKernel) FailParentInTx(ctx context.Context, tx pgx.Tx, attempt Attempt, errorCode string) error {
+	if tx == nil || !safeAttemptErrorCode.MatchString(errorCode) {
+		return errors.New("invalid parent failure")
+	}
+	runTag, err := tx.Exec(ctx, `
+		update agent_runs set status='failed',error_code=$2,finished_at=now(),updated_at=now()
+		where id=$1 and agent_role='leader' and status='running' and output_message_id is null
+	`, attempt.RunID, errorCode)
+	if err != nil {
+		return err
+	}
+	jobTag, err := tx.Exec(ctx, `
+		update agent_jobs set status='failed',lease_token=null,lease_expires_at=null,last_error_code=$4,finished_at=now(),updated_at=now()
+		where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid
+	`, attempt.JobID, attempt.RunID, attempt.LeaseToken, errorCode)
+	if err != nil {
+		return err
+	}
+	if runTag.RowsAffected() != 1 || jobTag.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
 func (DelegationKernel) CancelTreeInTx(ctx context.Context, tx pgx.Tx, parentRunID, errorCode string, at time.Time) error {
 	if parentRunID == "" || strings.TrimSpace(errorCode) == "" || at.IsZero() {
 		return errors.New("invalid delegation cancellation")
