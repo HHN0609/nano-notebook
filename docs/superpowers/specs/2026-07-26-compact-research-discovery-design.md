@@ -44,6 +44,16 @@ Choosing **View** switches the left panel into its existing dedicated Source Dis
 
 This state is navigation, not an inline accordion and not a modal.
 
+The complete state must also be materially wider and more readable than the normal Source panel:
+
+- on large desktop viewports, Discovery occupies a responsive `640–720 px` column, targeting approximately `680 px` at a `1440 px` viewport;
+- on intermediate desktop viewports above the compact breakpoint, Discovery remains at least `560 px` wide while Chat and Studio share the remaining space without horizontal page overflow;
+- Candidate titles use `15 px` text and Candidate URL, snippet, status, summary, and toolbar text use `13 px` text;
+- Candidate icons, checkboxes, row gaps, and row padding increase with the typography so the result list does not look sparse inside the wider panel; and
+- at compact viewports, the existing single-panel layout remains full-width, with Candidate titles at `14 px` and supporting text at `12 px` to preserve useful line lengths.
+
+These expanded-detail rules do not change the compact Research card's width, typography, or density.
+
 ### Automatic opening
 
 Discovery does not automatically enter the complete detail state when:
@@ -120,6 +130,8 @@ Component tests are written first to prove:
 
 Regression checks cover type-check, lint, the Web test suite, and a production build. Browser acceptance covers desktop and compact widths, confirming that the compact card does not crowd out existing Sources, the complete list scrolls without horizontal overflow, and the Search field remains visually secondary.
 
+Browser assertions also verify that the complete Discovery column is materially wider than the normal Source column, falls within the specified large-desktop range, and applies the specified detail typography at desktop and compact viewports.
+
 ## Acceptance Criteria
 
 1. A completed Research Discovery never opens the full Candidate list automatically.
@@ -130,3 +142,5 @@ Regression checks cover type-check, lint, the Web test suite, and a production b
 6. Manual search and Chat-triggered Research follow the same presentation rules.
 7. The UI uses Research terminology and introduces no Fast/Deep distinction.
 8. Existing Discovery, Candidate selection, import, safe-link, and Source refresh behavior remains intact.
+9. At a `1440 px` viewport, complete Discovery is between `640 px` and `720 px` wide and materially wider than the normal Source panel.
+10. Complete Discovery Candidate typography is `15 px` / `13 px` on desktop and `14 px` / `12 px` on compact viewports.
