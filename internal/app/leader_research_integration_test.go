@@ -131,7 +131,8 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 		from agent_runs parent
 		join agent_jobs parent_job on parent_job.run_id=parent.id
 		join agent_run_routes route on route.run_id=parent.id
-		join agent_runs child on child.parent_run_id=parent.id
+		join agent_run_delegations delegation on delegation.parent_run_id=parent.id
+		join agent_runs child on child.id=delegation.child_run_id
 		where parent.id=$1
 	`, admittedBody.RunID).Scan(&parentJobStatus, &parentLease, &route, &childRunID, &childRole); err != nil {
 		t.Fatal(err)
@@ -144,7 +145,8 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	if err := api.db.Pool().QueryRow(context.Background(), `
 		select parent.discovery_session_id,child.discovery_session_id,coalesce(session.status,'')
 		from agent_runs parent
-		join agent_runs child on child.parent_run_id=parent.id
+		join agent_run_delegations delegation on delegation.parent_run_id=parent.id
+		join agent_runs child on child.id=delegation.child_run_id
 		left join source_discovery_sessions session on session.id=parent.discovery_session_id
 		where parent.id=$1
 	`, admittedBody.RunID).Scan(&parentSessionID, &childSessionID, &searchingSessionStatus); err != nil {
@@ -173,7 +175,9 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	if err := api.db.Pool().QueryRow(context.Background(), `
 		select child.discovery_session_id,child.status,parent_job.status,
 		  (select count(*) from source_discovery_candidates where session_id=child.discovery_session_id)
-		from agent_runs child join agent_jobs parent_job on parent_job.run_id=child.parent_run_id
+		from agent_runs child
+		join agent_run_delegations delegation on delegation.child_run_id=child.id
+		join agent_jobs parent_job on parent_job.run_id=delegation.parent_run_id
 		where child.id=$1
 	`, childRunID).Scan(&sessionID, &childStatus, &requeuedStatus, &candidateCount); err != nil {
 		t.Fatal(err)
@@ -376,7 +380,8 @@ func TestCancellingWaitingLeaderAlsoCancelsResearchChild(t *testing.T) {
 	if err := api.db.Pool().QueryRow(context.Background(), `
 		select parent.status,parent_job.status,child.status,child_job.status
 		from agent_runs parent join agent_jobs parent_job on parent_job.run_id=parent.id
-		join agent_runs child on child.parent_run_id=parent.id join agent_jobs child_job on child_job.run_id=child.id
+		join agent_run_delegations delegation on delegation.parent_run_id=parent.id
+		join agent_runs child on child.id=delegation.child_run_id join agent_jobs child_job on child_job.run_id=child.id
 		where parent.id=$1
 	`, admittedBody.RunID).Scan(&parentStatus, &parentJobStatus, &childStatus, &childJobStatus); err != nil {
 		t.Fatal(err)
@@ -419,7 +424,7 @@ func TestViewerCannotTriggerResearchDelegation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var childCount int
-	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_runs where parent_run_id=$1`, job.RunID).Scan(&childCount); err != nil {
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_run_delegations where parent_run_id=$1`, job.RunID).Scan(&childCount); err != nil {
 		t.Fatal(err)
 	}
 	if normal.calls != 1 || len(provider.requests) != 0 || childCount != 0 {
@@ -477,7 +482,8 @@ func TestRoleDowngradePreventsLateResearchCandidatePublication(t *testing.T) {
 	if err := api.db.Pool().QueryRow(context.Background(), `
 		select child.status,session.status,parent_job.status,(select count(*) from source_discovery_candidates where session_id=session.id)
 		from agent_runs child join source_discovery_sessions session on session.research_run_id=child.id
-		join agent_jobs parent_job on parent_job.run_id=child.parent_run_id where child.id=$1
+		join agent_run_delegations delegation on delegation.child_run_id=child.id
+		join agent_jobs parent_job on parent_job.run_id=delegation.parent_run_id where child.id=$1
 	`, childJob.RunID).Scan(&childStatus, &sessionStatus, &parentJobStatus, &candidateCount); err != nil {
 		t.Fatal(err)
 	}

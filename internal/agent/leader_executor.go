@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
@@ -166,14 +165,15 @@ func (e *LeaderExecutor) loadRun(ctx context.Context, runID string) (leaderRunCo
 	err = tx.QueryRow(ctx, `
 		select r.agent_role,r.user_id,r.chat_id,c.notebook_id,m.content,r.model,r.prompt_version,r.time_zone,
 			coalesce(member.role,''),r.status,r.deadline_at,
-			(select count(*) from agent_runs child where child.parent_run_id=case when r.agent_role='leader' then r.id else r.parent_run_id end),
+			(select count(*) from agent_run_delegations child_link where child_link.parent_run_id=case when r.agent_role='leader' then r.id else relationship.parent_run_id end),
 			route.effective_route,delegation.state
 		from agent_runs r
 		join chat_chats c on c.id=r.chat_id
 		join chat_messages m on m.id=r.input_message_id
 		left join notebook_memberships member on member.notebook_id=c.notebook_id and member.user_id=r.user_id
-		left join agent_run_routes route on route.run_id=case when r.agent_role='leader' then r.id else r.parent_run_id end
-		left join agent_research_delegations delegation on delegation.parent_run_id=case when r.agent_role='leader' then r.id else r.parent_run_id end
+		left join agent_run_routes route on route.run_id=case when r.agent_role='leader' then r.id else relationship.parent_run_id end
+		left join agent_run_delegations relationship on relationship.child_run_id=r.id
+		left join agent_run_delegations delegation on delegation.parent_run_id=case when r.agent_role='leader' then r.id else relationship.parent_run_id end
 		where r.id=$1
 	`, runID).Scan(&run.Role, &run.UserID, &run.ChatID, &run.NotebookID, &run.Message, &run.Model,
 		&run.PromptVersion, &run.TimeZone, &run.MemberRole, &run.Status, &run.DeadlineAt, &run.ExistingChildCount, &route, &delegationState)
@@ -271,27 +271,10 @@ func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run lead
 	`, attempt.RunID, policy.EffectiveRoute, policy.RequestedRoute, policy.IntentReason, policy.PolicyReason); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
-		insert into agent_runs(
-			id,user_id,chat_id,input_message_id,status,model,prompt_version,agent_config_id,executor_version,time_zone,
-			deadline_at,action_decision_limit,final_decision_limit,action_limit,action_batch_limit,
-			action_result_byte_limit,action_results_byte_limit,agent_role,parent_run_id
-		)
-		select $2,r.user_id,r.chat_id,r.input_message_id,'queued',profile.model,'agent.research-planner@1',r.agent_config_id,
-			profile.executor_version,r.time_zone,r.deadline_at,
-			coalesce((profile.run_config->>'action_decision_limit')::integer,1),
-			coalesce((profile.run_config->>'final_decision_limit')::integer,1),
-			coalesce((profile.run_config->>'action_limit')::integer,3),
-			coalesce((profile.run_config->>'action_batch_limit')::integer,1),
-			coalesce((profile.run_config->>'action_result_byte_limit')::integer,16384),
-			coalesce((profile.run_config->>'action_results_byte_limit')::integer,65536),'research',r.id
-		from agent_runs r
-		join agent_role_profiles profile on profile.configuration_set_id=r.agent_config_id and profile.role='research'
-		where r.id=$1
-	`, attempt.RunID, childRunID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `insert into agent_jobs(id,kind,run_id,status) values($1,'agent_run',$2,'queued')`, childJobID, childRunID); err != nil {
+	if err := (DelegationKernel{}).CreateInTx(ctx, tx, CreateDelegationCommand{
+		ParentAttempt: attempt, ChildRunID: childRunID, ChildJobID: childJobID,
+		ChildRole: RoleResearch, ChildPromptVersion: "agent.research-planner@1",
+	}); err != nil {
 		return err
 	}
 	if _, err := sourcediscovery.NewStore(tx).EnsureResearchSession(ctx, sourcediscovery.ResearchSessionCommand{
@@ -306,11 +289,6 @@ func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run lead
 	`, attempt.RunID, childRunID, sessionID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
-		insert into agent_research_delegations(parent_run_id,child_run_id,state) values($1,$2,'waiting')
-	`, attempt.RunID, childRunID); err != nil {
-		return err
-	}
 	var childModel, childPromptVersion string
 	if err := tx.QueryRow(ctx, `select model,prompt_version from agent_runs where id=$1`, childRunID).Scan(&childModel, &childPromptVersion); err != nil {
 		return err
@@ -318,20 +296,7 @@ func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run lead
 	if err := StartRunTraceInTx(ctx, tx, childRunID, childModel, childPromptVersion, nil); err != nil {
 		return err
 	}
-	result, err := tx.Exec(ctx, `
-		update agent_jobs set status='waiting',lease_token=null,lease_expires_at=null,updated_at=now()
-		where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid
-	`, attempt.JobID, attempt.RunID, attempt.LeaseToken)
-	if err != nil {
-		return err
-	}
-	if result.RowsAffected() != 1 {
-		return ErrLeaseLost
-	}
 	if err := RecordAttemptWaitingInTx(ctx, tx, attempt.RunID, attempt.JobID, attempt.AttemptNo); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_jobs',$1)`, childJobID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs',$1)`, attempt.RunID); err != nil {
@@ -372,16 +337,6 @@ func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, r
 	}
 	defer tx.Rollback(ctx)
 	if err := e.requireLease(ctx, tx, attempt, "research"); err != nil {
-		return err
-	}
-	encodedQueries, err := json.Marshal(queries)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `
-		update agent_research_delegations set expanded_queries=$2::jsonb,updated_at=now()
-		where child_run_id=$1 and state='waiting'
-	`, attempt.RunID, string(encodedQueries)); err != nil {
 		return err
 	}
 	if _, err := sourcediscovery.NewStore(tx).EnsureResearchSession(ctx, sourcediscovery.ResearchSessionCommand{
@@ -506,25 +461,19 @@ func (e *LeaderExecutor) completeResearch(ctx context.Context, attempt Attempt, 
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `update agent_runs set status='completed',discovery_session_id=$2,finished_at=now(),updated_at=now() where id=$1 and status='running'`, attempt.RunID, sessionID); err != nil {
+	if _, err := tx.Exec(ctx, `update agent_runs set discovery_session_id=$2,updated_at=now() where id=$1 and status='running'`, attempt.RunID, sessionID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `update agent_jobs set status='succeeded',lease_token=null,lease_expires_at=null,finished_at=now(),updated_at=now() where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid`, attempt.JobID, attempt.RunID, attempt.LeaseToken); err != nil {
+	if _, err := tx.Exec(ctx, `
+		insert into agent_research_outcomes(delegation_id,discovery_session_id)
+		select id,$2 from agent_run_delegations where child_run_id=$1 and state='waiting'
+	`, attempt.RunID, sessionID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `update agent_research_delegations set state='ready',discovery_session_id=$2,completed_at=now(),updated_at=now() where child_run_id=$1 and state='waiting'`, attempt.RunID, sessionID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `update agent_runs parent set status='queued',updated_at=now() from agent_research_delegations d where d.child_run_id=$1 and parent.id=d.parent_run_id and parent.status='running'`, attempt.RunID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `update agent_jobs parent_job set status='queued',updated_at=now() from agent_research_delegations d where d.child_run_id=$1 and parent_job.run_id=d.parent_run_id and parent_job.status='waiting'`, attempt.RunID); err != nil {
+	if err := (DelegationKernel{}).TerminalizeInTx(ctx, tx, attempt, DelegationSucceeded, ""); err != nil {
 		return err
 	}
 	if err := RecordRunTerminalInTx(ctx, tx, attempt.RunID, RunTerminalTrace{RunStatus: "completed", SpanStatus: agentobs.StatusOK, AttemptNo: attempt.AttemptNo}); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_jobs',parent_run_id) from agent_research_delegations where child_run_id=$1`, attempt.RunID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -542,19 +491,7 @@ func (e *LeaderExecutor) failResearch(ctx context.Context, attempt Attempt, erro
 	if err := sourcediscovery.NewStore(tx).FailResearchSession(ctx, attempt.RunID, errorCode); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `update agent_runs set status='failed',error_code=$2,finished_at=now(),updated_at=now() where id=$1 and status='running'`, attempt.RunID, errorCode); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `update agent_jobs set status='failed',lease_token=null,lease_expires_at=null,finished_at=now(),updated_at=now() where id=$1 and status='running' and lease_token=$2::uuid`, attempt.JobID, attempt.LeaseToken); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `update agent_research_delegations set state='failed',error_code=$2,completed_at=now(),updated_at=now() where child_run_id=$1 and state='waiting'`, attempt.RunID, errorCode); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `update agent_runs parent set status='queued',updated_at=now() from agent_research_delegations d where d.child_run_id=$1 and parent.id=d.parent_run_id and parent.status='running'`, attempt.RunID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `update agent_jobs parent_job set status='queued',updated_at=now() from agent_research_delegations d where d.child_run_id=$1 and parent_job.run_id=d.parent_run_id and parent_job.status='waiting'`, attempt.RunID); err != nil {
+	if err := (DelegationKernel{}).TerminalizeInTx(ctx, tx, attempt, DelegationFailed, errorCode); err != nil {
 		return err
 	}
 	if err := RecordRunTerminalInTx(ctx, tx, attempt.RunID, RunTerminalTrace{RunStatus: "failed", SpanStatus: agentobs.StatusError, ErrorCode: errorCode, AttemptNo: attempt.AttemptNo}); err != nil {
@@ -575,19 +512,21 @@ func (e *LeaderExecutor) resumeDelegated(ctx context.Context, attempt Attempt, r
 	var state string
 	var sessionID, errorCode *string
 	if err := tx.QueryRow(ctx, `
-		select state,discovery_session_id,error_code from agent_research_delegations
-		where parent_run_id=$1 for update
+		select delegation.state,outcome.discovery_session_id,delegation.error_code
+		from agent_run_delegations delegation
+		left join agent_research_outcomes outcome on outcome.delegation_id=delegation.id
+		where delegation.parent_run_id=$1 for update of delegation
 	`, attempt.RunID).Scan(&state, &sessionID, &errorCode); err != nil {
 		return err
 	}
-	if state == "failed" {
+	if state == string(DelegationFailed) || state == string(DelegationCancelled) {
 		code := "research_failed"
 		if errorCode != nil {
 			code = *errorCode
 		}
 		return e.failLeaderInTx(ctx, tx, attempt, code)
 	}
-	if state != "ready" || sessionID == nil {
+	if state != string(DelegationSucceeded) || sessionID == nil {
 		return errors.New("Research delegation is not ready")
 	}
 	messageID := "msg_" + uuid.NewString()
@@ -615,7 +554,7 @@ func (e *LeaderExecutor) resumeDelegated(ctx context.Context, attempt Attempt, r
 	if runTag.RowsAffected() != 1 || jobTag.RowsAffected() != 1 {
 		return ErrLeaseLost
 	}
-	if _, err := tx.Exec(ctx, `update agent_research_delegations set state='consumed',updated_at=now() where parent_run_id=$1 and state='ready'`, attempt.RunID); err != nil {
+	if err := (DelegationKernel{}).ConsumeInTx(ctx, tx, attempt.RunID, DelegationSucceeded); err != nil {
 		return err
 	}
 	if err := RecordRunTerminalInTx(ctx, tx, attempt.RunID, RunTerminalTrace{RunStatus: "completed", SpanStatus: agentobs.StatusOK, AttemptNo: attempt.AttemptNo}); err != nil {
@@ -628,13 +567,28 @@ func (e *LeaderExecutor) resumeDelegated(ctx context.Context, attempt Attempt, r
 }
 
 func (e *LeaderExecutor) failLeaderInTx(ctx context.Context, tx pgx.Tx, attempt Attempt, errorCode string) error {
+	var childRunID string
+	if err := tx.QueryRow(ctx, `select child_run_id from agent_run_delegations where parent_run_id=$1`, attempt.RunID).Scan(&childRunID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		update source_discovery_sessions
+		set status='failed',error_code=$2,completed_at=now(),updated_at=now()
+		where research_run_id=$1 and origin='research_agent' and status='searching'
+	`, childRunID, errorCode); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `update agent_runs set status='failed',error_code=$2,finished_at=now(),updated_at=now() where id=$1 and status='running'`, attempt.RunID, errorCode); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `update agent_jobs set status='failed',lease_token=null,lease_expires_at=null,finished_at=now(),updated_at=now() where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid`, attempt.JobID, attempt.RunID, attempt.LeaseToken); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `update agent_research_delegations set state='consumed',updated_at=now() where parent_run_id=$1`, attempt.RunID); err != nil {
+	var terminal DelegationState
+	if err := tx.QueryRow(ctx, `select state from agent_run_delegations where parent_run_id=$1`, attempt.RunID).Scan(&terminal); err != nil {
+		return err
+	}
+	if err := (DelegationKernel{}).ConsumeInTx(ctx, tx, attempt.RunID, terminal); err != nil {
 		return err
 	}
 	if err := RecordRunTerminalInTx(ctx, tx, attempt.RunID, RunTerminalTrace{RunStatus: "failed", SpanStatus: agentobs.StatusError, ErrorCode: errorCode, AttemptNo: attempt.AttemptNo}); err != nil {

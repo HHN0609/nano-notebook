@@ -122,7 +122,9 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 			and j.status in ('queued', 'running', 'waiting')
 			and r.deadline_at <= now()
 			and ($1 = '' or r.user_id = $1)
-			and ($2 = '' or r.id = $2 or r.parent_run_id = $2)
+			and ($2 = '' or r.id = $2 or exists(
+				select 1 from agent_run_delegations d where d.parent_run_id=$2 and d.child_run_id=r.id
+			))
 		order by r.id
 		for update of r, j`, userID, runID)
 	if err != nil {
@@ -167,6 +169,13 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 		}
 		if runTag.RowsAffected() != 1 || jobTag.RowsAffected() != 1 {
 			return 0, errors.New("deadline expiry did not transition Run and Job together")
+		}
+		if _, err := s.db.Exec(ctx, `
+			update agent_run_delegations
+			set state='failed',error_code='run_deadline_exceeded',completed_at=now(),updated_at=now()
+			where child_run_id=$1 and state='waiting'
+		`, item.runID); err != nil {
+			return 0, err
 		}
 		if _, err := s.db.Exec(ctx, `
 			update source_discovery_sessions
@@ -421,48 +430,32 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 	if !ok {
 		return RunSnapshot{}, errors.New("Run cancellation requires a transaction")
 	}
-	var childRunID, childJobID string
+	var childRunID string
 	var childAttemptNo int
 	childErr := s.db.QueryRow(ctx, `
-		select child.id,child_job.id,child_job.attempt_no
-		from agent_runs child join agent_jobs child_job on child_job.run_id=child.id
-		where child.parent_run_id=$1 and child.agent_role='research'
+		select child.id,child_job.attempt_no
+		from agent_run_delegations delegation
+		join agent_runs child on child.id=delegation.child_run_id
+		join agent_jobs child_job on child_job.run_id=child.id
+		where delegation.parent_run_id=$1 and child.agent_role='research'
 		for update of child,child_job
-	`, runID).Scan(&childRunID, &childJobID, &childAttemptNo)
+	`, runID).Scan(&childRunID, &childAttemptNo)
 	if childErr != nil && !errors.Is(childErr, pgx.ErrNoRows) {
 		return RunSnapshot{}, childErr
 	}
 	if childErr == nil {
-		childRunTag, err := s.db.Exec(ctx, `
-			update agent_runs set status='cancelled',error_code=null,finished_at=now(),updated_at=now()
-			where id=$1 and status in ('queued','running')
-		`, childRunID)
-		if err != nil {
+		if err := (DelegationKernel{}).CancelTreeInTx(ctx, tx, runID, "research_cancelled", time.Now().UTC()); err != nil {
 			return RunSnapshot{}, err
 		}
-		if _, err := s.db.Exec(ctx, `
-			update agent_jobs set status='cancelled',lease_token=null,lease_expires_at=null,finished_at=now(),updated_at=now()
-			where id=$1 and status in ('queued','running')
-		`, childJobID); err != nil {
+		if err := RecordRunTerminalInTx(ctx, tx, childRunID, RunTerminalTrace{
+			CauseEvent: TraceEventCancellation, RunStatus: "cancelled", SpanStatus: agentobs.StatusCancelled, AttemptNo: childAttemptNo,
+		}); err != nil {
 			return RunSnapshot{}, err
-		}
-		if childRunTag.RowsAffected() == 1 {
-			if err := RecordRunTerminalInTx(ctx, tx, childRunID, RunTerminalTrace{
-				CauseEvent: TraceEventCancellation, RunStatus: "cancelled", SpanStatus: agentobs.StatusCancelled, AttemptNo: childAttemptNo,
-			}); err != nil {
-				return RunSnapshot{}, err
-			}
 		}
 		if _, err := s.db.Exec(ctx, `
 			update source_discovery_sessions set status='failed',error_code='research_cancelled',completed_at=now(),updated_at=now()
 			where research_run_id=$1 and status='searching'
 		`, childRunID); err != nil {
-			return RunSnapshot{}, err
-		}
-		if _, err := s.db.Exec(ctx, `
-			update agent_research_delegations set state='consumed',error_code=null,completed_at=coalesce(completed_at,now()),updated_at=now()
-			where parent_run_id=$1
-		`, runID); err != nil {
 			return RunSnapshot{}, err
 		}
 	}

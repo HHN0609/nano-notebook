@@ -907,8 +907,8 @@ alter table agent_runs drop constraint if exists agent_runs_agent_role_check;
 alter table agent_runs add constraint agent_runs_agent_role_check check (agent_role in ('leader','research'));
 alter table agent_runs drop constraint if exists agent_runs_role_shape_check;
 alter table agent_runs add constraint agent_runs_role_shape_check check (
-	(agent_role='leader' and parent_run_id is null)
-	or (agent_role='research' and parent_run_id is not null and output_message_id is null)
+	(agent_role='leader')
+	or (agent_role='research' and output_message_id is null)
 );
 
 create unique index if not exists agent_runs_one_research_child_idx
@@ -955,6 +955,70 @@ create table if not exists agent_research_delegations (
 		or (state='consumed' and completed_at is not null)
 	)
 );
+
+create table if not exists agent_run_delegations (
+	id text primary key check (char_length(id) between 3 and 255),
+	parent_run_id text not null unique references agent_runs(id) on delete cascade,
+	child_run_id text not null unique references agent_runs(id) on delete cascade,
+	parent_role text not null check (parent_role='leader'),
+	child_role text not null check (child_role='research'),
+	child_ordinal integer not null check (child_ordinal=0),
+	depth integer not null check (depth=1),
+	state text not null check (state in ('waiting','succeeded','failed','cancelled')),
+	error_code text check (char_length(error_code) between 1 and 64),
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	completed_at timestamptz,
+	consumed_at timestamptz,
+	constraint agent_run_delegations_terminal_shape check (
+		(state='waiting' and error_code is null and completed_at is null and consumed_at is null)
+		or (state='succeeded' and error_code is null and completed_at is not null)
+		or (state in ('failed','cancelled') and error_code is not null and completed_at is not null)
+	),
+	unique(parent_run_id,child_role,child_ordinal)
+);
+
+create table if not exists agent_research_outcomes (
+	delegation_id text primary key references agent_run_delegations(id) on delete cascade,
+	discovery_session_id text not null unique references source_discovery_sessions(id) on delete restrict,
+	created_at timestamptz not null default now()
+);
+
+insert into agent_run_delegations(
+	id,parent_run_id,child_run_id,parent_role,child_role,child_ordinal,depth,state,error_code,
+	created_at,updated_at,completed_at,consumed_at
+)
+select 'dlg_legacy_' || md5(legacy.parent_run_id || ':' || legacy.child_run_id),
+	legacy.parent_run_id,legacy.child_run_id,'leader','research',0,1,
+	case
+		when child.status='completed' then 'succeeded'
+		when child.status='cancelled' then 'cancelled'
+		when child.status='failed' then 'failed'
+		else 'waiting'
+	end,
+	case when child.status in ('failed','cancelled') then coalesce(child.error_code,legacy.error_code,'research_failed') end,
+	legacy.created_at,legacy.updated_at,
+	case when child.status in ('completed','failed','cancelled') then coalesce(legacy.completed_at,child.finished_at,legacy.updated_at) end,
+	case when legacy.state='consumed' then legacy.updated_at end
+from agent_research_delegations legacy
+join agent_runs child on child.id=legacy.child_run_id
+on conflict(parent_run_id) do nothing;
+
+insert into agent_research_outcomes(delegation_id,discovery_session_id,created_at)
+select delegation.id,legacy.discovery_session_id,coalesce(legacy.completed_at,legacy.updated_at)
+from agent_research_delegations legacy
+join agent_run_delegations delegation on delegation.parent_run_id=legacy.parent_run_id
+where legacy.discovery_session_id is not null and delegation.state='succeeded'
+on conflict(delegation_id) do nothing;
+
+drop table agent_research_delegations;
+drop index if exists agent_runs_one_research_child_idx;
+alter table agent_runs drop constraint if exists agent_runs_role_shape_check;
+alter table agent_runs add constraint agent_runs_role_shape_check check (
+	(agent_role='leader')
+	or (agent_role='research' and output_message_id is null)
+);
+alter table agent_runs drop column parent_run_id;
 
 create unique index if not exists source_discovery_sessions_research_run_idx
 	on source_discovery_sessions(research_run_id) where research_run_id is not null;
@@ -1575,7 +1639,8 @@ alter table source_discovery_candidates enable row level security;
 alter table source_discovery_jobs enable row level security;
 alter table agent_runs enable row level security;
 alter table agent_run_routes enable row level security;
-alter table agent_research_delegations enable row level security;
+alter table agent_run_delegations enable row level security;
+alter table agent_research_outcomes enable row level security;
 alter table agent_run_evidence_set enable row level security;
 alter table agent_run_grounding_plans enable row level security;
 alter table agent_claim_support_records enable row level security;
@@ -1624,8 +1689,8 @@ grant select, insert, update, delete on
 	agent_jobs
 to nano_app;
 grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_app;
-grant select(parent_run_id,state,completed_at,error_code) on agent_research_delegations to nano_app;
-grant update(state,error_code,completed_at,updated_at) on agent_research_delegations to nano_app;
+grant select(parent_run_id,child_run_id,state,completed_at,consumed_at,error_code) on agent_run_delegations to nano_app;
+grant update(state,error_code,completed_at,updated_at) on agent_run_delegations to nano_app;
 grant select on retrieval_source_index_builds to nano_app;
 revoke update, delete on platform_capability_grants, platform_replay_access_audit from nano_app;
 revoke insert on platform_capability_grants from nano_app;
@@ -1664,7 +1729,8 @@ grant select, insert, update, delete on retrieval_index_versions, retrieval_eval
 grant select, insert, update, delete on retrieval_source_index_builds to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_worker;
-grant select, insert, update, delete on agent_run_routes, agent_research_delegations to nano_worker;
+grant select, insert, update, delete on agent_run_routes to nano_worker;
+grant select, insert, update, delete on agent_run_delegations, agent_research_outcomes to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 grant select, insert, update, delete on chat_source_selections to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
@@ -2317,23 +2383,13 @@ drop policy if exists agent_run_routes_worker on agent_run_routes;
 create policy agent_run_routes_worker on agent_run_routes
 	for all to nano_worker using (true) with check (true);
 
-drop policy if exists agent_research_delegations_worker on agent_research_delegations;
-create policy agent_research_delegations_worker on agent_research_delegations
+drop policy if exists agent_run_delegations_worker on agent_run_delegations;
+create policy agent_run_delegations_worker on agent_run_delegations
 	for all to nano_worker using (true) with check (true);
 
-drop policy if exists agent_research_delegations_owner_update on agent_research_delegations;
-create policy agent_research_delegations_owner_update on agent_research_delegations
-	for update to nano_app
-	using (exists (
-		select 1 from agent_runs r
-		where r.id=agent_research_delegations.parent_run_id
-		  and r.user_id=nullif(current_setting('app.principal_id',true),'')
-	))
-	with check (exists (
-		select 1 from agent_runs r
-		where r.id=agent_research_delegations.parent_run_id
-		  and r.user_id=nullif(current_setting('app.principal_id',true),'')
-	));
+drop policy if exists agent_research_outcomes_worker on agent_research_outcomes;
+create policy agent_research_outcomes_worker on agent_research_outcomes
+	for all to nano_worker using (true) with check (true);
 
 drop policy if exists agent_run_evidence_set_app on agent_run_evidence_set;
 create policy agent_run_evidence_set_app on agent_run_evidence_set
@@ -2350,6 +2406,31 @@ create policy agent_run_evidence_set_app on agent_run_evidence_set
 			select 1 from agent_runs r
 			where r.id=agent_run_evidence_set.run_id
 			  and r.user_id=nullif(current_setting('app.principal_id', true), '')
+		)
+);
+
+drop policy if exists agent_run_delegations_owner_read on agent_run_delegations;
+create policy agent_run_delegations_owner_read on agent_run_delegations
+	for select to nano_app using (
+		exists (
+			select 1 from agent_runs r
+			where r.id=agent_run_delegations.parent_run_id
+			  and r.user_id=nullif(current_setting('app.principal_id',true),'')
+		)
+	);
+drop policy if exists agent_run_delegations_owner_update on agent_run_delegations;
+create policy agent_run_delegations_owner_update on agent_run_delegations
+	for update to nano_app using (
+		exists (
+			select 1 from agent_runs r
+			where r.id=agent_run_delegations.parent_run_id
+			  and r.user_id=nullif(current_setting('app.principal_id',true),'')
+		)
+	) with check (
+		exists (
+			select 1 from agent_runs r
+			where r.id=agent_run_delegations.parent_run_id
+			  and r.user_id=nullif(current_setting('app.principal_id',true),'')
 		)
 	);
 

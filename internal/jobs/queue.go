@@ -245,28 +245,35 @@ func (q *Queue) ReleaseLease(ctx context.Context, jobID, leaseToken string) (boo
 
 func exhaustRecovery(ctx context.Context, tx pgx.Tx, job ClaimedJob) error {
 	var role string
-	var parentRunID *string
-	if err := tx.QueryRow(ctx, `select agent_role,parent_run_id from agent_runs where id=$1`, job.RunID).Scan(&role, &parentRunID); err != nil {
+	if err := tx.QueryRow(ctx, `select agent_role from agent_runs where id=$1`, job.RunID).Scan(&role); err != nil {
 		return err
 	}
-	jobTag, err := tx.Exec(ctx, `
-		update agent_jobs
-		set status = 'failed', lease_token = null, lease_expires_at = null,
-			finished_at = now(), updated_at = now()
-		where id = $1 and status = 'running'`, job.ID)
-	if err != nil {
-		return err
-	}
-	runTag, err := tx.Exec(ctx, `
-		update agent_runs
-		set status = 'failed', error_code = 'recovery_exhausted',
-			finished_at = now(), updated_at = now()
-		where id = $1 and status = 'running' and output_message_id is null`, job.RunID)
-	if err != nil {
-		return err
-	}
-	if jobTag.RowsAffected() != 1 || runTag.RowsAffected() != 1 {
-		return errors.New("recovery exhaustion did not transition Run and Job together")
+	if role == string(agent.RoleResearch) {
+		if err := (agent.DelegationKernel{}).TerminalizeInTx(ctx, tx, agent.Attempt{
+			JobID: job.ID, RunID: job.RunID, AttemptNo: job.AttemptNo, LeaseToken: job.LeaseToken,
+		}, agent.DelegationFailed, "recovery_exhausted"); err != nil {
+			return err
+		}
+	} else {
+		jobTag, err := tx.Exec(ctx, `
+			update agent_jobs
+			set status = 'failed', lease_token = null, lease_expires_at = null,
+				finished_at = now(), updated_at = now()
+			where id = $1 and status = 'running'`, job.ID)
+		if err != nil {
+			return err
+		}
+		runTag, err := tx.Exec(ctx, `
+			update agent_runs
+			set status = 'failed', error_code = 'recovery_exhausted',
+				finished_at = now(), updated_at = now()
+			where id = $1 and status = 'running' and output_message_id is null`, job.RunID)
+		if err != nil {
+			return err
+		}
+		if jobTag.RowsAffected() != 1 || runTag.RowsAffected() != 1 {
+			return errors.New("recovery exhaustion did not transition Run and Job together")
+		}
 	}
 	if err := agent.RecordAttemptLeaseExpiredInTx(ctx, tx, job.RunID, job.ID, job.AttemptNo); err != nil {
 		return err
@@ -279,30 +286,6 @@ func exhaustRecovery(ctx context.Context, tx pgx.Tx, job ClaimedJob) error {
 	}); err != nil {
 		return err
 	}
-	if role == "research" && parentRunID != nil {
-		if _, err := tx.Exec(ctx, `
-			update source_discovery_sessions set status='failed',error_code='discovery_unavailable',completed_at=now(),updated_at=now()
-			where research_run_id=$1 and status='searching'
-		`, job.RunID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `
-			update agent_research_delegations
-			set state='failed',error_code='recovery_exhausted',completed_at=now(),updated_at=now()
-			where child_run_id=$1 and state='waiting'
-		`, job.RunID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `update agent_runs set status='queued',updated_at=now() where id=$1 and status='running'`, *parentRunID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `update agent_jobs set status='queued',updated_at=now() where run_id=$1 and status='waiting'`, *parentRunID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_jobs',$1)`, *parentRunID); err != nil {
-			return err
-		}
-	}
-	_, err = tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, job.RunID)
+	_, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, job.RunID)
 	return err
 }
