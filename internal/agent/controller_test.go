@@ -481,6 +481,21 @@ func TestControllerRejectsAnInvalidWholeBatchWithoutPartialAcceptance(t *testing
 	}
 }
 
+func TestControllerReturnsTransientModelFailureToRoleExecutorWithoutTerminalizing(t *testing.T) {
+	registry, err := NewActionRegistry(NewCalculateAction())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []models.ErrorKind{models.ErrorTimeout, models.ErrorUnavailable} {
+		runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+		modelErr := &models.ModelError{Kind: kind, Err: errors.New("private provider detail")}
+		err := NewController(runtime, &decisionModelStub{err: modelErr}, registry).Execute(context.Background(), runtime.execution.Attempt)
+		if !errors.Is(err, modelErr) || len(runtime.failed) != 0 {
+			t.Fatalf("kind=%s err=%v terminal failures=%v", kind, err, runtime.failed)
+		}
+	}
+}
+
 func TestControllerDerivesActionResultByteBudgetsFromAcceptedCheckpoints(t *testing.T) {
 	t.Run("one result", func(t *testing.T) {
 		executionOrder := make([]string, 0, 1)

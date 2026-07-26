@@ -123,7 +123,7 @@ func (e *LeaderExecutor) execute(ctx context.Context, attempt Attempt, expected 
 			decision, err = traced.DecideRouteTraced(traceContext, tracer, request, ModelTraceOptions{
 				StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
 				DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: e.replayStager,
-				Phase: ModelPhaseLeaderRouting,
+				Phase: ModelPhaseLeaderRouting, Role: RoleLeader, Prompt: promptTraceRef("agent.leader-router", 1),
 			})
 		} else {
 			decision, err = e.router.DecideRoute(ctx, request)
@@ -171,8 +171,8 @@ func (e *LeaderExecutor) loadRun(ctx context.Context, runID string) (leaderRunCo
 		join chat_chats c on c.id=r.chat_id
 		join chat_messages m on m.id=r.input_message_id
 		left join notebook_memberships member on member.notebook_id=c.notebook_id and member.user_id=r.user_id
-		left join agent_run_routes route on route.run_id=case when r.agent_role='leader' then r.id else relationship.parent_run_id end
 		left join agent_run_delegations relationship on relationship.child_run_id=r.id
+		left join agent_run_routes route on route.run_id=case when r.agent_role='leader' then r.id else relationship.parent_run_id end
 		left join agent_run_delegations delegation on delegation.parent_run_id=case when r.agent_role='leader' then r.id else relationship.parent_run_id end
 		where r.id=$1
 	`, runID).Scan(&run.Role, &run.UserID, &run.ChatID, &run.NotebookID, &run.Message, &run.Model,
@@ -240,6 +240,9 @@ func (e *LeaderExecutor) persistRoute(ctx context.Context, attempt Attempt, poli
 	`, attempt.RunID, attempt.JobID, policy.EffectiveRoute, policy.RequestedRoute, policy.IntentReason, policy.PolicyReason, attempt.LeaseToken); err != nil {
 		return err
 	}
+	if err := RecordLeaderRouteInTx(ctx, tx, attempt.RunID, policy); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -271,6 +274,9 @@ func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run lead
 	`, attempt.RunID, policy.EffectiveRoute, policy.RequestedRoute, policy.IntentReason, policy.PolicyReason); err != nil {
 		return err
 	}
+	if err := RecordLeaderRouteInTx(ctx, tx, attempt.RunID, policy); err != nil {
+		return err
+	}
 	if err := (DelegationKernel{}).CreateInTx(ctx, tx, CreateDelegationCommand{
 		ParentAttempt: attempt, ChildRunID: childRunID, ChildJobID: childJobID,
 		ChildRole: RoleResearch, ChildPromptVersion: "agent.research-planner@1",
@@ -294,6 +300,9 @@ func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run lead
 		return err
 	}
 	if err := StartRunTraceInTx(ctx, tx, childRunID, childModel, childPromptVersion, nil); err != nil {
+		return err
+	}
+	if err := RecordDelegationCreatedInTx(ctx, tx, attempt.RunID, childRunID); err != nil {
 		return err
 	}
 	if err := RecordAttemptWaitingInTx(ctx, tx, attempt.RunID, attempt.JobID, attempt.AttemptNo); err != nil {
@@ -322,7 +331,7 @@ func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, r
 			queries, err = traced.ExpandQueriesTraced(traceContext, tracer, request, ModelTraceOptions{
 				StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
 				DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: e.replayStager,
-				Phase: ModelPhaseResearchQueryExpansion,
+				Phase: ModelPhaseResearchQueryExpansion, Role: RoleResearch, Prompt: promptTraceRef("agent.research-planner", 1),
 			})
 		} else {
 			queries, err = e.planner.ExpandQueries(ctx, request)
@@ -351,7 +360,7 @@ func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, r
 		}
 		results, searchErr := e.provider.Search(ctx, websearch.Request{Query: query, Count: 10})
 		if searchErr != nil {
-			return e.failResearch(ctx, attempt, sourcediscovery.SafeProviderError(searchErr))
+			return searchErr
 		}
 		checkpoint, err := NewRoleCheckpoint(RoleResearch, ResearchStepSearchResult, ordinal, ResearchSearchResult{Query: query, Candidates: results})
 		if err != nil {

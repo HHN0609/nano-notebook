@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/jackc/pgx/v5"
@@ -40,8 +41,42 @@ func RecordAttemptWaitingInTx(ctx context.Context, tx pgx.Tx, runID, jobID strin
 			agentobs.String(TraceKeyJobID, jobID),
 			agentobs.Int64(TraceKeyAttemptNumber, int64(attemptNo)),
 			agentobs.String(TraceKeyRunStatus, "waiting"),
+			agentobs.String(TraceKeyAttemptDisposition, string(AttemptWaiting)),
 		},
 	})
+}
+
+func RecordAttemptRetryableInTx(ctx context.Context, tx pgx.Tx, runID, jobID string, attemptNo int, errorCode string, backoff time.Duration) error {
+	if tx == nil || runID == "" || jobID == "" || attemptNo < 1 || !safeAttemptErrorCode.MatchString(errorCode) || backoff <= 0 {
+		return errors.New("retryable Attempt Trace is incomplete")
+	}
+	recorder, err := NewRunTraceRecorder(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+	tracer, err := agentobs.NewTracer(agentobs.TracerConfig{Recorder: recorder, SemanticConventionVersion: TraceSemanticConventionVersion})
+	if err != nil {
+		return err
+	}
+	attemptSpan, err := recorder.SpanContextByIdentity(ctx, TraceAttemptStartIdentity(runID, attemptNo))
+	if err != nil {
+		return err
+	}
+	attemptContext := agentobs.ContextWithSpanContext(ctx, attemptSpan)
+	attributes := []agentobs.Attribute{
+		agentobs.String(TraceKeyJobID, jobID),
+		agentobs.Int64(TraceKeyAttemptNumber, int64(attemptNo)),
+		agentobs.String(TraceKeyAttemptDisposition, string(AttemptRetryable)),
+		agentobs.String(TraceKeyErrorCode, errorCode),
+		agentobs.Int64(TraceKeyAttemptBackoffMilliseconds, backoff.Milliseconds()),
+	}
+	if err := tracer.Event(attemptContext, agentobs.Event{
+		IdentityKey: fmt.Sprintf("run/%s/attempt/%d/disposition", runID, attemptNo),
+		Name:        TraceEventAttemptDisposition, Attributes: attributes,
+	}); err != nil {
+		return err
+	}
+	return tracer.EndSpan(attemptContext, agentobs.SpanEnd{Name: TraceSpanJobAttempt, Status: agentobs.StatusError, Attributes: attributes})
 }
 
 func RecordAttemptLeaseExpiredInTx(ctx context.Context, tx pgx.Tx, runID, jobID string, attemptNo int) error {
@@ -69,6 +104,8 @@ func RecordAttemptLeaseExpiredInTx(ctx context.Context, tx pgx.Tx, runID, jobID 
 		Attributes: []agentobs.Attribute{
 			agentobs.String(TraceKeyJobID, jobID),
 			agentobs.Int64(TraceKeyAttemptNumber, int64(attemptNo)),
+			agentobs.String(TraceKeyAttemptDisposition, string(AttemptAbandoned)),
+			agentobs.String(TraceKeyAttemptAbandonedCause, AttemptCauseLeaseLost),
 		},
 	})
 }
@@ -118,6 +155,16 @@ func RecordRunTerminalInTx(ctx context.Context, tx pgx.Tx, runID string, termina
 		}
 		attemptContext := agentobs.ContextWithSpanContext(ctx, attemptSpan)
 		attributes := []agentobs.Attribute{agentobs.Int64(TraceKeyAttemptNumber, int64(terminal.AttemptNo))}
+		disposition := AttemptTerminal
+		if terminal.RunStatus == "completed" {
+			disposition = AttemptCompleted
+		} else if terminal.RunStatus == "cancelled" {
+			disposition = AttemptAbandoned
+		}
+		attributes = append(attributes, agentobs.String(TraceKeyAttemptDisposition, string(disposition)))
+		if disposition == AttemptAbandoned {
+			attributes = append(attributes, agentobs.String(TraceKeyAttemptAbandonedCause, AttemptCauseCancelled))
+		}
 		if terminal.ErrorCode != "" {
 			attributes = append(attributes, agentobs.String(TraceKeyErrorCode, terminal.ErrorCode))
 		}

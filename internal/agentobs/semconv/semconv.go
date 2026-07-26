@@ -42,7 +42,9 @@ const (
 )
 
 const (
-	LinkContinues   = "continues"
-	LinkRetries     = "retries"
-	LinkRetriedFrom = "retried_from"
+	LinkContinues     = "continues"
+	LinkRetries       = "retries"
+	LinkRetriedFrom   = "retried_from"
+	LinkDelegates     = "delegates"
+	LinkDelegatedFrom = "delegated_from"
 )

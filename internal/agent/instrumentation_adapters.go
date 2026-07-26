@@ -26,6 +26,8 @@ type ModelTraceOptions struct {
 	DecisionIdentity string
 	ReplayStager     ReplayStager
 	Phase            string
+	Role             AgentRole
+	Prompt           PromptVersionRef
 }
 
 func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model DecisionModel, request models.ModelRequest, decisionOrdinal int, optionValues ...ModelTraceOptions) (models.ModelOutcome, error) {
@@ -44,11 +46,23 @@ func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model Dec
 		agentobs.String(semconv.OperationNameKey, "decide"),
 		agentobs.String(TraceKeyModelPhase, phase),
 		agentobs.String(semconv.ModelNameKey, request.Model),
+		agentobs.String(TraceKeyRequestedModel, request.Model),
 		agentobs.Int64(semconv.DecisionOrdinalKey, int64(decisionOrdinal)),
 		agentobs.Int64(semconv.InputMessageCountKey, int64(len(request.Messages))),
 		agentobs.String(semconv.InputHashKey, modelRequestHash(request)),
 		agentobs.Bool(semconv.ActionDefinitionsKey, len(request.ActionDefinitions) > 0),
 		agentobs.Int64(semconv.ActionDefinitionCountKey, int64(len(request.ActionDefinitions))),
+	}
+	if options.Role != "" {
+		startAttributes = append(startAttributes, agentobs.String(TraceKeyAgentRole, string(options.Role)))
+	}
+	if options.Prompt.Identity != "" {
+		startAttributes = append(startAttributes,
+			agentobs.String(TraceKeyPromptIdentity, options.Prompt.Identity),
+			agentobs.Int64(TraceKeyPromptVersionNumber, int64(options.Prompt.Version)),
+			agentobs.String(TraceKeyPromptSHA256, options.Prompt.SHA256),
+			agentobs.String(TraceKeyPromptContract, options.Prompt.Contract),
+		)
 	}
 	if options.ReplayStager != nil {
 		payload, err := EncodeModelRequestReplay(request)
@@ -198,7 +212,14 @@ func stageReplayAttachment(ctx context.Context, stager ReplayStager, identityKey
 
 func modelTerminal(metadata models.ModelCallMetadata, callErr error) agentobs.SpanEnd {
 	status := agentobs.StatusOK
-	attributes := []agentobs.Attribute{agentobs.Bool(semconv.CostKnownKey, metadata.Cost.Known)}
+	validationOutcome := "accepted"
+	if callErr != nil {
+		validationOutcome = "rejected"
+	}
+	attributes := []agentobs.Attribute{
+		agentobs.Bool(semconv.CostKnownKey, metadata.Cost.Known),
+		agentobs.String(TraceKeyModelValidationOutcome, validationOutcome),
+	}
 	if metadata.ResultKind != "" {
 		attributes = append(attributes, agentobs.String(semconv.ModelResultKindKey, string(metadata.ResultKind)))
 	}

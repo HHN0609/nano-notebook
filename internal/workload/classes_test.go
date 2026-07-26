@@ -79,18 +79,22 @@ func (*agentCapacityQueue) ReleaseLease(context.Context, string, string) (bool, 
 	return true, nil
 }
 
+func (*agentCapacityQueue) ResolveAttempt(_ context.Context, _ jobs.ClaimedJob, resolution agent.AttemptResolution) (agent.AttemptResolution, error) {
+	return resolution, nil
+}
+
 type capacityAgentExecutor struct {
 	started chan<- workload.Class
 	release <-chan struct{}
 }
 
-func (e capacityAgentExecutor) Execute(ctx context.Context, _ agent.Attempt) error {
+func (e capacityAgentExecutor) ExecuteAttempt(ctx context.Context, _ agent.Attempt) agent.AttemptResolution {
 	e.started <- workload.AgentInteractive
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return agent.ClassifyAttempt(ctx.Err(), context.Cause(ctx))
 	case <-e.release:
-		return nil
+		return agent.AttemptResolution{Disposition: agent.AttemptCompleted}
 	}
 }
 

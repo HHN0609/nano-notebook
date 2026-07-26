@@ -7,7 +7,9 @@ import (
 
 type noopRoleExecutor struct{}
 
-func (noopRoleExecutor) Execute(context.Context, Attempt) error { return nil }
+func (noopRoleExecutor) ExecuteAttempt(context.Context, Attempt) AttemptResolution {
+	return AttemptResolution{Disposition: AttemptCompleted}
+}
 
 func TestRoleRegistryAcceptsOnlyFixedRolesAndTopology(t *testing.T) {
 	registry, err := NewRoleRegistry(

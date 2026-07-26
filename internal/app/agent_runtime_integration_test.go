@@ -281,7 +281,7 @@ func TestReclaimedControllerResumesTheFirstMissingActionOnTheSameRunAndJob(t *te
 	}
 }
 
-func TestWorkerPersistsTerminalBifrostFailureWithoutAssistantMessage(t *testing.T) {
+func TestWorkerPersistsTerminalInvalidBifrostResponseWithoutAssistantMessage(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "worker-failure@example.com")
 	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
 		"id":      "0190cdd2-5f2d-7ad8-b3f5-1b588788c006",
@@ -301,7 +301,8 @@ func TestWorkerPersistsTerminalBifrostFailureWithoutAssistantMessage(t *testing.
 		t.Fatalf("claim = %+v ok=%v err=%v", claimed, ok, err)
 	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "provider unavailable", http.StatusServiceUnavailable)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
 	}))
 	defer upstream.Close()
 	model := models.NewBifrostClient(upstream.URL, upstream.Client(), 2048)
@@ -326,7 +327,7 @@ func TestWorkerPersistsTerminalBifrostFailureWithoutAssistantMessage(t *testing.
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id = $1 and role = 'assistant'`, chatID).Scan(&assistantCount); err != nil {
 		t.Fatal(err)
 	}
-	if runStatus != "failed" || jobStatus != "failed" || errorCode != "model_unavailable" || outputMessageID != nil || assistantCount != 0 {
+	if runStatus != "failed" || jobStatus != "failed" || errorCode != "model_invalid_response" || outputMessageID != nil || assistantCount != 0 {
 		t.Fatalf("failure state run=%q job=%q code=%q output=%v assistants=%d", runStatus, jobStatus, errorCode, outputMessageID, assistantCount)
 	}
 

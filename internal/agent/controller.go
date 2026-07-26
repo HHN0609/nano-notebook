@@ -142,6 +142,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			outcome, err = InvokeDecisionModel(ctx, tracer, c.model, request, decisionNo, ModelTraceOptions{
 				StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
 				DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: c.replayStager(),
+				Role: RoleLeader, Prompt: composerPromptTraceRef(execution.PromptVersion),
 			})
 		} else {
 			outcome, err = c.model.Decide(ctx, request)
@@ -265,7 +266,7 @@ func (c *Controller) acceptContextualizedSearch(
 		outcome, err = InvokeDecisionModel(contextualizationContext, tracer, c.model, request, decisionNo, ModelTraceOptions{
 			StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
 			DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: c.replayStager(),
-			Phase: ModelPhaseQueryContextualization,
+			Phase: ModelPhaseQueryContextualization, Role: RoleLeader, Prompt: promptTraceRef("agent.query-contextualizer", 1),
 		})
 	} else {
 		outcome, err = c.model.Decide(ctx, request)
@@ -448,6 +449,9 @@ func (c *Controller) handleModelError(ctx context.Context, attempt Attempt, err 
 	var modelErr *models.ModelError
 	if errors.As(err, &modelErr) {
 		code = string(modelErr.Kind)
+		if modelErr.Kind == models.ErrorTimeout || modelErr.Kind == models.ErrorUnavailable {
+			return err
+		}
 	}
 	return c.fail(ctx, attempt, code, err)
 }

@@ -15,10 +15,11 @@ type JobQueue interface {
 	ClaimNext(context.Context) (jobs.ClaimedJob, bool, error)
 	Heartbeat(context.Context, string, string, time.Duration) (bool, error)
 	ReleaseLease(context.Context, string, string) (bool, error)
+	ResolveAttempt(context.Context, jobs.ClaimedJob, agent.AttemptResolution) (agent.AttemptResolution, error)
 }
 
 type Executor interface {
-	Execute(context.Context, agent.Attempt) error
+	ExecuteAttempt(context.Context, agent.Attempt) agent.AttemptResolution
 }
 
 type Service struct {
@@ -130,8 +131,8 @@ func (s *Service) executeClaim(ctx context.Context, job jobs.ClaimedJob) error {
 	}()
 
 	attempt := agent.Attempt{JobID: job.ID, RunID: job.RunID, AttemptNo: job.AttemptNo, LeaseToken: job.LeaseToken}
-	executeErr := s.executor.Execute(runCtx, attempt)
-	wasCancelled := runCtx.Err() != nil
+	resolution := s.executor.ExecuteAttempt(runCtx, attempt)
+	contextCause := context.Cause(runCtx)
 	close(stopHeartbeat)
 	<-heartbeatDone
 	cancelRun(nil)
@@ -142,18 +143,45 @@ func (s *Service) executeClaim(ctx context.Context, job jobs.ClaimedJob) error {
 	case heartbeatErr = <-heartbeatFailure:
 	default:
 	}
-	if wasCancelled || heartbeatErr != nil {
+	if errors.Is(heartbeatErr, agent.ErrLeaseLost) {
+		return nil
+	}
+	if heartbeatErr != nil || (errors.Is(contextCause, context.Canceled) && ctx.Err() != nil) {
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		_, releaseErr := s.queue.ReleaseLease(releaseCtx, job.ID, job.LeaseToken)
 		cancel()
 		if releaseErr != nil {
 			slog.Warn("agent Job lease release failed; natural expiry will recover it", "job_id", job.ID, "error", releaseErr)
 		}
+		return errors.Join(heartbeatErr, ctx.Err())
 	}
-	if errors.Is(heartbeatErr, agent.ErrLeaseLost) {
+	if !resolution.Valid() {
+		resolution = agent.ClassifyAttempt(errors.New("Role Executor returned an invalid Attempt disposition"), contextCause)
+	}
+	if resolution.Disposition == agent.AttemptAbandoned {
+		if resolution.ErrorCode == agent.AttemptCauseCancelled {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_, releaseErr := s.queue.ReleaseLease(releaseCtx, job.ID, job.LeaseToken)
+			cancel()
+			if releaseErr != nil {
+				return releaseErr
+			}
+		}
 		return nil
 	}
-	return errors.Join(executeErr, heartbeatErr)
+	if resolution.Disposition == agent.AttemptRetryable {
+		resolution.Backoff = agent.AttemptRetryBackoff(job.AttemptNo, job.ID)
+	}
+	resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	actual, resolveErr := s.queue.ResolveAttempt(resolveCtx, job, resolution)
+	cancel()
+	if resolveErr != nil {
+		return resolveErr
+	}
+	if actual.Disposition == agent.AttemptRetryable {
+		slog.Warn("agent run attempt scheduled for retry", "run_id", job.RunID, "job_id", job.ID, "attempt", job.AttemptNo, "error_code", actual.ErrorCode, "backoff", actual.Backoff)
+	}
+	return nil
 }
 
 func (s *Service) Run(ctx context.Context) error {

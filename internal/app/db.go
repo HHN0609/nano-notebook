@@ -1510,20 +1510,22 @@ create table if not exists agent_jobs (
 	attempt_no integer not null default 0,
 	lease_token uuid,
 	lease_expires_at timestamptz,
+	available_at timestamptz not null default now(),
+	last_error_code text check (last_error_code is null or last_error_code ~ '^[a-z][a-z0-9_]{1,63}$'),
 	created_at timestamptz not null default now(),
 	started_at timestamptz,
 	finished_at timestamptz,
 	updated_at timestamptz not null default now(),
 	constraint agent_jobs_execution_state_check check (
-		(status = 'queued' and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
-		or (status = 'running' and attempt_no between 1 and 3 and lease_token is not null and lease_expires_at is not null)
-		or (status = 'waiting' and attempt_no between 1 and 3 and lease_token is null and lease_expires_at is null)
-		or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
+		(status = 'queued' and attempt_no between 0 and 10 and lease_token is null and lease_expires_at is null)
+		or (status = 'running' and attempt_no between 1 and 10 and lease_token is not null and lease_expires_at is not null)
+		or (status = 'waiting' and attempt_no between 1 and 10 and lease_token is null and lease_expires_at is null)
+		or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 10 and lease_token is null and lease_expires_at is null)
 	)
 );
 
 create index if not exists agent_jobs_queued_idx
-	on agent_jobs(created_at, id)
+	on agent_jobs(available_at, created_at, id)
 	where status = 'queued';
 
 -- Upgrade Sprint 2A databases in place. A process restart may leave an old
@@ -1551,6 +1553,13 @@ alter table agent_runs drop column if exists total_tokens;
 alter table agent_jobs add column if not exists attempt_no integer not null default 0;
 alter table agent_jobs add column if not exists lease_token uuid;
 alter table agent_jobs add column if not exists lease_expires_at timestamptz;
+alter table agent_jobs add column if not exists available_at timestamptz not null default now();
+alter table agent_jobs add column if not exists last_error_code text;
+alter table agent_jobs drop constraint if exists agent_jobs_last_error_code_check;
+alter table agent_jobs add constraint agent_jobs_last_error_code_check
+	check (last_error_code is null or last_error_code ~ '^[a-z][a-z0-9_]{1,63}$');
+drop index if exists agent_jobs_queued_idx;
+create index agent_jobs_queued_idx on agent_jobs(available_at,created_at,id) where status='queued';
 create index if not exists agent_jobs_expired_lease_idx
 	on agent_jobs(lease_expires_at, created_at, id)
 	where status = 'running';
@@ -1566,10 +1575,10 @@ update agent_jobs
 alter table agent_jobs add constraint agent_jobs_status_check
 	check (status in ('queued', 'running', 'waiting', 'succeeded', 'failed', 'cancelled'));
 alter table agent_jobs add constraint agent_jobs_execution_state_check check (
-	(status = 'queued' and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
-	or (status = 'running' and attempt_no between 1 and 3 and lease_token is not null and lease_expires_at is not null)
-	or (status = 'waiting' and attempt_no between 1 and 3 and lease_token is null and lease_expires_at is null)
-	or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
+	(status = 'queued' and attempt_no between 0 and 10 and lease_token is null and lease_expires_at is null)
+	or (status = 'running' and attempt_no between 1 and 10 and lease_token is not null and lease_expires_at is not null)
+	or (status = 'waiting' and attempt_no between 1 and 10 and lease_token is null and lease_expires_at is null)
+	or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 10 and lease_token is null and lease_expires_at is null)
 );
 
 -- Adopt only active pre-Trace Runs. Terminal history remains untouched because

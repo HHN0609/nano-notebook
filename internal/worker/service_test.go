@@ -11,6 +11,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
 
 func TestServiceDrainsEveryQueuedJobThroughTheExecutor(t *testing.T) {
@@ -74,6 +75,39 @@ func TestHeartbeatLeaseLossCancelsTheInFlightExecution(t *testing.T) {
 	if queue.heartbeats != 1 {
 		t.Fatalf("heartbeats=%d, want one lease-loss heartbeat", queue.heartbeats)
 	}
+	if len(queue.resolutions) != 0 {
+		t.Fatalf("lease-lost attempt must not resolve current state: %v", queue.resolutions)
+	}
+}
+
+func TestRetryableExecutionFailureIsExplicitlyRequeuedWithBackoff(t *testing.T) {
+	queue := &recordingQueue{jobs: []jobs.ClaimedJob{{ID: "job_one", RunID: "run_one", AttemptNo: 2, LeaseToken: "lease_one"}}, heartbeatOK: true}
+	executor := errorExecutor{err: &models.ModelError{Kind: models.ErrorUnavailable, Err: errors.New("private provider detail")}}
+	service := NewService(nil, queue, executor, time.Second, time.Minute)
+
+	processed, err := service.ProcessAvailable(context.Background())
+	if processed != 1 || err != nil {
+		t.Fatalf("processed=%d err=%v", processed, err)
+	}
+	want := agent.AttemptResolution{Disposition: agent.AttemptRetryable, ErrorCode: string(models.ErrorUnavailable), Backoff: agent.AttemptRetryBackoff(2, "job_one")}
+	if !reflect.DeepEqual(queue.resolutions, []agent.AttemptResolution{want}) {
+		t.Fatalf("resolutions=%#v, want %#v", queue.resolutions, []agent.AttemptResolution{want})
+	}
+}
+
+func TestNonRetryableExecutionFailureIsExplicitlyTerminal(t *testing.T) {
+	queue := &recordingQueue{jobs: []jobs.ClaimedJob{{ID: "job_one", RunID: "run_one", AttemptNo: 1, LeaseToken: "lease_one"}}, heartbeatOK: true}
+	executor := errorExecutor{err: errors.New("private provider detail")}
+	service := NewService(nil, queue, executor, time.Second, time.Minute)
+
+	_, err := service.ProcessAvailable(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := agent.AttemptResolution{Disposition: agent.AttemptTerminal, ErrorCode: "agent_execution_failed"}
+	if !reflect.DeepEqual(queue.resolutions, []agent.AttemptResolution{want}) {
+		t.Fatalf("resolutions=%#v, want %#v", queue.resolutions, []agent.AttemptResolution{want})
+	}
 }
 
 func TestShutdownReleasesTheCurrentLeaseForImmediateRecovery(t *testing.T) {
@@ -125,6 +159,7 @@ type recordingQueue struct {
 	heartbeatOK bool
 	heartbeats  int
 	released    []string
+	resolutions []agent.AttemptResolution
 }
 
 func (q *recordingQueue) ClaimNext(context.Context) (jobs.ClaimedJob, bool, error) {
@@ -152,17 +187,30 @@ func (q *recordingQueue) ReleaseLease(_ context.Context, jobID, leaseToken strin
 	return true, nil
 }
 
+func (q *recordingQueue) ResolveAttempt(_ context.Context, _ jobs.ClaimedJob, resolution agent.AttemptResolution) (agent.AttemptResolution, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.resolutions = append(q.resolutions, resolution)
+	return resolution, nil
+}
+
 type recordingExecutor struct {
 	runIDs []string
 }
 
-func (e *recordingExecutor) Execute(_ context.Context, attempt agent.Attempt) error {
+func (e *recordingExecutor) ExecuteAttempt(_ context.Context, attempt agent.Attempt) agent.AttemptResolution {
 	e.runIDs = append(e.runIDs, attempt.RunID)
-	return nil
+	return agent.AttemptResolution{Disposition: agent.AttemptCompleted}
 }
 
 type blockingExecutor struct {
 	started chan struct{}
+}
+
+type errorExecutor struct{ err error }
+
+func (e errorExecutor) ExecuteAttempt(ctx context.Context, _ agent.Attempt) agent.AttemptResolution {
+	return agent.ClassifyAttempt(e.err, context.Cause(ctx))
 }
 
 type concurrentExecutor struct {
@@ -176,7 +224,7 @@ type countingBlockingExecutor struct {
 	started chan struct{}
 }
 
-func (e *countingBlockingExecutor) Execute(ctx context.Context, _ agent.Attempt) error {
+func (e *countingBlockingExecutor) ExecuteAttempt(ctx context.Context, _ agent.Attempt) agent.AttemptResolution {
 	e.mu.Lock()
 	e.calls++
 	if e.calls == 1 {
@@ -184,21 +232,21 @@ func (e *countingBlockingExecutor) Execute(ctx context.Context, _ agent.Attempt)
 	}
 	e.mu.Unlock()
 	<-ctx.Done()
-	return ctx.Err()
+	return agent.ClassifyAttempt(ctx.Err(), context.Cause(ctx))
 }
 
-func (e *concurrentExecutor) Execute(ctx context.Context, _ agent.Attempt) error {
+func (e *concurrentExecutor) ExecuteAttempt(ctx context.Context, _ agent.Attempt) agent.AttemptResolution {
 	e.started <- struct{}{}
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return agent.ClassifyAttempt(ctx.Err(), context.Cause(ctx))
 	case <-e.release:
-		return nil
+		return agent.AttemptResolution{Disposition: agent.AttemptCompleted}
 	}
 }
 
-func (e *blockingExecutor) Execute(ctx context.Context, _ agent.Attempt) error {
+func (e *blockingExecutor) ExecuteAttempt(ctx context.Context, _ agent.Attempt) agent.AttemptResolution {
 	close(e.started)
 	<-ctx.Done()
-	return ctx.Err()
+	return agent.ClassifyAttempt(ctx.Err(), context.Cause(ctx))
 }

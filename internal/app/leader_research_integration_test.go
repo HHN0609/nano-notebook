@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
@@ -31,6 +33,16 @@ func (r fixedLeaderRouter) DecideRoute(context.Context, agent.LeaderRouteRequest
 type fixedResearchPlanner struct{ queries []string }
 
 func (p fixedResearchPlanner) ExpandQueries(context.Context, agent.ResearchPlanRequest) ([]string, error) {
+	return append([]string(nil), p.queries...), nil
+}
+
+type countingResearchPlanner struct {
+	calls   int
+	queries []string
+}
+
+func (p *countingResearchPlanner) ExpandQueries(context.Context, agent.ResearchPlanRequest) ([]string, error) {
+	p.calls++
 	return append([]string(nil), p.queries...), nil
 }
 
@@ -216,6 +228,63 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	projection := api.getWithCookie(t, "/api/v1/chats/"+chatBody.Chat.ID, owner)
 	if projection.Code != http.StatusOK || !strings.Contains(projection.Body.String(), sessionID) || strings.Contains(projection.Body.String(), childRunID) {
 		t.Fatalf("member projection status=%d body=%s", projection.Code, projection.Body.String())
+	}
+}
+
+func TestResearchRetryReusesAcceptedPlanAndOnlyRepeatsMissingSearch(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "research-checkpoint-retry@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c092")
+	ctx := context.Background()
+	planner := &countingResearchPlanner{queries: []string{"checkpoint query"}}
+	searchCalls := 0
+	provider := callbackResearchProvider{search: func(context.Context, websearch.Request) ([]websearch.Candidate, error) {
+		searchCalls++
+		if searchCalls == 1 {
+			return nil, websearch.ErrUnavailable
+		}
+		return []websearch.Candidate{{Title: "Recovered", URL: "https://example.com/recovered", DisplayURL: "example.com/recovered", Rank: 1}}, nil
+	}}
+	executor := agent.NewLeaderExecutor(api.db.Pool(), &recordingNormalExecutor{}, fixedLeaderRouter{route: agent.LeaderDelegateResearch}, planner, provider)
+	queue := jobs.NewQueue(api.db.Pool())
+	parent, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok || parent.RunID != runID {
+		t.Fatalf("parent claim=%+v ok=%v err=%v", parent, ok, err)
+	}
+	if err := executor.Execute(ctx, attemptFromClaim(parent)); err != nil {
+		t.Fatal(err)
+	}
+	child, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("child claim=%+v ok=%v err=%v", child, ok, err)
+	}
+	err = executor.Execute(ctx, attemptFromClaim(child))
+	if !errors.Is(err, websearch.ErrUnavailable) {
+		t.Fatalf("first Research attempt error=%v", err)
+	}
+	resolution := agent.ClassifyAttempt(err, nil)
+	resolution.Backoff = time.Minute
+	if actual, err := queue.ResolveAttempt(ctx, child, resolution); err != nil || actual.Disposition != agent.AttemptRetryable {
+		t.Fatalf("retry resolution=%+v err=%v", actual, err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set available_at=now()-interval '1 second' where run_id=$1`, child.RunID); err != nil {
+		t.Fatal(err)
+	}
+	retry, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok || retry.RunID != child.RunID || retry.AttemptNo != 2 {
+		t.Fatalf("retry claim=%+v ok=%v err=%v", retry, ok, err)
+	}
+	if err := executor.Execute(ctx, attemptFromClaim(retry)); err != nil {
+		t.Fatal(err)
+	}
+	var planCheckpoints, resultCheckpoints int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(*) filter(where step_key='query_plan'),count(*) filter(where step_key='search_result')
+		from agent_role_checkpoints where run_id=$1
+	`, child.RunID).Scan(&planCheckpoints, &resultCheckpoints); err != nil {
+		t.Fatal(err)
+	}
+	if planner.calls != 1 || searchCalls != 2 || planCheckpoints != 1 || resultCheckpoints != 1 {
+		t.Fatalf("planner=%d searches=%d checkpoints=%d/%d", planner.calls, searchCalls, planCheckpoints, resultCheckpoints)
 	}
 }
 
@@ -474,8 +543,12 @@ func TestRoleDowngradePreventsLateResearchCandidatePublication(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("child claim=%+v ok=%v err=%v", childJob, ok, err)
 	}
-	if err := executor.Execute(context.Background(), agent.Attempt{JobID: childJob.ID, RunID: childJob.RunID, AttemptNo: childJob.AttemptNo, LeaseToken: childJob.LeaseToken}); err != nil {
-		t.Fatal(err)
+	executeErr := executor.Execute(context.Background(), agent.Attempt{JobID: childJob.ID, RunID: childJob.RunID, AttemptNo: childJob.AttemptNo, LeaseToken: childJob.LeaseToken})
+	if !errors.Is(executeErr, agent.ErrResearchAuthorityLost) {
+		t.Fatalf("Research authority error=%v", executeErr)
+	}
+	if actual, err := queue.ResolveAttempt(context.Background(), childJob, agent.ClassifyAttempt(executeErr, nil)); err != nil || actual.Disposition != agent.AttemptTerminal {
+		t.Fatalf("terminal resolution=%+v err=%v", actual, err)
 	}
 	var childStatus, sessionStatus, parentJobStatus string
 	var candidateCount int

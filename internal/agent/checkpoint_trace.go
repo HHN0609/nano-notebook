@@ -37,3 +37,28 @@ func RecordCheckpointAcceptedInTx(ctx context.Context, tx pgx.Tx, attempt Attemp
 		Attributes:  attributes,
 	})
 }
+
+func RecordRoleCheckpointAcceptedInTx(ctx context.Context, tx pgx.Tx, attempt Attempt, checkpoint RoleCheckpoint) error {
+	recorder, err := NewRunTraceRecorder(ctx, tx, attempt.RunID)
+	if err != nil {
+		return err
+	}
+	attemptSpan, err := recorder.SpanContextByIdentity(ctx, TraceAttemptStartIdentity(attempt.RunID, attempt.AttemptNo))
+	if err != nil {
+		return err
+	}
+	tracer, err := agentobs.NewTracer(agentobs.TracerConfig{Recorder: recorder, SemanticConventionVersion: TraceSemanticConventionVersion})
+	if err != nil {
+		return err
+	}
+	return tracer.Event(agentobs.ContextWithSpanContext(ctx, attemptSpan), agentobs.Event{
+		IdentityKey: fmt.Sprintf("run/%s/checkpoint/%s/accepted", attempt.RunID, checkpoint.IdentityKey),
+		Name:        TraceEventCheckpointAccepted,
+		Attributes: []agentobs.Attribute{
+			agentobs.String(TraceKeyAgentRole, string(checkpoint.Role)),
+			agentobs.String(TraceKeyCheckpointStep, checkpoint.Step),
+			agentobs.Int64(TraceKeyCheckpointOrdinal, int64(checkpoint.Ordinal)),
+			agentobs.String(TraceKeyCheckpointPayloadSHA256, checkpoint.PayloadSHA256),
+		},
+	})
+}

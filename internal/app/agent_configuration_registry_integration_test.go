@@ -38,3 +38,35 @@ func TestAgentConfigurationRegistersIdempotentlyAndRejectsIdentityMutation(t *te
 		t.Fatalf("readiness: %v", err)
 	}
 }
+
+func TestWorkerReadinessAcceptsOnlyCurrentAndImmediatelyPreviousCompatibleSet(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configuration-window@example.com")
+	ctx := context.Background()
+	makeConfiguration := func(id string) agent.AgentConfigurationSet {
+		run := agent.DefaultRunConfig(id)
+		prompts, configuration, err := agent.DefaultAgentConfigurationBundle(id, "leader-model-"+id, "research-model-"+id, run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := app.RegisterAgentConfiguration(ctx, api.db, prompts, configuration); err != nil {
+			t.Fatal(err)
+		}
+		return configuration
+	}
+	unsupported := makeConfiguration("configuration-window-v0")
+	previous := makeConfiguration("configuration-window-v1")
+	current := makeConfiguration("configuration-window-v2")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c093")
+	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set agent_config_id=$2,executor_version=$3 where id=$1`, runID, previous.ID, previous.Profiles[agent.RoleLeader].ExecutorVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.VerifyAgentConfigurationReady(ctx, api.db, current); err != nil {
+		t.Fatalf("previous compatible Set was rejected: %v", err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set agent_config_id=$2,executor_version=$3 where id=$1`, runID, unsupported.ID, unsupported.Profiles[agent.RoleLeader].ExecutorVersion); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.VerifyAgentConfigurationReady(ctx, api.db, current); err == nil || !strings.Contains(err.Error(), unsupported.ID) {
+		t.Fatalf("older compatible Set readiness error=%v", err)
+	}
+}

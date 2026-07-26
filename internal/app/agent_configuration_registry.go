@@ -94,13 +94,27 @@ func VerifyAgentConfigurationReady(ctx context.Context, db *DB, supported agent.
 	if registeredHash != supported.SHA256 {
 		return fmt.Errorf("unsupported Agent Configuration Set %s", supported.ID)
 	}
-	var unsupported string
+	var previousCompatibleID string
 	err := db.pool.QueryRow(ctx, `
+		select configuration.id
+		from agent_configuration_sets configuration
+		where configuration.id<>$1 and configuration.prompt_set_sha256=$2
+		  and exists(select 1 from agent_role_profiles profile where profile.configuration_set_id=configuration.id and profile.role='leader' and profile.executor_version=$3)
+		  and exists(select 1 from agent_role_profiles profile where profile.configuration_set_id=configuration.id and profile.role='research' and profile.executor_version=$4)
+		order by configuration.registered_at desc,configuration.id desc
+		limit 1
+	`, supported.ID, supported.PromptSetHash, supported.Profiles[agent.RoleLeader].ExecutorVersion, supported.Profiles[agent.RoleResearch].ExecutorVersion).Scan(&previousCompatibleID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	var unsupported string
+	err = db.pool.QueryRow(ctx, `
 		select r.agent_config_id
 		from agent_runs r
 		where r.status in ('queued','running') and r.agent_config_id<>$1
+		  and ($2='' or r.agent_config_id<>$2)
 		order by r.created_at,r.id limit 1
-	`, supported.ID).Scan(&unsupported)
+	`, supported.ID, previousCompatibleID).Scan(&unsupported)
 	if err == nil {
 		return fmt.Errorf("non-terminal Run references unsupported Agent Configuration Set %s", unsupported)
 	}

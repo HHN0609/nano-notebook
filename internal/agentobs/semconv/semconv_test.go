@@ -84,11 +84,13 @@ func TestCommonMetadataKeysProduceValidBoundedAttributes(t *testing.T) {
 
 func TestLinkRelationshipsAreDistinct(t *testing.T) {
 	relationships := map[string]struct{}{
-		semconv.LinkContinues:   {},
-		semconv.LinkRetries:     {},
-		semconv.LinkRetriedFrom: {},
+		semconv.LinkContinues:     {},
+		semconv.LinkRetries:       {},
+		semconv.LinkRetriedFrom:   {},
+		semconv.LinkDelegates:     {},
+		semconv.LinkDelegatedFrom: {},
 	}
-	if len(relationships) != 3 {
+	if len(relationships) != 5 {
 		t.Fatalf("relationship constants are not distinct: %#v", relationships)
 	}
 }

@@ -112,6 +112,10 @@ func (DelegationKernel) TerminalizeInTx(ctx context.Context, tx pgx.Tx, attempt 
 	if err := lifecycle.Terminalize(state, errorCode); err != nil {
 		return err
 	}
+	var parentRunID string
+	if err := tx.QueryRow(ctx, `select parent_run_id from agent_run_delegations where child_run_id=$1 and state='waiting'`, attempt.RunID).Scan(&parentRunID); err != nil {
+		return err
+	}
 	runStatus, jobStatus := "failed", "failed"
 	if state == DelegationSucceeded {
 		runStatus, jobStatus = "completed", "succeeded"
@@ -145,19 +149,21 @@ func (DelegationKernel) TerminalizeInTx(ctx context.Context, tx pgx.Tx, attempt 
 	if delegationTag.RowsAffected() != 1 {
 		return errors.New("delegation terminal handoff lost authority")
 	}
-	if _, err := tx.Exec(ctx, `
+	parentRunTag, err := tx.Exec(ctx, `
 		update agent_runs parent set status='queued',updated_at=now()
 		from agent_run_delegations d
 		where d.child_run_id=$1 and parent.id=d.parent_run_id and parent.status='running' and parent.deadline_at>now()
-	`, attempt.RunID); err != nil {
+	`, attempt.RunID)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
+	parentJobTag, err := tx.Exec(ctx, `
 		update agent_jobs parent_job set status='queued',updated_at=now()
 		from agent_run_delegations d join agent_runs parent on parent.id=d.parent_run_id
 		where d.child_run_id=$1 and parent_job.run_id=d.parent_run_id and parent_job.status='waiting'
 		  and parent.status='queued' and parent.deadline_at>now()
-	`, attempt.RunID); err != nil {
+	`, attempt.RunID)
+	if err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -167,12 +173,17 @@ func (DelegationKernel) TerminalizeInTx(ctx context.Context, tx pgx.Tx, attempt 
 	`, attempt.RunID); err != nil {
 		return err
 	}
-	return nil
+	return RecordDelegationTerminalInTx(ctx, tx, parentRunID, attempt.RunID, state, errorCode,
+		parentRunTag.RowsAffected() == 1 && parentJobTag.RowsAffected() == 1)
 }
 
 func (DelegationKernel) ConsumeInTx(ctx context.Context, tx pgx.Tx, parentRunID string, terminal DelegationState) error {
 	if terminal != DelegationSucceeded && terminal != DelegationFailed && terminal != DelegationCancelled {
 		return errors.New("invalid delegation consumption state")
+	}
+	var childRunID string
+	if err := tx.QueryRow(ctx, `select child_run_id from agent_run_delegations where parent_run_id=$1 and state=$2 and consumed_at is null`, parentRunID, terminal).Scan(&childRunID); err != nil {
+		return err
 	}
 	tag, err := tx.Exec(ctx, `
 		update agent_run_delegations set consumed_at=now(),updated_at=now()
@@ -184,14 +195,18 @@ func (DelegationKernel) ConsumeInTx(ctx context.Context, tx pgx.Tx, parentRunID 
 	if tag.RowsAffected() != 1 {
 		return fmt.Errorf("delegation %s is not consumable", parentRunID)
 	}
-	return nil
+	return RecordDelegationConsumedInTx(ctx, tx, parentRunID, childRunID, terminal)
 }
 
 func (DelegationKernel) CancelTreeInTx(ctx context.Context, tx pgx.Tx, parentRunID, errorCode string, at time.Time) error {
 	if parentRunID == "" || strings.TrimSpace(errorCode) == "" || at.IsZero() {
 		return errors.New("invalid delegation cancellation")
 	}
-	_, err := tx.Exec(ctx, `
+	var childRunID string
+	if err := tx.QueryRow(ctx, `select child_run_id from agent_run_delegations where parent_run_id=$1 and state='waiting'`, parentRunID).Scan(&childRunID); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `
 		with cancelled as (
 			update agent_run_delegations set state='cancelled',error_code=$2,completed_at=$3,updated_at=$3
 			where parent_run_id=$1 and state='waiting' returning child_run_id
@@ -202,5 +217,11 @@ func (DelegationKernel) CancelTreeInTx(ctx context.Context, tx pgx.Tx, parentRun
 		update agent_jobs set status='cancelled',lease_token=null,lease_expires_at=null,finished_at=$3,updated_at=$3
 		where run_id in (select id from cancelled_runs) and status in ('queued','running')
 	`, parentRunID, errorCode, at)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("delegation cancellation lost authority")
+	}
+	return RecordDelegationTerminalInTx(ctx, tx, parentRunID, childRunID, DelegationCancelled, errorCode, false)
 }

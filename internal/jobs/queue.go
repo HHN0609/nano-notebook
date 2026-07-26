@@ -23,10 +23,12 @@ type Queue struct {
 }
 
 type ClaimedJob struct {
-	ID         string
-	RunID      string
-	AttemptNo  int
-	LeaseToken string
+	ID          string
+	RunID       string
+	AttemptNo   int
+	LeaseToken  string
+	MaxAttempts int
+	DeadlineAt  time.Time
 }
 
 func NewQueue(pool *pgxpool.Pool) *Queue {
@@ -64,14 +66,15 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		var job ClaimedJob
 		var status string
 		err = tx.QueryRow(ctx, `
-			select j.id, j.run_id, j.status, j.attempt_no
+			select j.id, j.run_id, j.status, j.attempt_no, coalesce(j.lease_token::text,''), profile.max_attempts, r.deadline_at
 			from agent_jobs j
 			join agent_runs r on r.id = j.run_id
-			where (j.status = 'queued' and r.status = 'queued')
+			join agent_role_profiles profile on profile.configuration_set_id=r.agent_config_id and profile.role=r.agent_role
+			where (j.status = 'queued' and j.available_at <= now() and r.status = 'queued')
 				or (j.status = 'running' and r.status = 'running' and j.lease_expires_at <= now())
-			order by j.created_at, j.id
+			order by j.available_at, j.created_at, j.id
 			for update of r, j skip locked
-			limit 1`).Scan(&job.ID, &job.RunID, &status, &job.AttemptNo)
+			limit 1`).Scan(&job.ID, &job.RunID, &status, &job.AttemptNo, &job.LeaseToken, &job.MaxAttempts, &job.DeadlineAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			if err := tx.Commit(ctx); err != nil {
 				return ClaimedJob{}, false, err
@@ -85,7 +88,7 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 			return ClaimedJob{}, false, err
 		}
 
-		if status == "running" && job.AttemptNo >= 3 {
+		if status == "running" && job.AttemptNo >= job.MaxAttempts {
 			if err := exhaustRecovery(traceCtx, tx, job); err != nil {
 				return ClaimedJob{}, false, err
 			}
@@ -140,12 +143,16 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		}
 		rootContext := agentobs.ContextWithSpanContext(traceCtx, traceRecorder.RootSpanContext())
 		var priorAttempt agentobs.SpanContext
-		if status == "running" {
+		continuesPriorAttempt := status == "running"
+		retriesPriorAttempt := status == "queued" && previousAttemptNo > 0
+		if continuesPriorAttempt || retriesPriorAttempt {
 			priorIdentity := agent.TraceAttemptStartIdentity(job.RunID, previousAttemptNo)
 			priorAttempt, err = traceRecorder.SpanContextByIdentity(traceCtx, priorIdentity)
 			if err != nil {
 				return ClaimedJob{}, false, err
 			}
+		}
+		if continuesPriorAttempt {
 			priorContext := agentobs.ContextWithSpanContext(ctx, priorAttempt)
 			if err := tracer.Event(priorContext, agentobs.Event{
 				IdentityKey: fmt.Sprintf("run/%s/attempt/%d/lease-expired", job.RunID, previousAttemptNo),
@@ -169,10 +176,16 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		if err != nil {
 			return ClaimedJob{}, false, err
 		}
-		if status == "running" {
+		if continuesPriorAttempt || retriesPriorAttempt {
+			linkName := semconv.LinkContinues
+			identitySuffix := "continues"
+			if retriesPriorAttempt {
+				linkName = semconv.LinkRetries
+				identitySuffix = "retries"
+			}
 			if err := tracer.Link(attemptContext, agentobs.Link{
-				IdentityKey: fmt.Sprintf("run/%s/attempt/%d/continues", job.RunID, job.AttemptNo),
-				Name:        semconv.LinkContinues,
+				IdentityKey: fmt.Sprintf("run/%s/attempt/%d/%s", job.RunID, job.AttemptNo, identitySuffix),
+				Name:        linkName,
 				Target:      priorAttempt,
 			}); err != nil {
 				return ClaimedJob{}, false, err
@@ -185,6 +198,131 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 			_ = traceScope.PublishAfterCommit(traceCtx)
 		}
 		return job, true, nil
+	}
+}
+
+func (q *Queue) ResolveAttempt(ctx context.Context, job ClaimedJob, requested agent.AttemptResolution) (agent.AttemptResolution, error) {
+	if !requested.Valid() {
+		return agent.AttemptResolution{}, errors.New("invalid Attempt disposition")
+	}
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return agent.AttemptResolution{}, err
+	}
+	defer tx.Rollback(ctx)
+	sink := agent.TraceSink(agent.DiscardTraceSink{})
+	if q.traceSink != nil {
+		sink = q.traceSink
+	}
+	traceScope, err := agent.NewTraceScope(sink)
+	if err != nil {
+		return agent.AttemptResolution{}, err
+	}
+	defer traceScope.Rollback()
+	traceCtx := agent.ContextWithTraceScope(ctx, traceScope)
+	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
+		return agent.AttemptResolution{}, err
+	}
+	var status string
+	var deadline time.Time
+	var maxAttempts int
+	var currentLease *string
+	var storedErrorCode string
+	if err := tx.QueryRow(ctx, `
+		select j.status,r.deadline_at,profile.max_attempts,j.lease_token::text,
+			coalesce(j.last_error_code,r.error_code,'already_terminal')
+		from agent_jobs j
+		join agent_runs r on r.id=j.run_id
+		join agent_role_profiles profile on profile.configuration_set_id=r.agent_config_id and profile.role=r.agent_role
+		where j.id=$1 and j.run_id=$2
+		for update of j,r
+	`, job.ID, job.RunID).Scan(&status, &deadline, &maxAttempts, &currentLease, &storedErrorCode); err != nil {
+		return agent.AttemptResolution{}, err
+	}
+	if status != "running" || currentLease == nil || *currentLease != job.LeaseToken {
+		actual, ok := terminalJobDisposition(status, storedErrorCode)
+		if !ok {
+			return agent.AttemptResolution{}, agent.ErrLeaseLost
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return agent.AttemptResolution{}, err
+		}
+		_ = traceScope.PublishAfterCommit(traceCtx)
+		return actual, nil
+	}
+	actual := requested
+	if actual.Disposition == agent.AttemptCompleted || actual.Disposition == agent.AttemptWaiting {
+		return agent.AttemptResolution{}, errors.New("Role Executor returned without committing completed or waiting state")
+	}
+	if actual.Disposition == agent.AttemptAbandoned {
+		return agent.AttemptResolution{}, errors.New("current leased Attempt cannot be committed as abandoned")
+	}
+	if actual.Disposition == agent.AttemptRetryable {
+		switch {
+		case job.AttemptNo >= maxAttempts:
+			actual = agent.AttemptResolution{Disposition: agent.AttemptTerminal, ErrorCode: "retry_exhausted"}
+		case !time.Now().Add(actual.Backoff).Before(deadline):
+			actual = agent.AttemptResolution{Disposition: agent.AttemptTerminal, ErrorCode: "run_deadline_exceeded"}
+		default:
+			jobTag, err := tx.Exec(ctx, `
+				update agent_jobs set status='queued',lease_token=null,lease_expires_at=null,
+					available_at=now()+($4*interval '1 second'),last_error_code=$5,updated_at=now()
+				where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid
+			`, job.ID, job.RunID, job.LeaseToken, actual.Backoff.Seconds(), actual.ErrorCode)
+			if err != nil {
+				return agent.AttemptResolution{}, err
+			}
+			runTag, err := tx.Exec(ctx, `update agent_runs set status='queued',updated_at=now() where id=$1 and status='running'`, job.RunID)
+			if err != nil {
+				return agent.AttemptResolution{}, err
+			}
+			if jobTag.RowsAffected() != 1 || runTag.RowsAffected() != 1 {
+				return agent.AttemptResolution{}, agent.ErrLeaseLost
+			}
+			if err := agent.RecordAttemptRetryableInTx(traceCtx, tx, job.RunID, job.ID, job.AttemptNo, actual.ErrorCode, actual.Backoff); err != nil {
+				return agent.AttemptResolution{}, err
+			}
+			if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_jobs',$1)`, job.ID); err != nil {
+				return agent.AttemptResolution{}, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return agent.AttemptResolution{}, err
+			}
+			_ = traceScope.PublishAfterCommit(traceCtx)
+			return actual, nil
+		}
+	}
+	attempt := agent.Attempt{JobID: job.ID, RunID: job.RunID, AttemptNo: job.AttemptNo, LeaseToken: job.LeaseToken}
+	if err := agent.TerminalizeAttemptStateInTx(traceCtx, tx, attempt, actual.ErrorCode); err != nil {
+		return agent.AttemptResolution{}, err
+	}
+	if err := agent.RecordRunTerminalInTx(traceCtx, tx, job.RunID, agent.RunTerminalTrace{
+		RunStatus: "failed", SpanStatus: agentobs.StatusError, ErrorCode: actual.ErrorCode, AttemptNo: job.AttemptNo,
+	}); err != nil {
+		return agent.AttemptResolution{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return agent.AttemptResolution{}, err
+	}
+	_ = traceScope.PublishAfterCommit(traceCtx)
+	return actual, nil
+}
+
+func terminalJobDisposition(status, errorCode string) (agent.AttemptResolution, bool) {
+	switch status {
+	case "succeeded":
+		return agent.AttemptResolution{Disposition: agent.AttemptCompleted}, true
+	case "waiting":
+		return agent.AttemptResolution{Disposition: agent.AttemptWaiting}, true
+	case "failed":
+		if !(agent.AttemptResolution{Disposition: agent.AttemptTerminal, ErrorCode: errorCode}).Valid() {
+			errorCode = "already_terminal"
+		}
+		return agent.AttemptResolution{Disposition: agent.AttemptTerminal, ErrorCode: errorCode}, true
+	case "cancelled":
+		return agent.AttemptResolution{Disposition: agent.AttemptAbandoned, ErrorCode: agent.AttemptCauseCancelled}, true
+	default:
+		return agent.AttemptResolution{}, false
 	}
 }
 
@@ -244,36 +382,9 @@ func (q *Queue) ReleaseLease(ctx context.Context, jobID, leaseToken string) (boo
 }
 
 func exhaustRecovery(ctx context.Context, tx pgx.Tx, job ClaimedJob) error {
-	var role string
-	if err := tx.QueryRow(ctx, `select agent_role from agent_runs where id=$1`, job.RunID).Scan(&role); err != nil {
+	attempt := agent.Attempt{JobID: job.ID, RunID: job.RunID, AttemptNo: job.AttemptNo, LeaseToken: job.LeaseToken}
+	if err := agent.TerminalizeAttemptStateInTx(ctx, tx, attempt, "recovery_exhausted"); err != nil {
 		return err
-	}
-	if role == string(agent.RoleResearch) {
-		if err := (agent.DelegationKernel{}).TerminalizeInTx(ctx, tx, agent.Attempt{
-			JobID: job.ID, RunID: job.RunID, AttemptNo: job.AttemptNo, LeaseToken: job.LeaseToken,
-		}, agent.DelegationFailed, "recovery_exhausted"); err != nil {
-			return err
-		}
-	} else {
-		jobTag, err := tx.Exec(ctx, `
-			update agent_jobs
-			set status = 'failed', lease_token = null, lease_expires_at = null,
-				finished_at = now(), updated_at = now()
-			where id = $1 and status = 'running'`, job.ID)
-		if err != nil {
-			return err
-		}
-		runTag, err := tx.Exec(ctx, `
-			update agent_runs
-			set status = 'failed', error_code = 'recovery_exhausted',
-				finished_at = now(), updated_at = now()
-			where id = $1 and status = 'running' and output_message_id is null`, job.RunID)
-		if err != nil {
-			return err
-		}
-		if jobTag.RowsAffected() != 1 || runTag.RowsAffected() != 1 {
-			return errors.New("recovery exhaustion did not transition Run and Job together")
-		}
 	}
 	if err := agent.RecordAttemptLeaseExpiredInTx(ctx, tx, job.RunID, job.ID, job.AttemptNo); err != nil {
 		return err
@@ -283,6 +394,7 @@ func exhaustRecovery(ctx context.Context, tx pgx.Tx, job ClaimedJob) error {
 		RunStatus:  "failed",
 		SpanStatus: agentobs.StatusError,
 		ErrorCode:  "recovery_exhausted",
+		AttemptNo:  job.AttemptNo,
 	}); err != nil {
 		return err
 	}

@@ -1,10 +1,15 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 )
+
+type RoleExecutor interface {
+	ExecuteAttempt(context.Context, Attempt) AttemptResolution
+}
 
 type AgentRole string
 
@@ -16,7 +21,7 @@ const (
 type RoleRegistration struct {
 	Role            AgentRole
 	ExecutorVersion string
-	Executor        AttemptExecutor
+	Executor        RoleExecutor
 }
 
 type RoleRegistry struct {
@@ -41,7 +46,7 @@ func NewRoleRegistry(registrations ...RoleRegistration) (*RoleRegistry, error) {
 	return registry, nil
 }
 
-func (r *RoleRegistry) Resolve(role AgentRole, executorVersion string) (AttemptExecutor, error) {
+func (r *RoleRegistry) Resolve(role AgentRole, executorVersion string) (RoleExecutor, error) {
 	if r == nil {
 		return nil, errors.New("Role Registry is nil")
 	}

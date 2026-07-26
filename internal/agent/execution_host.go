@@ -21,22 +21,22 @@ func NewAgentExecutionHost(pool *pgxpool.Pool, registry *RoleRegistry) (*AgentEx
 	return &AgentExecutionHost{pool: pool, registry: registry}, nil
 }
 
-func (h *AgentExecutionHost) Execute(ctx context.Context, attempt Attempt) error {
+func (h *AgentExecutionHost) ExecuteAttempt(ctx context.Context, attempt Attempt) AttemptResolution {
 	if h == nil || h.pool == nil || h.registry == nil {
-		return errors.New("Agent Execution Host is invalid")
+		return ClassifyAttempt(errors.New("Agent Execution Host is invalid"), context.Cause(ctx))
 	}
 	var role AgentRole
 	var executorVersion string
 	if err := h.pool.QueryRow(ctx, `
 		select agent_role,executor_version from agent_runs where id=$1
 	`, attempt.RunID).Scan(&role, &executorVersion); err != nil {
-		return err
+		return ClassifyAttempt(err, context.Cause(ctx))
 	}
 	executor, err := h.registry.Resolve(role, executorVersion)
 	if err != nil {
-		return err
+		return ClassifyAttempt(err, context.Cause(ctx))
 	}
-	return executor.Execute(ctx, attempt)
+	return executor.ExecuteAttempt(ctx, attempt)
 }
 
 type LeaderRoleExecutor struct{ runtime *LeaderExecutor }
@@ -50,16 +50,16 @@ func NewResearchRoleExecutor(runtime *LeaderExecutor) *ResearchRoleExecutor {
 	return &ResearchRoleExecutor{runtime: runtime}
 }
 
-func (e *LeaderRoleExecutor) Execute(ctx context.Context, attempt Attempt) error {
+func (e *LeaderRoleExecutor) ExecuteAttempt(ctx context.Context, attempt Attempt) AttemptResolution {
 	if e == nil || e.runtime == nil {
-		return errors.New("Leader Role Executor is invalid")
+		return ClassifyAttempt(errors.New("Leader Role Executor is invalid"), context.Cause(ctx))
 	}
-	return e.runtime.executeExpectedRole(ctx, attempt, RoleLeader)
+	return ClassifyAttempt(e.runtime.executeExpectedRole(ctx, attempt, RoleLeader), context.Cause(ctx))
 }
 
-func (e *ResearchRoleExecutor) Execute(ctx context.Context, attempt Attempt) error {
+func (e *ResearchRoleExecutor) ExecuteAttempt(ctx context.Context, attempt Attempt) AttemptResolution {
 	if e == nil || e.runtime == nil {
-		return errors.New("Research Role Executor is invalid")
+		return ClassifyAttempt(errors.New("Research Role Executor is invalid"), context.Cause(ctx))
 	}
-	return e.runtime.executeExpectedRole(ctx, attempt, RoleResearch)
+	return ClassifyAttempt(e.runtime.executeExpectedRole(ctx, attempt, RoleResearch), context.Cause(ctx))
 }

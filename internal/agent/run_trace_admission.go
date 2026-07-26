@@ -23,14 +23,25 @@ func StartRunTraceInTx(ctx context.Context, tx pgx.Tx, runID, model, promptVersi
 	if err != nil {
 		return err
 	}
+	var role AgentRole
+	var configurationSetID, executorVersion string
+	if err := tx.QueryRow(ctx, `
+		select agent_role,agent_config_id,executor_version from agent_runs where id=$1
+	`, runID).Scan(&role, &configurationSetID, &executorVersion); err != nil {
+		return err
+	}
+	attributes := []agentobs.Attribute{
+		agentobs.String(TraceKeyRunID, runID),
+		agentobs.String(TraceKeyRunModel, model),
+		agentobs.String(TraceKeyPromptVersion, promptVersion),
+		agentobs.String(TraceKeyAgentRole, string(role)),
+		agentobs.String(TraceKeyConfigurationSetID, configurationSetID),
+		agentobs.String(TraceKeyExecutorVersion, executorVersion),
+	}
 	rootContext, _, err := tracer.StartTrace(ctx, agentobs.TraceStart{
 		IdentityKey: "run/" + runID + "/root/start",
 		Name:        TraceSpanAgentExecution,
-		Attributes: []agentobs.Attribute{
-			agentobs.String(TraceKeyRunID, runID),
-			agentobs.String(TraceKeyRunModel, model),
-			agentobs.String(TraceKeyPromptVersion, promptVersion),
-		},
+		Attributes:  attributes,
 	})
 	if err != nil {
 		return err

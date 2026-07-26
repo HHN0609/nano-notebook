@@ -18,6 +18,8 @@ const (
 	ResearchStepSearchResult = "search_result"
 )
 
+var ErrResearchAuthorityLost = errors.New("Research authority lost")
+
 type ResearchQueryPlan struct {
 	Queries []string `json:"queries"`
 }
@@ -72,10 +74,15 @@ func AppendRoleCheckpointInTx(ctx context.Context, tx pgx.Tx, attempt Attempt, c
 	if tx == nil || checkpoint.IdentityKey == "" || len(checkpoint.PayloadSHA256) != 64 {
 		return ErrCheckpointInvalid
 	}
+	if err := requireResearchCheckpointAuthority(ctx, tx, attempt); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		insert into agent_role_checkpoints(run_id,agent_role,step_key,ordinal,identity_key,payload,payload_sha256)
 		select r.id,$5,$6,$7,$8,$9::jsonb,$10
 		from agent_runs r join agent_jobs j on j.run_id=r.id
+		join chat_chats chat on chat.id=r.chat_id
+		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=r.user_id and member.role in ('owner','editor')
 		where r.id=$1 and r.agent_role=$5 and r.status='running' and r.deadline_at>now()
 		  and j.id=$2 and j.status='running' and j.attempt_no=$3 and j.lease_token=$4::uuid and j.lease_expires_at>now()
 		on conflict(run_id,agent_role,step_key,ordinal) do nothing
@@ -89,6 +96,9 @@ func AppendRoleCheckpointInTx(ctx context.Context, tx pgx.Tx, attempt Attempt, c
 		where run_id=$1 and agent_role=$2 and step_key=$3 and ordinal=$4
 	`, attempt.RunID, checkpoint.Role, checkpoint.Step, checkpoint.Ordinal).Scan(&storedHash); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			if authorityErr := requireResearchCheckpointAuthority(ctx, tx, attempt); authorityErr != nil {
+				return authorityErr
+			}
 			return ErrLeaseLost
 		}
 		return err
@@ -96,7 +106,7 @@ func AppendRoleCheckpointInTx(ctx context.Context, tx pgx.Tx, attempt Attempt, c
 	if storedHash != checkpoint.PayloadSHA256 {
 		return ErrCheckpointInvalid
 	}
-	return nil
+	return RecordRoleCheckpointAcceptedInTx(ctx, tx, attempt, checkpoint)
 }
 
 func LoadResearchProgressInTx(ctx context.Context, tx pgx.Tx, attempt Attempt) (ResearchProgress, error) {
@@ -153,16 +163,35 @@ func LoadResearchProgressInTx(ctx context.Context, tx pgx.Tx, attempt Attempt) (
 }
 
 func requireResearchCheckpointAuthority(ctx context.Context, tx pgx.Tx, attempt Attempt) error {
-	var valid bool
+	var valid, authorized bool
 	if err := tx.QueryRow(ctx, `
 		select exists(select 1 from agent_runs r join agent_jobs j on j.run_id=r.id
 		where r.id=$1 and r.agent_role='research' and r.status='running' and r.deadline_at>now()
-		  and j.id=$2 and j.status='running' and j.attempt_no=$3 and j.lease_token=$4::uuid and j.lease_expires_at>now())
-	`, attempt.RunID, attempt.JobID, attempt.AttemptNo, attempt.LeaseToken).Scan(&valid); err != nil {
+		  and j.id=$2 and j.status='running' and j.attempt_no=$3 and j.lease_token=$4::uuid and j.lease_expires_at>now()),
+		exists(select 1 from agent_runs r join chat_chats chat on chat.id=r.chat_id
+		  join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=r.user_id
+		  where r.id=$1 and member.role in ('owner','editor'))
+	`, attempt.RunID, attempt.JobID, attempt.AttemptNo, attempt.LeaseToken).Scan(&valid, &authorized); err != nil {
 		return err
 	}
 	if !valid {
 		return ErrLeaseLost
 	}
+	if !authorized {
+		return ErrResearchAuthorityLost
+	}
 	return nil
+}
+
+// FailResearchPayloadInTx terminalizes Research-owned product state while the
+// Delegation Kernel remains the sole owner of generic Run/Job/relationship state.
+func FailResearchPayloadInTx(ctx context.Context, tx pgx.Tx, runID, errorCode string) error {
+	if tx == nil || strings.TrimSpace(runID) == "" || !safeAttemptErrorCode.MatchString(errorCode) {
+		return errors.New("invalid Research payload failure")
+	}
+	_, err := tx.Exec(ctx, `
+		update source_discovery_sessions set status='failed',error_code=$2,completed_at=now(),updated_at=now()
+		where research_run_id=$1 and origin='research_agent' and status='searching'
+	`, runID, errorCode)
+	return err
 }

@@ -8,8 +8,72 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 )
+
+func TestRetryableDispositionActivelyRequeuesWithAvailabilityFence(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "active-retry@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c090")
+	ctx := context.Background()
+	queue := jobs.NewQueue(api.db.Pool())
+	claimed, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	requested := agent.AttemptResolution{Disposition: agent.AttemptRetryable, ErrorCode: "model_unavailable", Backoff: time.Minute}
+	actual, err := queue.ResolveAttempt(ctx, claimed, requested)
+	if err != nil || actual != requested {
+		t.Fatalf("resolution=%+v err=%v", actual, err)
+	}
+	var runStatus, jobStatus, lastError string
+	var lease *string
+	var availableAt time.Time
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.status,j.status,j.last_error_code,j.lease_token::text,j.available_at
+		from agent_runs r join agent_jobs j on j.run_id=r.id where r.id=$1
+	`, runID).Scan(&runStatus, &jobStatus, &lastError, &lease, &availableAt); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "queued" || jobStatus != "queued" || lastError != "model_unavailable" || lease != nil || !availableAt.After(time.Now().Add(50*time.Second)) {
+		t.Fatalf("retry state=%s/%s code=%q lease=%v available=%s", runStatus, jobStatus, lastError, lease, availableAt)
+	}
+	if next, ok, err := queue.ClaimNext(ctx); err != nil || ok {
+		t.Fatalf("early claim=%+v ok=%v err=%v", next, ok, err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set available_at=now()-interval '1 second' where run_id=$1`, runID); err != nil {
+		t.Fatal(err)
+	}
+	next, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok || next.RunID != runID || next.AttemptNo != 2 {
+		t.Fatalf("retry claim=%+v ok=%v err=%v", next, ok, err)
+	}
+}
+
+func TestTerminalDispositionDoesNotWaitForLeaseExpiry(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "active-terminal@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c091")
+	ctx := context.Background()
+	queue := jobs.NewQueue(api.db.Pool())
+	claimed, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	actual, err := queue.ResolveAttempt(ctx, claimed, agent.AttemptResolution{Disposition: agent.AttemptTerminal, ErrorCode: "model_invalid_response"})
+	if err != nil || actual.Disposition != agent.AttemptTerminal {
+		t.Fatalf("resolution=%+v err=%v", actual, err)
+	}
+	var runStatus, jobStatus, runError, jobError string
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.status,j.status,r.error_code,j.last_error_code
+		from agent_runs r join agent_jobs j on j.run_id=r.id where r.id=$1
+	`, runID).Scan(&runStatus, &jobStatus, &runError, &jobError); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "failed" || jobStatus != "failed" || runError != "model_invalid_response" || jobError != runError {
+		t.Fatalf("terminal state=%s/%s errors=%q/%q", runStatus, jobStatus, runError, jobError)
+	}
+}
 
 func TestJobLeaseClaimHeartbeatAndReclaimFenceOlderAttempt(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "lease-reclaim@example.com")

@@ -80,6 +80,39 @@ func TestModelAdapterLabelsAnswerCompositionPhaseWithoutContent(t *testing.T) {
 	}
 }
 
+func TestModelAdapterRecordsPinnedPromptContractAndRequestedModel(t *testing.T) {
+	tracer, exporter, ctx := instrumentationTestTracer(t)
+	model := outcomeModelFunc(func(context.Context, models.ModelRequest) (models.ModelOutcome, error) {
+		return models.ModelOutcome{ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: "private"}}, Metadata: models.ModelCallMetadata{
+			RequestedModel: "requested-model", SelectedProvider: "provider", SelectedModel: "selected-model", ResultKind: models.ModelResultFinalDraft,
+		}}, nil
+	})
+	prompt := promptTraceRef("agent.leader-router", 1)
+	_, err := InvokeDecisionModel(ctx, tracer, model, models.ModelRequest{Model: "requested-model", Messages: []models.ModelMessage{{Role: models.RoleUser, Content: "private"}}}, 1,
+		ModelTraceOptions{Role: RoleLeader, Prompt: prompt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := exporter.Records()
+	start, end := records[len(records)-2], records[len(records)-1]
+	wants := map[string]string{
+		TraceKeyAgentRole: "leader", TraceKeyRequestedModel: "requested-model",
+		TraceKeyPromptIdentity: prompt.Identity,
+		TraceKeyPromptSHA256:   prompt.SHA256, TraceKeyPromptContract: prompt.Contract,
+	}
+	if got := int64Attribute(start, TraceKeyPromptVersionNumber); got != 1 {
+		t.Fatalf("%s = %d, want 1", TraceKeyPromptVersionNumber, got)
+	}
+	for key, want := range wants {
+		if got := stringAttribute(start, key); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if got := stringAttribute(end, TraceKeyModelValidationOutcome); got != "accepted" {
+		t.Fatalf("validation outcome = %q", got)
+	}
+}
+
 func TestModelAdapterStagesReplayAndBindsBothSidesOfThePhysicalCall(t *testing.T) {
 	tracer, exporter, ctx := instrumentationTestTracer(t)
 	stager := &recordingReplayStager{}
