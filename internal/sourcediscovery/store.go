@@ -10,6 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -186,6 +187,9 @@ func (s *Store) CreateSession(ctx context.Context, command CreateSessionCommand)
 	`, command.JobID, command.ID); err != nil {
 		return Session{}, err
 	}
+	if err := realtime.NotifySourceDiscovery(ctx, s.db, command.ID); err != nil {
+		return Session{}, err
+	}
 	created.Candidates = []Candidate{}
 	return created, nil
 }
@@ -227,6 +231,9 @@ func (s *Store) EnsureResearchSession(ctx context.Context, command ResearchSessi
 			id,notebook_id,user_id,origin_chat_id,origin,query,status,research_run_id
 		) values($1,$2,$3,$4,'research_agent',$5,'searching',$6)
 	`, command.ID, command.NotebookID, command.UserID, command.OriginChatID, query, command.ResearchRunID); err != nil {
+		return Session{}, err
+	}
+	if err := realtime.NotifySourceDiscovery(ctx, s.db, command.ID); err != nil {
 		return Session{}, err
 	}
 	return s.GetSession(ctx, command.ID)
@@ -338,6 +345,9 @@ func (s *Store) ReplaceSelection(ctx context.Context, sessionID string, candidat
 			return Session{}, err
 		}
 	}
+	if err := realtime.NotifySourceDiscovery(ctx, s.db, sessionID); err != nil {
+		return Session{}, err
+	}
 	return s.GetSession(ctx, sessionID)
 }
 
@@ -354,7 +364,13 @@ func (s *Store) BeginCandidateImport(ctx context.Context, sessionID, candidateID
 	if errors.Is(err, pgx.ErrNoRows) {
 		return CandidateImport{}, ErrCandidate
 	}
-	return candidate, err
+	if err != nil {
+		return CandidateImport{}, err
+	}
+	if err := realtime.NotifySourceDiscovery(ctx, s.db, sessionID); err != nil {
+		return CandidateImport{}, err
+	}
+	return candidate, nil
 }
 
 func (s *Store) CompleteCandidateImport(ctx context.Context, sessionID, candidateID, sourceID string) error {
@@ -369,7 +385,7 @@ func (s *Store) CompleteCandidateImport(ctx context.Context, sessionID, candidat
 	if result.RowsAffected() != 1 {
 		return ErrState
 	}
-	return nil
+	return realtime.NotifySourceDiscovery(ctx, s.db, sessionID)
 }
 
 func (s *Store) DropCandidateImport(ctx context.Context, sessionID, candidateID string) error {
@@ -383,7 +399,7 @@ func (s *Store) DropCandidateImport(ctx context.Context, sessionID, candidateID 
 	if result.RowsAffected() != 1 {
 		return ErrState
 	}
-	return nil
+	return realtime.NotifySourceDiscovery(ctx, s.db, sessionID)
 }
 
 func (s *Store) CompleteSearch(ctx context.Context, command CompleteSearchCommand) error {
@@ -422,12 +438,18 @@ func (s *Store) CompleteSearch(ctx context.Context, command CompleteSearchComman
 	if err := s.insertCandidates(ctx, command.SessionID, notebookID, canonical); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(ctx, `
+	result, err = s.db.Exec(ctx, `
 		update source_discovery_jobs
 		set status='succeeded',lease_token=null,lease_expires_at=null,last_error_code=null,updated_at=now()
 		where id=$1 and session_id=$2 and status='running' and lease_token=$3::uuid
 	`, command.JobID, command.SessionID, command.LeaseToken)
-	return err
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrLeaseLost
+	}
+	return realtime.NotifySourceDiscovery(ctx, s.db, command.SessionID)
 }
 
 func (s *Store) CompleteResearchSession(ctx context.Context, researchRunID, summary string, candidates []DiscoveredCandidate) (string, error) {
@@ -459,6 +481,9 @@ func (s *Store) CompleteResearchSession(ctx context.Context, researchRunID, summ
 		return "", err
 	}
 	if err := s.insertCandidates(ctx, sessionID, notebookID, canonical); err != nil {
+		return "", err
+	}
+	if err := realtime.NotifySourceDiscovery(ctx, s.db, sessionID); err != nil {
 		return "", err
 	}
 	return sessionID, nil
@@ -523,18 +548,20 @@ func (s *Store) FailResearchSession(ctx context.Context, researchRunID, errorCod
 	if strings.TrimSpace(researchRunID) == "" || strings.TrimSpace(errorCode) == "" {
 		return ErrInvalid
 	}
-	result, err := s.db.Exec(ctx, `
+	var sessionID string
+	err := s.db.QueryRow(ctx, `
 		update source_discovery_sessions
 		set status='failed',error_code=$2,completed_at=now(),updated_at=now()
 		where research_run_id=$1 and origin='research_agent' and status='searching'
-	`, researchRunID, errorCode)
+		returning id
+	`, researchRunID, errorCode).Scan(&sessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrState
+	}
 	if err != nil {
 		return err
 	}
-	if result.RowsAffected() != 1 {
-		return ErrState
-	}
-	return nil
+	return realtime.NotifySourceDiscovery(ctx, s.db, sessionID)
 }
 
 func (s *Store) RetryFailedSession(ctx context.Context, sessionID, jobID string) (Session, error) {
@@ -570,6 +597,9 @@ func (s *Store) RetryFailedSession(ctx context.Context, sessionID, jobID string)
 		on conflict(session_id) do update set status='queued',attempt_no=0,available_at=now(),
 			lease_token=null,lease_expires_at=null,last_error_code=null,updated_at=now()
 	`, jobID, sessionID); err != nil {
+		return Session{}, err
+	}
+	if err := realtime.NotifySourceDiscovery(ctx, s.db, sessionID); err != nil {
 		return Session{}, err
 	}
 	return s.GetSession(ctx, sessionID)
@@ -624,7 +654,7 @@ func (s *Store) FailSearch(ctx context.Context, command FailSearchCommand) error
 	if result.RowsAffected() != 1 {
 		return ErrLeaseLost
 	}
-	return nil
+	return realtime.NotifySourceDiscovery(ctx, s.db, command.SessionID)
 }
 
 func canonicalURL(raw string) (string, bool) {

@@ -609,11 +609,7 @@ func (e *LeaderExecutor) failLeaderInTx(ctx context.Context, tx pgx.Tx, attempt 
 	if err := tx.QueryRow(ctx, `select child_run_id from agent_run_delegations where parent_run_id=$1`, attempt.RunID).Scan(&childRunID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
-		update source_discovery_sessions
-		set status='failed',error_code=$2,completed_at=now(),updated_at=now()
-		where research_run_id=$1 and origin='research_agent' and status='searching'
-	`, childRunID, errorCode); err != nil {
+	if err := FailResearchPayloadInTx(ctx, tx, childRunID, errorCode); err != nil {
 		return err
 	}
 	if err := (DelegationKernel{}).FailParentInTx(ctx, tx, attempt, errorCode); err != nil {

@@ -60,6 +60,8 @@ type Server struct {
 	notebookStore *notebook.Store
 	mux           *http.ServeMux
 	runHub        *runHub
+	discoveryHub  *runHub
+	sourceHub     *runHub
 	adminTraces   collector.QueryClient
 	replaySealer  *replay.Sealer
 }
@@ -84,7 +86,10 @@ func NewServer(cfg Config, db *DB) *Server {
 	cfg.AgentRun = leaderProfile.Run
 	cfg.AgentRun.ID = cfg.AgentConfiguration.ID
 	cfg.AgentRun.ExecutorVersion = leaderProfile.ExecutorVersion
-	s := &Server{cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(), runHub: newRunHub(), adminTraces: cfg.AdminTraces, replaySealer: cfg.ReplaySealer}
+	s := &Server{
+		cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(),
+		runHub: newRunHub(), discoveryHub: newRunHub(), sourceHub: newRunHub(), adminTraces: cfg.AdminTraces, replaySealer: cfg.ReplaySealer,
+	}
 	s.routes()
 	return s
 }
@@ -173,6 +178,18 @@ func (s *Server) citationByID(w http.ResponseWriter, r *http.Request) {
 func (s *Server) NotifyRun(runID string) {
 	if s != nil && s.runHub != nil {
 		s.runHub.notify(runID)
+	}
+}
+
+func (s *Server) NotifySourceDiscovery(sessionID string) {
+	if s != nil && s.discoveryHub != nil {
+		s.discoveryHub.notify(sessionID)
+	}
+}
+
+func (s *Server) NotifyNotebookSources(notebookID string) {
+	if s != nil && s.sourceHub != nil {
+		s.sourceHub.notify(notebookID)
 	}
 }
 
@@ -478,6 +495,10 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(remainder, "/")
 	if len(parts) == 3 && parts[0] != "" && parts[1] == "sources" && parts[2] == "urls" {
 		s.createURLSource(w, r, user.ID, parts[0])
+		return
+	}
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "sources" && parts[2] == "events" {
+		s.streamNotebookSources(w, r, user.ID, parts[0])
 		return
 	}
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "sources" {

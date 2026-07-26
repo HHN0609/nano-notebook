@@ -102,13 +102,22 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
   }, [active, notebookID, onExpandedChange, onSessionActive, requestedSessionID]);
 
   useEffect(() => {
-    if (!active || session?.status !== "searching") return;
-    const timer = window.setTimeout(async () => {
-      const response = await memberAPI(`/api/v1/source-discovery-sessions/${session.id}`);
-      if (response.ok) setSession(((await response.json()) as { session: DiscoverySession }).session);
-    }, 1000);
-    return () => window.clearTimeout(timer);
-  }, [active, session]);
+    if (!active || !session?.id || typeof EventSource === "undefined") return;
+    const sessionID = session.id;
+    const events = new EventSource(`/api/v1/source-discovery-sessions/${sessionID}/events`);
+    const projectSession = (event: Event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent<string>).data) as { session?: DiscoverySession };
+        if (!payload.session || payload.session.id !== sessionID) return;
+        setSession(payload.session);
+        setQuery(payload.session.query);
+      } catch {
+        // A malformed projection is ignored; EventSource will keep the stream alive.
+      }
+    };
+    events.addEventListener("discovery", projectSession);
+    return () => events.close();
+  }, [active, session?.id]);
 
   async function search() {
     const value = query.trim();

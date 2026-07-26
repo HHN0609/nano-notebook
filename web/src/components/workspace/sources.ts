@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { csrfToken, memberAPI } from "./source-upload";
 
 export type SourceOpenAction =
@@ -27,29 +28,49 @@ export type SourcesController = {
 };
 
 export function useNotebookSources(notebookID: string, unavailableLabel: string, chatID?: string, initialSourceIDs: string[] = []): SourcesController {
+  const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["notebook-sources", notebookID],
-    queryFn: async () => {
-      const response = await fetch(`/api/v1/notebooks/${notebookID}/sources`, { credentials: "include" });
+    queryFn: async ({ signal }) => {
+      const response = await fetch(`/api/v1/notebooks/${notebookID}/sources`, { credentials: "include", signal });
       if (!response.ok) throw new Error(unavailableLabel);
       return ((await response.json()) as { sources: MemberSource[] }).sources;
     },
-    refetchInterval: ({ state }) => state.data?.some((item) => item.state === "processing") ? 2500 : false,
     retry: false
   });
   const selection = useQuery({
     queryKey: ["chat-source-selection", chatID],
     enabled: Boolean(chatID),
-    queryFn: async (): Promise<string[]> => {
-      const response = await memberAPI(`/api/v1/chats/${chatID}/source-selection`);
+    queryFn: async ({ signal }): Promise<string[]> => {
+      const response = await memberAPI(`/api/v1/chats/${chatID}/source-selection`, { signal });
       if (!response.ok) throw new Error(unavailableLabel);
       return ((await response.json()) as { source_ids: string[] }).source_ids;
     },
     initialData: initialSourceIDs,
     staleTime: Infinity,
-    refetchInterval: query.data?.some((item) => item.state === "processing") ? 2500 : false,
     retry: false
   });
+  useEffect(() => {
+    if (!notebookID || typeof EventSource === "undefined") return;
+    const chatQuery = chatID ? `?chat_id=${encodeURIComponent(chatID)}` : "";
+    const events = new EventSource(`/api/v1/notebooks/${notebookID}/sources/events${chatQuery}`);
+    const projectSources = (event: Event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent<string>).data) as { sources?: MemberSource[]; source_ids?: string[] };
+        if (!Array.isArray(payload.sources) || !Array.isArray(payload.source_ids)) return;
+        void queryClient.cancelQueries({ queryKey: ["notebook-sources", notebookID], exact: true });
+        queryClient.setQueryData(["notebook-sources", notebookID], payload.sources);
+        if (chatID) {
+          void queryClient.cancelQueries({ queryKey: ["chat-source-selection", chatID], exact: true });
+          queryClient.setQueryData(["chat-source-selection", chatID], payload.source_ids);
+        }
+      } catch {
+        // A malformed projection is ignored; EventSource will keep the stream alive.
+      }
+    };
+    events.addEventListener("sources", projectSources);
+    return () => events.close();
+  }, [chatID, notebookID, queryClient]);
   const selectedSourceIDs = (query.data ?? [])
     .filter((item) => item.state === "ready" && (selection.data ?? []).includes(item.id))
     .map((item) => item.id);

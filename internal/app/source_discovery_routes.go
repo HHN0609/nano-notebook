@@ -93,6 +93,10 @@ func (s *Server) sourceDiscoverySessionByID(w http.ResponseWriter, r *http.Reque
 	}
 	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/source-discovery-sessions/"), "/")
 	parts := strings.Split(remainder, "/")
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "events" {
+		s.streamSourceDiscovery(w, r, user.ID, parts[0])
+		return
+	}
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "selection" {
 		sourceDiscoverySelection(w, r, s, user.ID, parts[0])
 		return

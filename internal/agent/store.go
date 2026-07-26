@@ -177,16 +177,12 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 		`, item.runID); err != nil {
 			return 0, err
 		}
-		if _, err := s.db.Exec(ctx, `
-			update source_discovery_sessions
-			set status='failed',error_code='research_deadline_exceeded',completed_at=now(),updated_at=now()
-			where research_run_id=$1 and status='searching'
-		`, item.runID); err != nil {
-			return 0, err
-		}
 		tx, ok := s.db.(pgx.Tx)
 		if !ok {
 			return 0, errors.New("deadline expiry requires a transaction")
+		}
+		if err := FailResearchPayloadInTx(ctx, tx, item.runID, "research_deadline_exceeded"); err != nil {
+			return 0, err
 		}
 		terminalAttemptNo := item.attemptNo
 		if item.jobStatus == "waiting" {
@@ -452,10 +448,7 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 		}); err != nil {
 			return RunSnapshot{}, err
 		}
-		if _, err := s.db.Exec(ctx, `
-			update source_discovery_sessions set status='failed',error_code='research_cancelled',completed_at=now(),updated_at=now()
-			where research_run_id=$1 and status='searching'
-		`, childRunID); err != nil {
+		if err := FailResearchPayloadInTx(ctx, tx, childRunID, "research_cancelled"); err != nil {
 			return RunSnapshot{}, err
 		}
 	}

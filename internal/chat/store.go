@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -192,6 +193,9 @@ func (s *Store) ReplaceSourceSelection(ctx context.Context, userID, chatID strin
 		on conflict(chat_id,source_id) do update
 		set selected=excluded.selected,explicit=true,updated_at=excluded.updated_at
 	`, chatID, sourceIDs, item.NotebookID); err != nil {
+		return nil, err
+	}
+	if err := realtime.NotifyNotebookSources(ctx, s.db, item.NotebookID); err != nil {
 		return nil, err
 	}
 	return s.SelectedSourceIDs(ctx, userID, chatID)

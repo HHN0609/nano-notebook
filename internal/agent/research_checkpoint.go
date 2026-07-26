@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 	"github.com/jackc/pgx/v5"
 )
@@ -189,9 +190,32 @@ func FailResearchPayloadInTx(ctx context.Context, tx pgx.Tx, runID, errorCode st
 	if tx == nil || strings.TrimSpace(runID) == "" || !safeAttemptErrorCode.MatchString(errorCode) {
 		return errors.New("invalid Research payload failure")
 	}
-	_, err := tx.Exec(ctx, `
+	rows, err := tx.Query(ctx, `
 		update source_discovery_sessions set status='failed',error_code=$2,completed_at=now(),updated_at=now()
 		where research_run_id=$1 and origin='research_agent' and status='searching'
+		returning id
 	`, runID, errorCode)
-	return err
+	if err != nil {
+		return err
+	}
+	sessionIDs := make([]string, 0)
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			rows.Close()
+			return err
+		}
+		sessionIDs = append(sessionIDs, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, sessionID := range sessionIDs {
+		if err := realtime.NotifySourceDiscovery(ctx, tx, sessionID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

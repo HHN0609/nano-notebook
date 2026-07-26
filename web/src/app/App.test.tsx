@@ -615,11 +615,11 @@ test("submits one durable Message and projects the final answer from Run SSE", a
 
   expect(await within(chat).findByText("Why does a KV cache help?")).toBeInTheDocument();
   expect(within(chat).getByRole("status")).toHaveTextContent("Waiting to start…");
-  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-  expect(FakeEventSource.instances[0]?.url).toBe("/api/v1/agent-runs/run_test/events");
+  await waitFor(() => expect(FakeEventSource.instances.some((item) => item.url === "/api/v1/agent-runs/run_test/events")).toBe(true));
+  const runEvents = FakeEventSource.instances.find((item) => item.url === "/api/v1/agent-runs/run_test/events");
 
   act(() => {
-    FakeEventSource.instances[0]?.emit("run", {
+    runEvents?.emit("run", {
       run: { id: "run_test", input_message_id: admittedMessageID, status: "running", error_code: null },
       message: null
     });
@@ -627,7 +627,7 @@ test("submits one durable Message and projects the final answer from Run SSE", a
   await waitFor(() => expect(within(chat).getByRole("status")).toHaveTextContent("Generating answer…"));
 
   act(() => {
-    FakeEventSource.instances[0]?.emit("run", {
+    runEvents?.emit("run", {
       run: { id: "run_test", input_message_id: admittedMessageID, status: "completed", error_code: null },
       message: {
         id: "msg_answer",
@@ -641,7 +641,7 @@ test("submits one durable Message and projects the final answer from Run SSE", a
   expect(await within(chat).findByText("It reuses the keys and values already computed for earlier tokens.")).toBeInTheDocument();
   expect(within(chat).getByText("Answers use model knowledge and are not based on Notebook Sources.")).toBeInTheDocument();
   expect(within(chat).queryByRole("status")).not.toBeInTheDocument();
-  expect(FakeEventSource.instances[0]?.closed).toBe(true);
+  expect(runEvents?.closed).toBe(true);
   expect(admittedMessageID).not.toBe("");
 });
 
@@ -679,10 +679,11 @@ test("loads the exact delegated Research Session without opening full Discovery 
   const chat = await screen.findByRole("region", { name: "Chat" });
   await user.type(await within(chat).findByRole("textbox", { name: "Message Nano Notebook" }), "Help me collect Go learning material");
   await user.click(within(chat).getByRole("button", { name: "Send message" }));
-  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+  await waitFor(() => expect(FakeEventSource.instances.some((item) => item.url === "/api/v1/agent-runs/run_research/events")).toBe(true));
+  const runEvents = FakeEventSource.instances.find((item) => item.url === "/api/v1/agent-runs/run_research/events");
 
   act(() => {
-    FakeEventSource.instances[0]?.emit("run", {
+    runEvents?.emit("run", {
       run: { id: "run_research", input_message_id: admittedMessageID, status: "running", error_code: null, discovery_session_id: "dss_research" },
       message: null
     });
@@ -793,10 +794,11 @@ test("reconnects an active Run after refresh and shows terminal failure without 
   render(<App />);
   const chat = await screen.findByRole("region", { name: "Chat" });
   expect(await within(chat).findByText("Will this work?")).toBeInTheDocument();
-  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+  await waitFor(() => expect(FakeEventSource.instances.some((item) => item.url === "/api/v1/agent-runs/run_active/events")).toBe(true));
+  const runEvents = FakeEventSource.instances.find((item) => item.url === "/api/v1/agent-runs/run_active/events");
 
   act(() => {
-    FakeEventSource.instances[0]?.emit("run", {
+    runEvents?.emit("run", {
       run: { id: "run_active", input_message_id: "msg_question", status: "failed", error_code: "model_unavailable" },
       message: null
     });
@@ -806,7 +808,7 @@ test("reconnects an active Run after refresh and shows terminal failure without 
   expect(within(chat).getByRole("button", { name: "Retry" })).toBeInTheDocument();
   expect(within(chat).getByText("Answers use model knowledge and are not based on Notebook Sources.")).toBeInTheDocument();
   expect(within(chat).getByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
-  expect(FakeEventSource.instances[0]?.closed).toBe(true);
+  expect(runEvents?.closed).toBe(true);
 });
 
 test("stops an active Run and retries the same User Message with one idempotency key", async () => {
@@ -839,16 +841,16 @@ test("stops an active Run and retries the same User Message with one idempotency
   render(<App />);
   const user = userEvent.setup();
   const chat = await screen.findByRole("region", { name: "Chat" });
-  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+  await waitFor(() => expect(FakeEventSource.instances.some((item) => item.url === "/api/v1/agent-runs/run_active/events")).toBe(true));
+  const activeRunEvents = FakeEventSource.instances.find((item) => item.url === "/api/v1/agent-runs/run_active/events");
   const composer = within(chat).getByRole("textbox", { name: "Message Nano Notebook" });
   await user.click(within(chat).getByRole("button", { name: "Stop" }));
   expect(await within(chat).findByText("Stopped")).toBeInTheDocument();
   expect(composer).toBeEnabled();
-  expect(FakeEventSource.instances[0]?.closed).toBe(true);
+  expect(activeRunEvents?.closed).toBe(true);
 
   await user.click(within(chat).getByRole("button", { name: "Retry" }));
-  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(2));
-  expect(FakeEventSource.instances[1]?.url).toBe("/api/v1/agent-runs/run_retry/events");
+  await waitFor(() => expect(FakeEventSource.instances.some((item) => item.url === "/api/v1/agent-runs/run_retry/events")).toBe(true));
   expect(retryKey).toMatch(/^[0-9a-f-]{36}$/);
   expect(within(chat).getAllByText("Stop and retry this")).toHaveLength(1);
 });

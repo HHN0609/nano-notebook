@@ -1,9 +1,65 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import { SourceDiscovery } from "./source-discovery";
 
 afterEach(() => vi.unstubAllGlobals());
+
+class DiscoveryEventSource {
+  static instances: DiscoveryEventSource[] = [];
+  readonly url: string;
+  readonly listeners = new Map<string, Set<EventListener>>();
+  closed = false;
+
+  constructor(url: string | URL) {
+    this.url = String(url);
+    DiscoveryEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: EventListener) {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  close() { this.closed = true; }
+
+  emit(type: string, data: unknown) {
+    const event = new MessageEvent(type, { data: JSON.stringify(data) });
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+}
+
+test("projects a searching Discovery session through SSE without polling", async () => {
+  DiscoveryEventSource.instances = [];
+  vi.stubGlobal("EventSource", DiscoveryEventSource);
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ session: {
+    id: "dsc_events", notebook_id: "nb_1", query: "event driven", status: "searching", candidates: []
+  } })));
+  const { unmount } = render(<SourceDiscovery
+    notebookID="nb_1"
+    requestedSessionID="dsc_events"
+    active
+    onExpandedChange={vi.fn()}
+    onImported={vi.fn()}
+    copy={{
+      label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
+      selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported",
+      researchComplete: "Research completed", viewResults: "View", moreSources: "{count} more sources"
+    }}
+  />);
+
+  await waitFor(() => expect(DiscoveryEventSource.instances).toHaveLength(1));
+  expect(DiscoveryEventSource.instances[0]?.url).toBe("/api/v1/source-discovery-sessions/dsc_events/events");
+  act(() => DiscoveryEventSource.instances[0]?.emit("discovery", { session: {
+    id: "dsc_events", notebook_id: "nb_1", query: "event driven", status: "ready",
+    candidates: [{ id: "candidate_event", ordinal: 0, title: "Event result", canonical_url: "https://example.com/event", display_url: "example.com/event", snippet: "Delivered.", selected: true, status: "discovered" }]
+  } }));
+  expect(await screen.findByText("Event result ↗")).toBeVisible();
+  unmount();
+  expect(DiscoveryEventSource.instances[0]?.closed).toBe(true);
+});
 
 test("renders a compact Research card with three previews until View is chosen", async () => {
   const candidates = Array.from({ length: 5 }, (_, index) => ({

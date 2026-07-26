@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -44,7 +45,7 @@ func (q *Queue) Claim(ctx context.Context) (Lease, bool, error) {
 	if err := tx.QueryRow(ctx, `select clock_timestamp()`).Scan(&now); err != nil {
 		return Lease{}, false, err
 	}
-	if _, err := tx.Exec(ctx, `
+	exhaustedRows, err := tx.Query(ctx, `
 		with exhausted as (
 			update source_discovery_jobs
 			set status='failed',lease_token=null,lease_expires_at=null,last_error_code='retry_exhausted',updated_at=$1
@@ -54,8 +55,29 @@ func (q *Queue) Claim(ctx context.Context) (Lease, bool, error) {
 		update source_discovery_sessions s
 		set status='failed',error_code='discovery_unavailable',completed_at=$1,updated_at=$1
 		from exhausted e where s.id=e.session_id and s.status='searching'
-	`, now); err != nil {
+		returning s.id
+	`, now)
+	if err != nil {
 		return Lease{}, false, err
+	}
+	exhaustedSessionIDs := make([]string, 0)
+	for exhaustedRows.Next() {
+		var sessionID string
+		if err := exhaustedRows.Scan(&sessionID); err != nil {
+			exhaustedRows.Close()
+			return Lease{}, false, err
+		}
+		exhaustedSessionIDs = append(exhaustedSessionIDs, sessionID)
+	}
+	if err := exhaustedRows.Err(); err != nil {
+		exhaustedRows.Close()
+		return Lease{}, false, err
+	}
+	exhaustedRows.Close()
+	for _, sessionID := range exhaustedSessionIDs {
+		if err := realtime.NotifySourceDiscovery(ctx, tx, sessionID); err != nil {
+			return Lease{}, false, err
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		update source_discovery_jobs

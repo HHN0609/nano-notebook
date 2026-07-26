@@ -150,6 +150,13 @@ func main() {
 			stop()
 		}
 	}()
+	sourceListener := realtime.NewSourceListener(db.Pool(), server.NotifySourceDiscovery, server.NotifyNotebookSources)
+	go func() {
+		if err := sourceListener.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("Source projection listener failed", "error", err)
+			stop()
+		}
+	}()
 	httpServer := &http.Server{
 		Addr:              config.Addr,
 		Handler:           otelhttp.NewHandler(server.Handler(), "control-plane"),

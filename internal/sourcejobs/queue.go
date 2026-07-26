@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,7 +53,7 @@ func (q *Queue) Claim(ctx context.Context) (Lease, bool, error) {
 	if err := tx.QueryRow(ctx, `select clock_timestamp()`).Scan(&now); err != nil {
 		return Lease{}, false, err
 	}
-	if _, err := tx.Exec(ctx, `
+	exhaustedRows, err := tx.Query(ctx, `
 		with exhausted as (
 			update source_processing_jobs
 			set status='failed', lease_token=null, lease_expires_at=null,
@@ -64,8 +65,29 @@ func (q *Queue) Claim(ctx context.Context) (Lease, bool, error) {
 		set state='failed', updated_at=$1
 		from exhausted e
 		where s.id=e.source_id
-	`, now); err != nil {
+		returning s.notebook_id
+	`, now)
+	if err != nil {
 		return Lease{}, false, err
+	}
+	exhaustedNotebookIDs := make([]string, 0)
+	for exhaustedRows.Next() {
+		var notebookID string
+		if err := exhaustedRows.Scan(&notebookID); err != nil {
+			exhaustedRows.Close()
+			return Lease{}, false, err
+		}
+		exhaustedNotebookIDs = append(exhaustedNotebookIDs, notebookID)
+	}
+	if err := exhaustedRows.Err(); err != nil {
+		exhaustedRows.Close()
+		return Lease{}, false, err
+	}
+	exhaustedRows.Close()
+	for _, notebookID := range exhaustedNotebookIDs {
+		if err := realtime.NotifyNotebookSources(ctx, tx, notebookID); err != nil {
+			return Lease{}, false, err
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		update source_processing_jobs
@@ -202,15 +224,15 @@ func (q *Queue) CompleteEvidence(ctx context.Context, jobID, leaseToken, revisio
 	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
 		return err
 	}
-	var sourceID string
+	var sourceID, notebookID string
 	var current source.State
 	err = tx.QueryRow(ctx, `
-		select s.id, s.state
+		select s.id, s.state, s.notebook_id
 		from source_processing_jobs j
 		join source_sources s on s.id=j.source_id
 		where j.id=$1 and j.status='running' and j.lease_token=$2::uuid and j.lease_expires_at > now()
 		for update of j, s
-	`, jobID, leaseToken).Scan(&sourceID, &current)
+	`, jobID, leaseToken).Scan(&sourceID, &current, &notebookID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrLeaseLost
 	}
@@ -295,6 +317,9 @@ func (q *Queue) CompleteEvidence(ctx context.Context, jobID, leaseToken, revisio
 	`, jobID, now); err != nil {
 		return err
 	}
+	if err := realtime.NotifyNotebookSources(ctx, tx, notebookID); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -364,6 +389,9 @@ func (q *Queue) finish(ctx context.Context, jobID, leaseToken string, succeeded 
 		if err := purgeDiscoveredURLSource(ctx, tx, sourceID, notebookID, *discoveryUserID, originalObjectKey); err != nil {
 			return err
 		}
+	}
+	if err := realtime.NotifyNotebookSources(ctx, tx, notebookID); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -443,8 +471,33 @@ func purgeDiscoveredURLSource(ctx context.Context, tx pgx.Tx, sourceID, notebook
 	if err != nil {
 		return err
 	}
+	discoverySessionIDs := make([]string, 0)
+	rows, err = tx.Query(ctx, `
+		select distinct session_id from source_discovery_candidates where source_id=$1 order by session_id
+	`, sourceID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			rows.Close()
+			return err
+		}
+		discoverySessionIDs = append(discoverySessionIDs, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
 	if _, err := tx.Exec(ctx, `delete from source_discovery_candidates where source_id=$1`, sourceID); err != nil {
 		return err
+	}
+	for _, sessionID := range discoverySessionIDs {
+		if err := realtime.NotifySourceDiscovery(ctx, tx, sessionID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into source_purge_jobs(

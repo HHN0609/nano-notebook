@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -341,7 +342,13 @@ func (s *Store) CreateUploaded(ctx context.Context, command CreateUploadedComman
 		&created.ByteSize, &created.ContentSHA256, &created.OriginalObjectKey, &created.FinalURL, &created.State,
 		&created.CreatedAt, &created.UpdatedAt,
 	)
-	return created, err
+	if err != nil {
+		return Source{}, err
+	}
+	if err := realtime.NotifyNotebookSources(ctx, s.db, command.NotebookID); err != nil {
+		return Source{}, err
+	}
+	return created, nil
 }
 
 func (s *Store) CreateUploadIntent(ctx context.Context, command CreateUploadIntentCommand) (UploadIntent, bool, error) {
@@ -562,6 +569,9 @@ func (s *Store) FinalizeURLAdmission(ctx context.Context, command FinalizeURLAdm
 	`, admission.ID, command.CompletedAt); err != nil {
 		return Source{}, false, err
 	}
+	if err := realtime.NotifyNotebookSources(ctx, s.db, created.NotebookID); err != nil {
+		return Source{}, false, err
+	}
 	return created, false, nil
 }
 
@@ -722,6 +732,9 @@ func (s *Store) Rename(ctx context.Context, id, title string) (Source, error) {
 	if _, err := s.db.Exec(ctx, `update source_sources set title=$2, updated_at=now() where id=$1`, id, title); err != nil {
 		return Source{}, err
 	}
+	if err := realtime.NotifyNotebookSources(ctx, s.db, current.NotebookID); err != nil {
+		return Source{}, err
+	}
 	return s.sourceByID(ctx, id)
 }
 
@@ -755,7 +768,7 @@ func (s *Store) RetryFailed(ctx context.Context, id string) error {
 	if commandTag.RowsAffected() != 1 {
 		return ErrStateConflict
 	}
-	return nil
+	return realtime.NotifyNotebookSources(ctx, s.db, current.NotebookID)
 }
 
 func (s *Store) Remove(ctx context.Context, id, purgeID string) (PurgeIntent, error) {
@@ -858,7 +871,35 @@ func (s *Store) Remove(ctx context.Context, id, purgeID string) (PurgeIntent, er
 	if err != nil {
 		return PurgeIntent{}, err
 	}
+	discoverySessionIDs := make([]string, 0)
+	rows, err = s.db.Query(ctx, `
+		select distinct session_id from source_discovery_candidates where source_id=$1 order by session_id
+	`, current.ID)
+	if err != nil {
+		return PurgeIntent{}, err
+	}
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			rows.Close()
+			return PurgeIntent{}, err
+		}
+		discoverySessionIDs = append(discoverySessionIDs, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return PurgeIntent{}, err
+	}
+	rows.Close()
 	if _, err := s.db.Exec(ctx, `delete from source_sources where id=$1`, current.ID); err != nil {
+		return PurgeIntent{}, err
+	}
+	for _, sessionID := range discoverySessionIDs {
+		if err := realtime.NotifySourceDiscovery(ctx, s.db, sessionID); err != nil {
+			return PurgeIntent{}, err
+		}
+	}
+	if err := realtime.NotifyNotebookSources(ctx, s.db, current.NotebookID); err != nil {
 		return PurgeIntent{}, err
 	}
 	return purge, nil
