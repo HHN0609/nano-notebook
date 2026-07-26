@@ -984,6 +984,23 @@ create table if not exists agent_research_outcomes (
 	created_at timestamptz not null default now()
 );
 
+create table if not exists agent_role_checkpoints (
+	run_id text not null references agent_runs(id) on delete cascade,
+	agent_role text not null check (agent_role='research'),
+	step_key text not null check (step_key in ('query_plan','search_result')),
+	ordinal integer not null check (ordinal between 0 and 2),
+	identity_key text not null check (char_length(identity_key) between 3 and 200),
+	payload jsonb not null check (jsonb_typeof(payload)='object' and octet_length(payload::text) <= 262144),
+	payload_sha256 text not null check (payload_sha256 ~ '^[0-9a-f]{64}$'),
+	created_at timestamptz not null default now(),
+	primary key (run_id,agent_role,step_key,ordinal),
+	unique(run_id,identity_key),
+	constraint agent_role_checkpoints_shape check (
+		(step_key='query_plan' and ordinal=0)
+		or (step_key='search_result' and ordinal between 0 and 2)
+	)
+);
+
 insert into agent_run_delegations(
 	id,parent_run_id,child_run_id,parent_role,child_role,child_ordinal,depth,state,error_code,
 	created_at,updated_at,completed_at,consumed_at
@@ -1010,6 +1027,16 @@ from agent_research_delegations legacy
 join agent_run_delegations delegation on delegation.parent_run_id=legacy.parent_run_id
 where legacy.discovery_session_id is not null and delegation.state='succeeded'
 on conflict(delegation_id) do nothing;
+
+insert into agent_role_checkpoints(
+	run_id,agent_role,step_key,ordinal,identity_key,payload,payload_sha256,created_at
+)
+select legacy.child_run_id,'research','query_plan',0,'research/query_plan/0',payload.document,
+	encode(sha256(convert_to(payload.document::text,'UTF8')),'hex'),legacy.updated_at
+from agent_research_delegations legacy
+cross join lateral (select jsonb_build_object('queries',legacy.expanded_queries) as document) payload
+where jsonb_array_length(legacy.expanded_queries)>0
+on conflict(run_id,agent_role,step_key,ordinal) do nothing;
 
 drop table agent_research_delegations;
 drop index if exists agent_runs_one_research_child_idx;
@@ -1641,6 +1668,7 @@ alter table agent_runs enable row level security;
 alter table agent_run_routes enable row level security;
 alter table agent_run_delegations enable row level security;
 alter table agent_research_outcomes enable row level security;
+alter table agent_role_checkpoints enable row level security;
 alter table agent_run_evidence_set enable row level security;
 alter table agent_run_grounding_plans enable row level security;
 alter table agent_claim_support_records enable row level security;
@@ -1731,6 +1759,7 @@ grant select, insert, update, delete on agent_jobs to nano_worker;
 grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_worker;
 grant select, insert, update, delete on agent_run_routes to nano_worker;
 grant select, insert, update, delete on agent_run_delegations, agent_research_outcomes to nano_worker;
+grant select, insert on agent_role_checkpoints to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 grant select, insert, update, delete on chat_source_selections to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
@@ -2390,6 +2419,13 @@ create policy agent_run_delegations_worker on agent_run_delegations
 drop policy if exists agent_research_outcomes_worker on agent_research_outcomes;
 create policy agent_research_outcomes_worker on agent_research_outcomes
 	for all to nano_worker using (true) with check (true);
+
+drop policy if exists agent_role_checkpoints_worker_read on agent_role_checkpoints;
+create policy agent_role_checkpoints_worker_read on agent_role_checkpoints
+	for select to nano_worker using (true);
+drop policy if exists agent_role_checkpoints_worker_append on agent_role_checkpoints;
+create policy agent_role_checkpoints_worker_append on agent_role_checkpoints
+	for insert to nano_worker with check (true);
 
 drop policy if exists agent_run_evidence_set_app on agent_run_evidence_set;
 create policy agent_run_evidence_set_app on agent_run_evidence_set

@@ -306,56 +306,61 @@ func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run lead
 }
 
 func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, run leaderRunContext) error {
-	request := ResearchPlanRequest{Model: run.Model, UserMessage: run.Message}
-	var queries []string
-	var err error
-	if traced, ok := e.planner.(TracedResearchPlanner); ok {
-		traceContext, tracer, traceErr := e.modelTraceContext(ctx, attempt)
-		if traceErr != nil {
-			return traceErr
+	progress, err := e.loadResearchProgress(ctx, attempt)
+	if err != nil {
+		return err
+	}
+	if len(progress.Plan) == 0 {
+		request := ResearchPlanRequest{Model: run.Model, UserMessage: run.Message}
+		var queries []string
+		if traced, ok := e.planner.(TracedResearchPlanner); ok {
+			traceContext, tracer, traceErr := e.modelTraceContext(ctx, attempt)
+			if traceErr != nil {
+				return traceErr
+			}
+			modelIdentity := TraceResearchPlanModelStartIdentity(attempt.RunID, attempt.AttemptNo)
+			queries, err = traced.ExpandQueriesTraced(traceContext, tracer, request, ModelTraceOptions{
+				StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
+				DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: e.replayStager,
+				Phase: ModelPhaseResearchQueryExpansion,
+			})
+		} else {
+			queries, err = e.planner.ExpandQueries(ctx, request)
 		}
-		modelIdentity := TraceResearchPlanModelStartIdentity(attempt.RunID, attempt.AttemptNo)
-		queries, err = traced.ExpandQueriesTraced(traceContext, tracer, request, ModelTraceOptions{
-			StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
-			DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: e.replayStager,
-			Phase: ModelPhaseResearchQueryExpansion,
-		})
-	} else {
-		queries, err = e.planner.ExpandQueries(ctx, request)
+		if err != nil {
+			return err
+		}
+		queries = boundQueries(queries)
+		if len(queries) == 0 {
+			return ErrInvalidLeaderRoute
+		}
+		checkpoint, err := NewRoleCheckpoint(RoleResearch, ResearchStepQueryPlan, 0, ResearchQueryPlan{Queries: queries})
+		if err != nil {
+			return err
+		}
+		if err := e.appendResearchCheckpoint(ctx, attempt, checkpoint); err != nil {
+			return err
+		}
+		progress.Plan = queries
 	}
-	if err != nil {
-		return err
-	}
-	queries = boundQueries(queries)
-	if len(queries) == 0 {
-		return ErrInvalidLeaderRoute
-	}
-	sessionID := "dss_" + uuid.NewString()
-	tx, err := e.workerTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if err := e.requireLease(ctx, tx, attempt, "research"); err != nil {
-		return err
-	}
-	if _, err := sourcediscovery.NewStore(tx).EnsureResearchSession(ctx, sourcediscovery.ResearchSessionCommand{
-		ID: sessionID, NotebookID: run.NotebookID, UserID: run.UserID, OriginChatID: run.ChatID,
-		ResearchRunID: attempt.RunID, Query: truncateLeaderRunes(run.Message, 500),
-	}); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-
-	resultGroups := make([][]websearch.Candidate, 0, len(queries))
-	for _, query := range queries {
+	resultGroups := make([][]websearch.Candidate, len(progress.Plan))
+	for ordinal, query := range progress.Plan {
+		if accepted, ok := progress.Results[ordinal]; ok {
+			resultGroups[ordinal] = accepted
+			continue
+		}
 		results, searchErr := e.provider.Search(ctx, websearch.Request{Query: query, Count: 10})
 		if searchErr != nil {
 			return e.failResearch(ctx, attempt, sourcediscovery.SafeProviderError(searchErr))
 		}
-		resultGroups = append(resultGroups, results)
+		checkpoint, err := NewRoleCheckpoint(RoleResearch, ResearchStepSearchResult, ordinal, ResearchSearchResult{Query: query, Candidates: results})
+		if err != nil {
+			return err
+		}
+		if err := e.appendResearchCheckpoint(ctx, attempt, checkpoint); err != nil {
+			return err
+		}
+		resultGroups[ordinal] = results
 	}
 	candidates := mergeResearchCandidates(resultGroups)
 	if e.candidateValidator != nil {
@@ -368,6 +373,34 @@ func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, r
 		candidates = validated
 	}
 	return e.completeResearch(ctx, attempt, candidates)
+}
+
+func (e *LeaderExecutor) loadResearchProgress(ctx context.Context, attempt Attempt) (ResearchProgress, error) {
+	tx, err := e.workerTx(ctx)
+	if err != nil {
+		return ResearchProgress{}, err
+	}
+	defer tx.Rollback(ctx)
+	progress, err := LoadResearchProgressInTx(ctx, tx, attempt)
+	if err != nil {
+		return ResearchProgress{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return ResearchProgress{}, err
+	}
+	return progress, nil
+}
+
+func (e *LeaderExecutor) appendResearchCheckpoint(ctx context.Context, attempt Attempt, checkpoint RoleCheckpoint) error {
+	tx, err := e.workerTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := AppendRoleCheckpointInTx(ctx, tx, attempt, checkpoint); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func mergeResearchCandidates(groups [][]websearch.Candidate) []sourcediscovery.DiscoveredCandidate {
