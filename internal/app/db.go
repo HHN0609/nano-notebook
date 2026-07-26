@@ -89,7 +89,7 @@ func RunMigrations(ctx context.Context, db *DB) error {
 	if _, err := db.pool.Exec(ctx, migrationsSQL); err != nil {
 		return err
 	}
-	return nil
+	return registerEmbeddedPromptCatalog(ctx, db)
 }
 
 const migrationsSQL = `
@@ -784,6 +784,34 @@ create table if not exists source_discovery_jobs (
 
 create index if not exists source_discovery_jobs_claim_idx
 	on source_discovery_jobs(available_at,created_at,id) where status='queued';
+
+create table if not exists agent_prompt_versions (
+	prompt_identity text not null check (char_length(prompt_identity) between 3 and 255),
+	prompt_version integer not null check (prompt_version > 0),
+	output_contract text not null check (char_length(output_contract) between 3 and 255),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	content text not null check (char_length(content) > 0),
+	source_path text not null check (char_length(source_path) between 1 and 500),
+	registered_at timestamptz not null default now(),
+	primary key (prompt_identity,prompt_version)
+);
+
+create or replace function nano_reject_agent_prompt_version_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+	raise exception 'agent_prompt_versions is immutable';
+end
+$$;
+
+drop trigger if exists agent_prompt_versions_immutable on agent_prompt_versions;
+create trigger agent_prompt_versions_immutable
+	before update or delete on agent_prompt_versions
+	for each row execute function nano_reject_agent_prompt_version_mutation();
+
+revoke all on agent_prompt_versions from nano_app, nano_worker;
+grant select on agent_prompt_versions to nano_worker;
 
 create table if not exists agent_runs (
 	id text primary key,

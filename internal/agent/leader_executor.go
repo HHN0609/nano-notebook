@@ -102,30 +102,30 @@ func (e *LeaderExecutor) execute(ctx context.Context, attempt Attempt) error {
 	}
 	if run.ExistingRoute == nil {
 		request := LeaderRouteRequest{Model: run.Model, UserMessage: run.Message}
-		var route LeaderRoute
+		var decision LeaderRouteDecision
 		if traced, ok := e.router.(TracedLeaderRouter); ok {
 			traceContext, tracer, traceErr := e.modelTraceContext(ctx, attempt)
 			if traceErr != nil {
 				return traceErr
 			}
 			modelIdentity := TraceLeaderRouteModelStartIdentity(attempt.RunID, attempt.AttemptNo)
-			route, err = traced.DecideRouteTraced(traceContext, tracer, request, ModelTraceOptions{
+			decision, err = traced.DecideRouteTraced(traceContext, tracer, request, ModelTraceOptions{
 				StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
 				DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: e.replayStager,
 				Phase: ModelPhaseLeaderRouting,
 			})
 		} else {
-			route, err = e.router.DecideRoute(ctx, request)
+			decision, err = e.router.DecideRoute(ctx, request)
 		}
 		if err != nil {
 			return err
 		}
 		// Viewing a notebook never grants permission to discover or import Sources.
-		if route == LeaderDelegateResearch && run.MemberRole != "owner" && run.MemberRole != "editor" {
-			route = LeaderContinueChat
+		if decision.Route == LeaderDelegateResearch && run.MemberRole != "owner" && run.MemberRole != "editor" {
+			decision.Route = LeaderContinueChat
 		}
-		if route == LeaderContinueChat {
-			if err := e.persistRoute(ctx, attempt, route); err != nil {
+		if decision.Route == LeaderContinueChat {
+			if err := e.persistRoute(ctx, attempt, decision.Route); err != nil {
 				return err
 			}
 			return e.normal.Execute(ctx, attempt)

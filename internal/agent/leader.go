@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"unicode/utf8"
@@ -19,17 +21,32 @@ const (
 
 var ErrInvalidLeaderRoute = errors.New("invalid Leader route")
 
+type LeaderIntentReason string
+
+const (
+	LeaderReasonOrdinaryConversation                LeaderIntentReason = "ordinary_conversation"
+	LeaderReasonExistingSourceWork                  LeaderIntentReason = "existing_source_work"
+	LeaderReasonAmbiguousDiscoveryIntent            LeaderIntentReason = "ambiguous_discovery_intent"
+	LeaderReasonExternalInformationWithoutDiscovery LeaderIntentReason = "external_information_without_discovery_request"
+	LeaderReasonExplicitSourceDiscovery             LeaderIntentReason = "explicit_source_discovery"
+)
+
+type LeaderRouteDecision struct {
+	Route      LeaderRoute        `json:"route"`
+	ReasonCode LeaderIntentReason `json:"reason_code"`
+}
+
 type LeaderRouteRequest struct {
 	Model       string
 	UserMessage string
 }
 
 type LeaderRouter interface {
-	DecideRoute(context.Context, LeaderRouteRequest) (LeaderRoute, error)
+	DecideRoute(context.Context, LeaderRouteRequest) (LeaderRouteDecision, error)
 }
 
 type TracedLeaderRouter interface {
-	DecideRouteTraced(context.Context, *agentobs.Tracer, LeaderRouteRequest, ModelTraceOptions) (LeaderRoute, error)
+	DecideRouteTraced(context.Context, *agentobs.Tracer, LeaderRouteRequest, ModelTraceOptions) (LeaderRouteDecision, error)
 }
 
 type ResearchPlanRequest struct {
@@ -51,22 +68,22 @@ func NewModelLeaderRouter(model DecisionModel) *ModelLeaderRouter {
 	return &ModelLeaderRouter{model: model}
 }
 
-func (r *ModelLeaderRouter) DecideRoute(ctx context.Context, request LeaderRouteRequest) (LeaderRoute, error) {
+func (r *ModelLeaderRouter) DecideRoute(ctx context.Context, request LeaderRouteRequest) (LeaderRouteDecision, error) {
 	return r.decideRoute(ctx, nil, request, ModelTraceOptions{})
 }
 
-func (r *ModelLeaderRouter) DecideRouteTraced(ctx context.Context, tracer *agentobs.Tracer, request LeaderRouteRequest, options ModelTraceOptions) (LeaderRoute, error) {
+func (r *ModelLeaderRouter) DecideRouteTraced(ctx context.Context, tracer *agentobs.Tracer, request LeaderRouteRequest, options ModelTraceOptions) (LeaderRouteDecision, error) {
 	return r.decideRoute(ctx, tracer, request, options)
 }
 
-func (r *ModelLeaderRouter) decideRoute(ctx context.Context, tracer *agentobs.Tracer, request LeaderRouteRequest, options ModelTraceOptions) (LeaderRoute, error) {
+func (r *ModelLeaderRouter) decideRoute(ctx context.Context, tracer *agentobs.Tracer, request LeaderRouteRequest, options ModelTraceOptions) (LeaderRouteDecision, error) {
 	if r == nil || r.model == nil || strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.UserMessage) == "" {
-		return "", ErrInvalidLeaderRoute
+		return LeaderRouteDecision{}, ErrInvalidLeaderRoute
 	}
 	modelRequest := models.ModelRequest{Model: request.Model, Messages: []models.ModelMessage{
-		{Role: models.RoleSystem, Content: `You are Nano Notebook's Leader router. Return exactly continue_chat unless the user clearly asks to search, find, collect, research, or add new external source material. Return exactly delegate_research only for that explicit discovery intent. Never infer web access merely because current sources may be insufficient. Output one token and nothing else.`},
+		{Role: models.RoleSystem, Content: mustPromptContent("agent.leader-router", 1)},
 		{Role: models.RoleUser, Content: request.UserMessage},
-	}}
+	}, ActionDefinitions: []models.ActionDefinition{leaderRouteActionDefinition()}, RequiredActionName: "select_leader_route"}
 	var outcome models.ModelOutcome
 	var err error
 	if tracer == nil {
@@ -74,17 +91,17 @@ func (r *ModelLeaderRouter) decideRoute(ctx context.Context, tracer *agentobs.Tr
 	} else {
 		outcome, err = InvokeDecisionModel(ctx, tracer, r.model, modelRequest, 1, options)
 	}
-	if err != nil || outcome.Final == nil || outcome.Proposal != nil {
-		if err != nil {
-			return "", err
-		}
-		return "", ErrInvalidLeaderRoute
+	if err != nil {
+		return LeaderRouteDecision{}, err
 	}
-	route := LeaderRoute(strings.TrimSpace(outcome.Final.Text))
-	if route != LeaderContinueChat && route != LeaderDelegateResearch {
-		return "", ErrInvalidLeaderRoute
+	if outcome.Final != nil || outcome.Proposal == nil || len(outcome.Proposal.Actions) != 1 || outcome.Proposal.Actions[0].Name != "select_leader_route" {
+		return LeaderRouteDecision{}, ErrInvalidLeaderRoute
 	}
-	return route, nil
+	var decision LeaderRouteDecision
+	if err := decodeExactJSON(outcome.Proposal.Actions[0].Input, &decision); err != nil || !decision.Valid() {
+		return LeaderRouteDecision{}, ErrInvalidLeaderRoute
+	}
+	return decision, nil
 }
 
 type ModelResearchPlanner struct{ model DecisionModel }
@@ -106,9 +123,9 @@ func (p *ModelResearchPlanner) expandQueries(ctx context.Context, tracer *agento
 		return nil, ErrInvalidLeaderRoute
 	}
 	modelRequest := models.ModelRequest{Model: request.Model, Messages: []models.ModelMessage{
-		{Role: models.RoleSystem, Content: `Expand the user's explicit source-discovery request into one to three useful web-search queries. Each output line must begin exactly with QUERY: followed by one query. Preserve the user's language and intent. Do not answer the request, include URLs, or output any other text.`},
+		{Role: models.RoleSystem, Content: mustPromptContent("agent.research-planner", 1)},
 		{Role: models.RoleUser, Content: request.UserMessage},
-	}}
+	}, ActionDefinitions: []models.ActionDefinition{researchQueriesActionDefinition()}, RequiredActionName: "submit_research_queries"}
 	var outcome models.ModelOutcome
 	var err error
 	if tracer == nil {
@@ -119,25 +136,25 @@ func (p *ModelResearchPlanner) expandQueries(ctx context.Context, tracer *agento
 	if err != nil {
 		return nil, err
 	}
-	if outcome.Final == nil || outcome.Proposal != nil {
+	if outcome.Final != nil || outcome.Proposal == nil || len(outcome.Proposal.Actions) != 1 || outcome.Proposal.Actions[0].Name != "submit_research_queries" {
 		return nil, ErrInvalidLeaderRoute
 	}
-	queries := make([]string, 0, 3)
+	var submitted struct {
+		Queries []string `json:"queries"`
+	}
+	if err := decodeExactJSON(outcome.Proposal.Actions[0].Input, &submitted); err != nil || len(submitted.Queries) < 1 || len(submitted.Queries) > 3 {
+		return nil, ErrInvalidLeaderRoute
+	}
+	queries := make([]string, 0, len(submitted.Queries))
 	seen := make(map[string]struct{}, 3)
-	for _, line := range strings.Split(outcome.Final.Text, "\n") {
-		if len(queries) == 3 {
-			break
-		}
-		if !strings.HasPrefix(line, "QUERY:") {
-			continue
-		}
-		query := strings.TrimSpace(strings.TrimPrefix(line, "QUERY:"))
+	for _, value := range submitted.Queries {
+		query := strings.TrimSpace(value)
 		if query == "" || utf8.RuneCountInString(query) > 500 {
-			continue
+			return nil, ErrInvalidLeaderRoute
 		}
 		key := strings.ToLower(query)
 		if _, duplicate := seen[key]; duplicate {
-			continue
+			return nil, ErrInvalidLeaderRoute
 		}
 		seen[key] = struct{}{}
 		queries = append(queries, query)
@@ -146,4 +163,41 @@ func (p *ModelResearchPlanner) expandQueries(ctx context.Context, tracer *agento
 		return nil, ErrInvalidLeaderRoute
 	}
 	return queries, nil
+}
+
+func (decision LeaderRouteDecision) Valid() bool {
+	switch decision.Route {
+	case LeaderDelegateResearch:
+		return decision.ReasonCode == LeaderReasonExplicitSourceDiscovery
+	case LeaderContinueChat:
+		switch decision.ReasonCode {
+		case LeaderReasonOrdinaryConversation, LeaderReasonExistingSourceWork, LeaderReasonAmbiguousDiscoveryIntent, LeaderReasonExternalInformationWithoutDiscovery:
+			return true
+		}
+	}
+	return false
+}
+
+func leaderRouteActionDefinition() models.ActionDefinition {
+	return models.ActionDefinition{Name: "select_leader_route", Description: "Submit the requested Leader route and bounded intent reason.", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["route","reason_code"],"properties":{"route":{"type":"string","enum":["continue_chat","delegate_research"]},"reason_code":{"type":"string","enum":["ordinary_conversation","existing_source_work","ambiguous_discovery_intent","external_information_without_discovery_request","explicit_source_discovery"]}}}`)}
+}
+
+func researchQueriesActionDefinition() models.ActionDefinition {
+	return models.ActionDefinition{Name: "submit_research_queries", Description: "Submit one to three bounded Web Search queries.", InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["queries"],"properties":{"queries":{"type":"array","minItems":1,"maxItems":3,"items":{"type":"string","minLength":1,"maxLength":500}}}}`)}
+}
+
+func decodeExactJSON(payload json.RawMessage, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if decoder.More() {
+		return errors.New("multiple JSON values")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err == nil {
+		return errors.New("multiple JSON values")
+	}
+	return nil
 }

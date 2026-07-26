@@ -71,6 +71,13 @@ func TestBifrostVisionReturnsOnlyBoundedImageRegions(t *testing.T) {
 			!strings.Contains(string(request.Messages[1].Content), "data:image/png;base64,aW1hZ2U=") {
 			t.Fatalf("vision request=%+v", request)
 		}
+		var systemPrompt string
+		if err := json.Unmarshal(request.Messages[0].Content, &systemPrompt); err != nil {
+			t.Fatal(err)
+		}
+		if systemPrompt != imageEvidenceNormalizerPrompt.Content {
+			t.Fatalf("system prompt is not the exact catalog content: %q", systemPrompt)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"provider":"gemini","model":"gemini-2.5-flash",
@@ -82,7 +89,7 @@ func TestBifrostVisionReturnsOnlyBoundedImageRegions(t *testing.T) {
 	client := NewBifrostClient(server.URL, server.Client(), 128)
 	outcome, err := client.DescribeImage(context.Background(), VisionRequest{
 		Model: "gemini/gemini-2.5-flash", MediaType: "image/png", Image: []byte("image"), Width: 320, Height: 200,
-		PromptVersion: "vision-normalize-v1",
+		PromptVersion: ImageEvidenceNormalizerPromptVersion,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -108,9 +115,24 @@ func TestBifrostMediaCapabilitiesRejectUnboundedProviderResults(t *testing.T) {
 		t.Fatal("Transcribe accepted a backwards interval")
 	}
 	if _, err := client.DescribeImage(context.Background(), VisionRequest{
-		Model: "m", MediaType: "image/png", Image: []byte("image"), Width: 100, Height: 100, PromptVersion: "v1",
+		Model: "m", MediaType: "image/png", Image: []byte("image"), Width: 100, Height: 100, PromptVersion: ImageEvidenceNormalizerPromptVersion,
 	}); err == nil {
 		t.Fatal("DescribeImage accepted an out-of-bounds region")
+	}
+}
+
+func TestBifrostVisionRejectsUnregisteredPromptVersionBeforeProviderCall(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls++ }))
+	defer server.Close()
+	client := NewBifrostClient(server.URL, server.Client(), 128)
+	if _, err := client.DescribeImage(context.Background(), VisionRequest{
+		Model: "m", MediaType: "image/png", Image: []byte("image"), Width: 10, Height: 10, PromptVersion: "latest",
+	}); err == nil {
+		t.Fatal("DescribeImage accepted a mutable Prompt selector")
+	}
+	if calls != 0 {
+		t.Fatalf("provider calls=%d", calls)
 	}
 }
 

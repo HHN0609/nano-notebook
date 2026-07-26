@@ -1,0 +1,19 @@
+package agent
+
+import "github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
+
+var productionPromptCatalog = promptcatalog.MustLoadEmbedded()
+
+var (
+	BareSystemPrompt         = mustPromptContent("agent.chat-composer-bare", 1)
+	GroundedSystemPrompt     = mustPromptContent("agent.chat-composer-grounded", 1)
+	QueryContextSystemPrompt = mustPromptContent("agent.query-contextualizer", 1)
+)
+
+func mustPromptContent(identity string, version int) string {
+	prompt, ok := productionPromptCatalog.Resolve(identity, version)
+	if !ok {
+		panic("missing embedded prompt " + identity)
+	}
+	return prompt.Content
+}

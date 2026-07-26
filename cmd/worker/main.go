@@ -137,6 +137,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	if err := app.VerifyEmbeddedPromptCatalog(ctx, db); err != nil {
+		slog.Error("worker Prompt Catalog readiness failed", "error", err)
+		os.Exit(1)
+	}
 	indexVersion, bootstrapped, err := prepareRetrievalAuthority(ctx, retrieval.NewVersionStore(db.Pool()), config)
 	if err != nil {
 		slog.Error("worker retrieval authority unavailable", "mode", config.RetrievalBootstrapMode, "error", err)
@@ -662,7 +666,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		SourceProcessingPoll: sourceProcessingPoll, SourceExtractionConfigID: env("NANO_SOURCE_EXTRACTION_CONFIG_ID", "extract-text-v1"),
 		SourceVisionModel:            env("NANO_SOURCE_VISION_MODEL", "gemini/gemini-2.5-flash"),
 		SourceTranscriptionModel:     env("NANO_SOURCE_TRANSCRIPTION_MODEL", "openai/whisper-1"),
-		SourceVisionPromptVersion:    env("NANO_SOURCE_VISION_PROMPT_VERSION", "vision-normalize-v1"),
+		SourceVisionPromptVersion:    env("NANO_SOURCE_VISION_PROMPT_VERSION", models.ImageEvidenceNormalizerPromptVersion),
 		SourceMaxVisionPages:         sourceMaxVisionPages,
 		DocumentRendererURL:          strings.TrimRight(env("NANO_DOCUMENT_RENDERER_URL", "http://127.0.0.1:8084"), "/"),
 		DocumentRendererServiceToken: env("NANO_DOCUMENT_RENDERER_SERVICE_TOKEN", "nano-local-renderer-token"),

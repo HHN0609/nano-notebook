@@ -3,6 +3,7 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -19,8 +20,12 @@ import (
 
 type fixedLeaderRouter struct{ route agent.LeaderRoute }
 
-func (r fixedLeaderRouter) DecideRoute(context.Context, agent.LeaderRouteRequest) (agent.LeaderRoute, error) {
-	return r.route, nil
+func (r fixedLeaderRouter) DecideRoute(context.Context, agent.LeaderRouteRequest) (agent.LeaderRouteDecision, error) {
+	reason := agent.LeaderReasonOrdinaryConversation
+	if r.route == agent.LeaderDelegateResearch {
+		reason = agent.LeaderReasonExplicitSourceDiscovery
+	}
+	return agent.LeaderRouteDecision{Route: r.route, ReasonCode: reason}, nil
 }
 
 type fixedResearchPlanner struct{ queries []string }
@@ -49,17 +54,19 @@ type tracedResearchModel struct{ calls int }
 
 func (m *tracedResearchModel) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
 	m.calls++
-	text := string(agent.LeaderDelegateResearch)
+	name := "select_leader_route"
+	payload := json.RawMessage(`{"route":"delegate_research","reason_code":"explicit_source_discovery"}`)
 	if m.calls == 2 {
-		text = "QUERY: traced research"
+		name = "submit_research_queries"
+		payload = json.RawMessage(`{"queries":["traced research"]}`)
 	}
 	input, output, total := int64(7), int64(2), int64(9)
 	cost := 0.001
 	return models.ModelOutcome{
-		ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: text}},
+		ModelDecision: models.ModelDecision{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: name, Input: payload}}}},
 		Metadata: models.ModelCallMetadata{
 			RequestedModel: request.Model, SelectedProvider: "test-provider", SelectedModel: "trace-model",
-			ResultKind: models.ModelResultFinalDraft, FinishReason: "stop",
+			ResultKind: models.ModelResultActionProposal, FinishReason: "tool_calls",
 			InputTokens: &input, OutputTokens: &output, TotalTokens: &total,
 			Cost: models.ModelCost{Known: true, Amount: &cost, Currency: "USD", Source: "test"},
 		},
