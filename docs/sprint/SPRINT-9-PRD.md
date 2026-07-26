@@ -3,7 +3,7 @@
 ## Document Status
 
 - **Sprint:** Sprint 9
-- **Status:** Approved design; implementation pending
+- **Status:** Implemented and verified
 - **Date:** 2026-07-26
 - **Theme:** Versioned Agent Configuration and Delegation Hardening
 - **Delivery boundary:** Infrastructure governance and reliability for the existing Leader-to-Research path; no new Member-facing capability, Agent Role, or general workflow framework
@@ -340,3 +340,5 @@ The Sprint does not add a formal offline Agent Eval, live-model promotion gate, 
 ## 20. Definition Of Done
 
 Sprint 9 is done when the approved design and ADR are reflected in implementation, schema, migration, Trace, and deterministic tests; every Success Criterion has evidence; all prior-Sprint tests pass; the existing Source Discovery journey remains compatible; and no deferred capability appears through code, API, database, configuration, or UI.
+
+Implementation evidence is recorded in `docs/sprint/SPRINT-9-ACCEPTANCE.md`.
