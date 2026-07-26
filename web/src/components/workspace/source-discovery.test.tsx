@@ -5,6 +5,48 @@ import { SourceDiscovery } from "./source-discovery";
 
 afterEach(() => vi.unstubAllGlobals());
 
+test("renders a compact Research card with three previews until View is chosen", async () => {
+  const candidates = Array.from({ length: 5 }, (_, index) => ({
+    id: `candidate_${index + 1}`,
+    ordinal: index,
+    title: `Research source ${index + 1}`,
+    canonical_url: `https://example.com/source-${index + 1}`,
+    display_url: `example.com/source-${index + 1}`,
+    snippet: `Summary ${index + 1}.`,
+    selected: true,
+    status: "discovered"
+  }));
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ session: {
+    id: "dsc_compact", notebook_id: "nb_1", query: "compact research", status: "ready", candidates
+  } })));
+  const onViewResults = vi.fn();
+
+  render(<SourceDiscovery
+    notebookID="nb_1"
+    active
+    detailOpen={false}
+    onViewResults={onViewResults}
+    onExpandedChange={vi.fn()}
+    onImported={vi.fn()}
+    copy={{
+      label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
+      selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported",
+      researchComplete: "Research completed", viewResults: "View", moreSources: "{count} more sources"
+    }}
+  />);
+
+  expect(await screen.findByText("Research completed")).toBeVisible();
+  expect(screen.getByRole("link", { name: /Research source 1/ })).toBeVisible();
+  expect(screen.getByRole("link", { name: /Research source 3/ })).toBeVisible();
+  expect(screen.queryByRole("link", { name: /Research source 4/ })).not.toBeInTheDocument();
+  expect(screen.getByText("2 more sources")).toBeVisible();
+  expect(screen.queryByRole("checkbox", { name: "Select all" })).not.toBeInTheDocument();
+
+  await userEvent.setup().click(screen.getByRole("button", { name: "View" }));
+  expect(onViewResults).toHaveBeenCalledTimes(1);
+});
+
 test("searches and renders selected candidates as safe external links with right-side checkboxes", async () => {
   const requests: Array<{ path: string; method: string }> = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -30,7 +72,8 @@ test("searches and renders selected candidates as safe external links with right
     copy={{
       label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
       selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
-      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported"
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported",
+      researchComplete: "Research completed", viewResults: "View", moreSources: "{count} more sources"
     }}
   />);
 
@@ -66,7 +109,8 @@ test("shows a safe error when search admission fails", async () => {
     copy={{
       label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
       selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
-      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported"
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported",
+      researchComplete: "Research completed", viewResults: "View", moreSources: "{count} more sources"
     }}
   />);
   const user = userEvent.setup();
@@ -91,7 +135,8 @@ test("does not render failed import candidates as Source choices", async () => {
     copy={{
       label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
       selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
-      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Ready"
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Ready",
+      researchComplete: "Research completed", viewResults: "View", moreSources: "{count} more sources"
     }}
   />);
 
@@ -114,13 +159,15 @@ test("notifies its owner to collapse after at least one Source is admitted", asy
   render(<SourceDiscovery
     notebookID="nb_1"
     active
+    detailOpen={false}
     onExpandedChange={vi.fn()}
     onImported={vi.fn()}
     onImportAccepted={onImportAccepted}
     copy={{
       label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
       selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
-      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported"
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported",
+      researchComplete: "Research completed", viewResults: "View", moreSources: "{count} more sources"
     }}
   />);
   const user = userEvent.setup();
@@ -146,7 +193,8 @@ test("loads the exact Research session requested by a completed Leader Run", asy
     copy={{
       label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
       selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
-      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported"
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported",
+      researchComplete: "Research completed", viewResults: "View", moreSources: "{count} more sources"
     }}
   />);
   expect(await screen.findByDisplayValue("film lighting")).toBeInTheDocument();
@@ -184,7 +232,8 @@ test("does not reactivate Discovery when clearing the pinned session reveals an 
     copy: {
       label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
       selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
-      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported"
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported",
+      researchComplete: "Research completed", viewResults: "View", moreSources: "{count} more sources"
     }
   };
   const { rerender } = render(<SourceDiscovery {...props} requestedSessionID="dss_research" />);

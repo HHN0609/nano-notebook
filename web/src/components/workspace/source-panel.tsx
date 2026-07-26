@@ -37,6 +37,9 @@ export type SourcePanelCopy = {
   noSearchResultsLabel: string;
   openSearchResultLabel: string;
   sourceImportFailedLabel: string;
+  researchCompleteLabel: string;
+  viewDiscoveryLabel: string;
+  moreSourcesLabel: string;
   readyLabel: string;
   processingLabel: string;
   sourceFailedLabel: string;
@@ -85,7 +88,6 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
   const [editTitle, setEditTitle] = useState("");
   const [removingSource, setRemovingSource] = useState<MemberSource | null>(null);
   const openedDiscoverySessionID = useRef<string | undefined>(undefined);
-  const activateDiscovery = useCallback(() => setDiscoveryOpen(true), []);
   const ignoreDiscoveryExpansion = useCallback(() => undefined, []);
 
   useEffect(() => onDiscoveryModeChange?.(discoveryOpen), [discoveryOpen, onDiscoveryModeChange]);
@@ -94,7 +96,6 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
     if (!requestedDiscoverySessionID || openedDiscoverySessionID.current === requestedDiscoverySessionID || !canMaintain) return;
     openedDiscoverySessionID.current = requestedDiscoverySessionID;
     setPinnedDiscoverySessionID(requestedDiscoverySessionID);
-    setDiscoveryOpen(true);
   }, [canMaintain, requestedDiscoverySessionID]);
 
   async function addFiles(files: FileList | null) {
@@ -206,7 +207,7 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
       <div className="workspace-panel-header">
         <h2>{discoveryOpen ? <span className="source-discovery-breadcrumb"><span>{copy.title}</span><MaterialSymbol name="chevron_right" size={18} /><span>{copy.discoveryTitle}</span></span> : copy.title}</h2>
         {discoveryOpen
-          ? <IconButton icon="close" label={copy.closeLabel} symbolSize={19} onClick={() => { setDiscoveryOpen(false); setPinnedDiscoverySessionID(undefined); }} />
+          ? <IconButton icon="close" label={copy.closeLabel} symbolSize={19} onClick={() => setDiscoveryOpen(false)} />
           : <IconButton icon="right_panel_close" label={copy.collapseLabel} symbolSize={19} onClick={() => toast(copy.comingSoonMessage)} />}
       </div>
       {canMaintain ? <div className={`source-panel-controls${discoveryOpen ? " source-panel-controls--discovery" : ""}`}>
@@ -215,12 +216,12 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
           originChatID={originChatID}
           requestedSessionID={pinnedDiscoverySessionID}
           active
-          showResults={discoveryOpen}
+          detailOpen={discoveryOpen}
           hideLabel
           onExpandedChange={ignoreDiscoveryExpansion}
-          onSessionActive={activateDiscovery}
+          onViewResults={() => setDiscoveryOpen(true)}
           onImported={controller.refresh}
-          onImportAccepted={() => { setDiscoveryOpen(false); setPinnedDiscoverySessionID(undefined); }}
+          onImportAccepted={() => setDiscoveryOpen(false)}
           copy={{
             label: copy.webSearchLabel,
             placeholder: copy.webSearchPlaceholder,
@@ -233,17 +234,15 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
             openResult: copy.openSearchResultLabel,
             importFailed: copy.sourceImportFailedLabel,
             retry: copy.retryLabel,
-            imported: copy.readyLabel
+            imported: copy.readyLabel,
+            researchComplete: copy.researchCompleteLabel,
+            viewResults: copy.viewDiscoveryLabel,
+            moreSources: copy.moreSourcesLabel
           }}
         />
         {!discoveryOpen ? <IconButton className="source-add-action" icon="add" label={copy.addSourcesLabel} onClick={() => setAddOpen(true)} /> : null}
       </div> : null}
-      {discoveryOpen ? (
-        <div className="source-panel-existing-peek">
-          <h3>{copy.title}</h3>
-          {sourceCollection}
-        </div>
-      ) : sourceCollection}
+      {!discoveryOpen ? sourceCollection : null}
 
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
         <DialogContent className="source-dialog" closeLabel={copy.closeLabel}>

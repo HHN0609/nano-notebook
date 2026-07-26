@@ -645,7 +645,7 @@ test("submits one durable Message and projects the final answer from Run SSE", a
   expect(admittedMessageID).not.toBe("");
 });
 
-test("opens the exact delegated Research Session in left-side Discovery while it is searching", async () => {
+test("loads the exact delegated Research Session without opening full Discovery while it is searching", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   let admittedMessageID = "";
   let discoverySessionReads = 0;
@@ -689,14 +689,14 @@ test("opens the exact delegated Research Session in left-side Discovery while it
   });
 
   const sources = screen.getByRole("region", { name: "Sources" });
-  expect(await within(sources).findByText("Source discovery")).toBeInTheDocument();
-  expect(within(sources).getByDisplayValue("Go learning material")).toBeInTheDocument();
+  expect(await within(sources).findByDisplayValue("Go learning material")).toBeInTheDocument();
+  expect(within(sources).queryByText("Source discovery")).not.toBeInTheDocument();
   expect(within(sources).getByRole("status")).toHaveTextContent("Searching…");
   expect(within(sources).getByText("Existing source.pdf")).toBeVisible();
   expect(within(sources).getByRole("checkbox", { name: "Use Existing source.pdf" })).toBeVisible();
-  expect(sources.querySelector(".source-panel-existing-peek")).toBeInTheDocument();
+  expect(sources.querySelector(".source-panel-existing-peek")).not.toBeInTheDocument();
   expect(screen.queryByRole("dialog", { name: "Add sources" })).not.toBeInTheDocument();
-  expect(document.querySelector(".workspace-panels")).toHaveClass("workspace-panels--source-discovery");
+  expect(document.querySelector(".workspace-panels")).not.toHaveClass("workspace-panels--source-discovery");
   const readsBeforeOpen = discoverySessionReads;
   await user.click(within(sources).getByRole("button", { name: "Existing source.pdf" }));
   expect(await within(sources).findByRole("region", { name: "Original source Existing source.pdf" })).toBeInTheDocument();
@@ -704,6 +704,48 @@ test("opens the exact delegated Research Session in left-side Discovery while it
   expect(within(sources).getByDisplayValue("Go learning material")).toBeInTheDocument();
   expect(within(sources).getByRole("status")).toHaveTextContent("Searching…");
   expect(discoverySessionReads).toBe(readsBeforeOpen);
+});
+
+test("opens all ready Research sources only after View and returns to the compact card", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  const workspace = authenticatedWorkspaceHandler();
+  const candidates = Array.from({ length: 4 }, (_, index) => ({
+    id: `candidate_${index + 1}`,
+    ordinal: index,
+    title: `Research source ${index + 1}`,
+    canonical_url: `https://example.com/source-${index + 1}`,
+    display_url: `example.com/source-${index + 1}`,
+    snippet: `Summary ${index + 1}.`,
+    selected: true,
+    status: "discovered"
+  }));
+  fetchHandler = async (input, init) => {
+    if (String(input).endsWith("/api/v1/notebooks/nb_test/source-discovery-sessions/latest")) {
+      return json({ session: { id: "dss_ready", notebook_id: "nb_test", query: "ready research", status: "ready", candidates } });
+    }
+    return workspace(input, init);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const sources = await screen.findByRole("region", { name: "Sources" });
+
+  expect(await within(sources).findByText("Research completed")).toBeVisible();
+  expect(within(sources).getByRole("link", { name: /Research source 3/ })).toBeVisible();
+  expect(within(sources).queryByRole("link", { name: /Research source 4/ })).not.toBeInTheDocument();
+  expect(within(sources).getByText("Additional sources: 1")).toBeVisible();
+  expect(document.querySelector(".workspace-panels")).not.toHaveClass("workspace-panels--source-discovery");
+
+  await user.click(within(sources).getByRole("button", { name: "View" }));
+  expect(await within(sources).findByText("Source discovery")).toBeVisible();
+  expect(within(sources).getByRole("link", { name: /Research source 4/ })).toBeVisible();
+  expect(within(sources).getByRole("checkbox", { name: "Research source 4" })).toBeVisible();
+  expect(document.querySelector(".workspace-panels")).toHaveClass("workspace-panels--source-discovery");
+
+  await user.click(within(sources).getByRole("button", { name: "Close" }));
+  expect(await within(sources).findByText("Research completed")).toBeVisible();
+  expect(within(sources).queryByRole("link", { name: /Research source 4/ })).not.toBeInTheDocument();
+  expect(document.querySelector(".workspace-panels")).not.toHaveClass("workspace-panels--source-discovery");
 });
 
 test("creates the first private Chat with one bootstrap idempotency key", async () => {

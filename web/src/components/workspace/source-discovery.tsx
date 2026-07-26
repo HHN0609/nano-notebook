@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useState } from "react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { MaterialSymbol } from "../icons/material-symbol";
 import { csrfToken, memberAPI } from "./source-upload";
 import { SourceSiteIcon } from "./source-site-icon";
 
@@ -48,18 +49,23 @@ export type SourceDiscoveryCopy = {
   importFailed: string;
   retry: string;
   imported: string;
+  researchComplete: string;
+  viewResults: string;
+  moreSources: string;
 };
 
-export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, active, showResults = true, hideLabel = false, copy, onExpandedChange, onSessionActive, onImported, onImportAccepted }: {
+export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, active, showResults = true, detailOpen = showResults, hideLabel = false, copy, onExpandedChange, onSessionActive, onViewResults, onImported, onImportAccepted }: {
   notebookID: string;
   originChatID?: string;
   requestedSessionID?: string;
   active: boolean;
   showResults?: boolean;
+  detailOpen?: boolean;
   hideLabel?: boolean;
   copy: SourceDiscoveryCopy;
   onExpandedChange: (expanded: boolean) => void;
   onSessionActive?: () => void;
+  onViewResults?: () => void;
   onImported: () => void | Promise<unknown>;
   onImportAccepted?: () => void;
 }) {
@@ -68,10 +74,12 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
   const [session, setSession] = useState<DiscoverySession | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const visibleCandidates = useMemo(() => session?.candidates.filter((candidate) => candidate.status !== "import_failed") ?? [], [session]);
-  const expanded = session?.status === "ready" && visibleCandidates.length > 0;
+  const visibleCandidates = useMemo(() => (session?.candidates.filter((candidate) => candidate.status !== "import_failed") ?? []).sort((left, right) => left.ordinal - right.ordinal), [session]);
+  const hasResults = session?.status === "ready" && visibleCandidates.length > 0;
+  const previewCandidates = visibleCandidates.slice(0, 3);
+  const remainingCandidateCount = Math.max(0, visibleCandidates.length - previewCandidates.length);
 
-  useEffect(() => onExpandedChange(Boolean(showResults && expanded)), [expanded, onExpandedChange, showResults]);
+  useEffect(() => onExpandedChange(Boolean(showResults && detailOpen && hasResults)), [detailOpen, hasResults, onExpandedChange, showResults]);
   useEffect(() => {
     if (!active) {
       onExpandedChange(false);
@@ -191,13 +199,32 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
     <Label className={hideLabel ? "sr-only" : undefined} htmlFor={searchInputID}>{copy.label}</Label>
     <form className="source-discovery-search" onSubmit={(event) => { event.preventDefault(); void search(); }}>
       <Input id={searchInputID} type="search" value={query} placeholder={copy.placeholder} onChange={(event) => setQuery(event.target.value)} />
-      <Button type="submit" disabled={!query.trim() || busy}>{session?.status === "searching" ? copy.searching : copy.search}</Button>
+      <Button type="submit" aria-label={session?.status === "searching" ? copy.searching : copy.search} disabled={!query.trim() || busy}><MaterialSymbol name="search" size={20} /></Button>
     </form>
     {showResults && session?.status === "searching" ? <p className="source-discovery-status" role="status">{copy.searching}</p> : null}
     {showResults && error ? <p className="source-discovery-error" role="alert">{error}</p> : null}
     {showResults && session?.status === "failed" ? <div><p className="source-discovery-error" role="alert">{copy.failed}</p><Button variant="outline" disabled={busy} onClick={() => void retrySearch()}>{copy.retry}</Button></div> : null}
     {showResults && session?.status === "ready" && visibleCandidates.length === 0 ? <p className="source-discovery-status">{copy.noResults}</p> : null}
-    {showResults && expanded ? <div className="source-discovery-expanded">
+    {showResults && hasResults && !detailOpen ? <div className="source-discovery-card">
+      <div className="source-discovery-card-header">
+        <strong><MaterialSymbol name="travel_explore" size={19} />{copy.researchComplete}</strong>
+        <Button className="source-discovery-view" variant="link" size="sm" onClick={onViewResults}>{copy.viewResults}</Button>
+      </div>
+      <div className="source-discovery-previews">
+        {previewCandidates.map((candidate) => <article className="source-discovery-preview" key={candidate.id}>
+          <SourceSiteIcon className="source-discovery-site-icon" href={candidate.canonical_url} preferredSrc={candidate.favicon_ref} />
+          <div className="source-discovery-preview-copy">
+            <a href={candidate.canonical_url} target="_blank" rel="noreferrer noopener" aria-label={`${candidate.title} · ${copy.openResult}`}>{candidate.title}</a>
+            <p>{candidate.snippet}</p>
+          </div>
+        </article>)}
+      </div>
+      {remainingCandidateCount > 0 ? <p className="source-discovery-more"><MaterialSymbol name="link" size={17} />{copy.moreSources.replace("{count}", String(remainingCandidateCount))}</p> : null}
+      <div className="source-discovery-card-actions">
+        <Button className="source-discovery-import" disabled={selectedIDs.length === 0 || busy} onClick={() => void importSelected()}><MaterialSymbol name="add" size={18} />{copy.importSelected}</Button>
+      </div>
+    </div> : null}
+    {showResults && hasResults && detailOpen ? <div className="source-discovery-expanded">
       {session.summary ? <p className="source-discovery-summary">{session.summary}</p> : null}
       <div className="source-discovery-toolbar">
         <label>{copy.selectAll}<input aria-label={copy.selectAll} type="checkbox" checked={allSelected} onChange={() => void replaceSelection(allSelected ? [] : importable.map((candidate) => candidate.id))} /></label>
