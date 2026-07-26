@@ -44,9 +44,33 @@ _Avoid_: Queue item, model request
 The only Member-facing Agent Run. It durably routes a Chat turn into ordinary conversation or explicit Source Discovery delegation and remains the sole authority allowed to publish the Assistant Message.
 _Avoid_: HTTP router, hidden child Run, general orchestrator
 
+**Leader Route Decision**:
+The typed model classification of the current Member turn as `continue_chat` or requested `delegate_research`, with a bounded intent reason. Recent completed conversation may resolve references, but only the current turn can explicitly request new Source Discovery; the decision grants no authority by itself.
+_Avoid_: Tool permission, inherited search mode, model reasoning text
+
+**Delegation Policy**:
+The deterministic application gate that converts a requested Leader Route Decision into an effective route after checking Member authority, registered Role relationships, active-child limits, Provider availability, and root Run validity. Requested and effective routes remain distinguishable in durable state.
+_Avoid_: Router prompt, model authorization, silent policy inference
+
 **Research child Run**:
-An internal Agent Run linked to a Leader through `parent_run_id`. It may create one private Discovery Session through the bounded Web Search Provider and cannot publish Chat content or import Sources.
+An internal Agent Run linked to a Leader through one durable Agent Delegation. It may create one private Discovery Session through the bounded Web Search Provider and cannot publish Chat content, import Sources, or delegate another Run.
 _Avoid_: Research answer, prompt mode, crawler
+
+**Agent Role**:
+An application-registered execution responsibility that determines an Agent Run's executor, configuration policy, visibility, and permitted delegation relationships. A Role is fixed by deployed product code and cannot be invented or installed by a model or Member.
+_Avoid_: Prompt persona, dynamic plugin, user-defined agent
+
+**Delegation Kernel**:
+The bounded Agent runtime capability that owns parent-child Run creation, waiting, continuation, cancellation propagation, and terminal handoff independently of any child Role's domain work. It executes only application-registered relationships and is not a general workflow graph.
+_Avoid_: Research executor, workflow engine, agent-to-agent chat
+
+**Agent Delegation**:
+The durable lifecycle relationship between one parent Agent Run and one application-registered child Agent Run. Its generic record preserves relationship identity, ordinal, terminal status, safe failure, and parent consumption separately from any Role-owned outcome such as a Discovery Session.
+_Avoid_: Research query plan, child result payload, workflow edge
+
+**Delegation Outcome**:
+The durable terminal handoff from one child Agent Run to its parent, with a bounded status and a Role-owned result or safe error reference. The Delegation Kernel records and delivers the outcome, while the parent Role decides whether to continue, degrade, or fail; consuming the outcome does not erase its terminal status, and the current Research policy maps child failure to Leader failure.
+_Avoid_: Assistant answer, kernel business decision, implicit fallback
 
 **Run Retry**:
 An explicit user request to answer the latest unanswered input Message again after its prior Run was cancelled or failed. It creates a new Agent Run, is unavailable after the Chat advances, and is distinct from automatic execution attempts inside an existing Run.
@@ -60,6 +84,10 @@ _Avoid_: Pause, process kill, guaranteed Provider cancellation
 The single internal durable delivery record that tells an Agent Worker which Run to advance across its model and Action steps. It remains one Job across Checkpoints and infrastructure Attempts, and the browser never depends on its state.
 _Avoid_: Agent Run, frontend status
 
+**Attempt Disposition**:
+The typed execution-host decision produced when one leased Agent Attempt stops advancing: `completed`, `waiting`, `retryable`, `terminal`, or `abandoned`. An abandoned Attempt has a bounded cause such as `lease_lost` or `cancelled` and can commit no further effect. Retryable work is deliberately requeued with bounded backoff under the same Run, Configuration Set, deadline, and Checkpoints; Lease expiry remains only the recovery fallback when disposition cannot be committed.
+_Avoid_: Raw executor error, implicit Lease timeout, user Run Retry
+
 **Job Lease**:
 An expiring claim that permits one Worker attempt to advance a Job while heartbeats continue. Lease expiry enables recovery and does not imply that the prior attempt produced no side effects.
 _Avoid_: Lock, exactly-once execution
@@ -69,7 +97,7 @@ The identity of the current leased execution of a Job. Reclaiming the Job replac
 _Avoid_: Session token, Worker identity, permanent ownership
 
 **Run Checkpoint**:
-An immutable, Provider-neutral durable boundary after an Agent outcome is accepted, from which later execution can reuse accepted results and continue with the first incomplete step. It contains no transient running state, raw Provider payload, or diagnostic history and is not a snapshot of a Worker process or an in-flight model generation.
+An immutable, Provider-neutral durable boundary after an Agent outcome is accepted, from which later execution can reuse accepted results and continue with the first incomplete step. Its stable identity envelope is shared by Agent Roles, while each Role owns the typed payload schema for its bounded steps. It contains no transient running state, raw Provider payload, or diagnostic history and is not a snapshot of a Worker process or an in-flight model generation.
 _Avoid_: Mutable step status, process snapshot, partial-token continuation, Durable Agent Trace
 
 **Workload Class**:
@@ -136,6 +164,34 @@ _Avoid_: Silent fallback, successful hybrid retrieval, insufficient evidence
 
 ## Agent Execution
 
+**Prompt Catalog**:
+The application-owned collection of immutable, explicitly versioned instructions used by production Model Calls and model-assisted Source processing. Each use resolves one exact Prompt identity rather than depending on mutable or ad hoc instruction text.
+_Avoid_: Inline system prompt, mutable prompt alias, remote prompt console
+
+**Prompt Version**:
+An immutable identified revision of one Prompt Catalog instruction and its model-facing contract. Once admitted for an Agent Run or Source-processing operation, it remains fixed across execution attempts and continuations.
+_Avoid_: Current prompt, mutable template, deployment default
+
+**Prompt Contract**:
+The application-owned typed input or output shape paired with a Prompt Version and enforced independently of instruction wording. It bounds model communication without granting execution authority or accepting free-form reasoning as control state.
+_Avoid_: Prompt formatting convention, model suggestion, chain of thought
+
+**Agent Prompt Set**:
+An immutable compatibility set that binds the Prompt Versions and Prompt Contracts available to one Agent Run. A Research child inherits its parent Leader's set, while non-Agent model-assisted work pins Prompt Versions through its own configuration lifecycle.
+_Avoid_: Global prompt bundle, current deployment prompts, per-call latest prompt
+
+**Agent Configuration Set**:
+The immutable compatibility configuration pinned when a Leader Run is admitted. It identifies the registered Agent Role Profiles and shared root policies that must remain fixed across delegation, continuation, and infrastructure retry; a child carries the same set identity but resolves its own Role Profile.
+_Avoid_: Current server config, mutable feature flags, copied parent settings
+
+**Agent Configuration Lifecycle**:
+The bounded `expand -> activate -> retire` deployment protocol for immutable Agent Configuration Sets and their executor contracts. A release adds support before admission activates it and may retire old support only after durable state proves that no non-terminal Run still references it; unsupported active configuration prevents Worker readiness rather than failing the Run.
+_Avoid_: Latest-only deployment, runtime hot switch, capability-aware scheduler
+
+**Agent Role Profile**:
+The application-owned configuration for one Agent Role within an Agent Configuration Set, including model policy, Prompt bindings, allowed tools or Providers, local Run Budget, and executor compatibility. It cannot expand the Role relationships or Member authority registered in product code.
+_Avoid_: Agent persona, user-selected model, runtime plugin
+
 **Run Evidence Set**:
 The fixed set of immutable Sources and their active Evidence Revisions selected when a question creates an Agent Run. The Run also pins the corresponding Retrieval Index Version; later Chat selection, Source processing, and new Sources do not enter it, while deletion of a member Source invalidates the active Run rather than silently changing its evidence.
 _Avoid_: Current Sources, live Notebook contents
@@ -177,7 +233,7 @@ An accepted model-produced plain-text candidate answer that may become an Assist
 _Avoid_: Assistant Message, published answer, raw model response
 
 **Run Budget**:
-The limits pinned to one Agent Run for model decisions, accepted logical Agent Actions, elapsed time, and retained Action Result size. Success and expected domain error consume one Action each, recovery re-execution does not consume another, and one final model decision without Actions is reserved for graceful exhaustion.
+The limits pinned to one Agent Run for model decisions, accepted logical Agent Actions, elapsed time, and retained Action Result size. Success and expected domain error consume one Action each, recovery re-execution does not consume another, and one final model decision without Actions is reserved for graceful exhaustion. A delegated child shares its root Leader's absolute deadline and adds Role-local limits; delegation never resets or pauses elapsed time.
 _Avoid_: Provider quota, Job retry policy, context window
 
 **Fixed Agent Loop**:
