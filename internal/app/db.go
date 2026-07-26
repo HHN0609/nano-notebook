@@ -1524,10 +1524,6 @@ create table if not exists agent_jobs (
 	)
 );
 
-create index if not exists agent_jobs_queued_idx
-	on agent_jobs(available_at, created_at, id)
-	where status = 'queued';
-
 -- Upgrade Sprint 2A databases in place. A process restart may leave an old
 -- running row without a lease, so make that work claimable by lease-aware
 -- workers.
