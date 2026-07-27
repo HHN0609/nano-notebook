@@ -17,6 +17,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/otelbridge"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
@@ -28,6 +29,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
+	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
@@ -46,6 +48,7 @@ import (
 type workerConfig struct {
 	DatabaseURL                    string
 	AgentConfigurationID           string
+	AgentRelease                   agentcatalog.Reference
 	LeaderModel                    string
 	ResearchModel                  string
 	Addr                           string
@@ -144,6 +147,20 @@ func main() {
 	defer db.Close()
 	if err := app.VerifyEmbeddedPromptCatalog(ctx, db); err != nil {
 		slog.Error("worker Prompt Catalog readiness failed", "error", err)
+		os.Exit(1)
+	}
+	definitionCatalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		slog.Error("worker Agent Catalog invalid", "error", err)
+		os.Exit(1)
+	}
+	promptCatalog, err := promptcatalog.LoadEmbedded()
+	if err != nil {
+		slog.Error("worker Prompt Catalog invalid", "error", err)
+		os.Exit(1)
+	}
+	if _, err := app.VerifyAgentCatalogReady(ctx, db, definitionCatalog, config.AgentRelease); err != nil {
+		slog.Error("worker Agent Catalog readiness failed", "release", config.AgentRelease, "error", err)
 		os.Exit(1)
 	}
 	_, supportedAgentConfiguration, err := agent.DefaultAgentConfigurationBundle(
@@ -315,15 +332,22 @@ func main() {
 		agent.NewModelResearchPlanner(modelClient), searchProvider, agent.WithLeaderTraceSink(traceExporter),
 		agent.WithLeaderReplayStager(replayStager), agent.WithResearchCandidateValidator(candidateValidator),
 	)
-	roleRegistry, err := agent.NewRoleRegistry(
-		agent.RoleRegistration{Role: agent.RoleLeader, ExecutorVersion: supportedAgentConfiguration.Profiles[agent.RoleLeader].ExecutorVersion, Executor: agent.NewLeaderRoleExecutor(roleRuntime)},
-		agent.RoleRegistration{Role: agent.RoleResearch, ExecutorVersion: supportedAgentConfiguration.Profiles[agent.RoleResearch].ExecutorVersion, Executor: agent.NewResearchRoleExecutor(roleRuntime)},
+	leaderExecutor := agent.NewLeaderRoleExecutor(roleRuntime)
+	researchExecutor := agent.NewResearchRoleExecutor(roleRuntime)
+	configuredRegistry, err := agent.NewNanoExecutorRegistry(definitionCatalog, promptCatalog, leaderExecutor, researchExecutor)
+	if err != nil {
+		slog.Error("Agent Executor Registry invalid", "error", err)
+		os.Exit(1)
+	}
+	legacyRegistry, err := agent.NewRoleRegistry(
+		agent.RoleRegistration{Role: agent.RoleLeader, ExecutorVersion: supportedAgentConfiguration.Profiles[agent.RoleLeader].ExecutorVersion, Executor: leaderExecutor},
+		agent.RoleRegistration{Role: agent.RoleResearch, ExecutorVersion: supportedAgentConfiguration.Profiles[agent.RoleResearch].ExecutorVersion, Executor: researchExecutor},
 	)
 	if err != nil {
 		slog.Error("Agent Role Registry invalid", "error", err)
 		os.Exit(1)
 	}
-	executionHost, err := agent.NewAgentExecutionHost(db.Pool(), roleRegistry)
+	executionHost, err := agent.NewAgentExecutionHost(db.Pool(), legacyRegistry, configuredRegistry)
 	if err != nil {
 		slog.Error("Agent Execution Host invalid", "error", err)
 		os.Exit(1)
@@ -527,6 +551,10 @@ func shutdownTraceExporter(ctx context.Context, exporter interface {
 }
 
 func loadWorkerConfig() (workerConfig, error) {
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@1"))
+	if err != nil {
+		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
+	}
 	maxRecords, err := workerEnvInt("NANO_TRACE_BATCH_MAX_RECORDS", 128)
 	if err != nil {
 		return workerConfig{}, err
@@ -663,6 +691,7 @@ func loadWorkerConfig() (workerConfig, error) {
 	config := workerConfig{
 		DatabaseURL:           env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
 		AgentConfigurationID:  env("NANO_AGENT_CONFIGURATION_ID", "nano-interactive-v1"),
+		AgentRelease:          agentRelease,
 		LeaderModel:           env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
 		ResearchModel:         env("NANO_RESEARCH_MODEL", env("NANO_CHAT_MODEL", "aliyun/qwen-plus")),
 		Addr:                  env("NANO_WORKER_ADDR", ":8081"),

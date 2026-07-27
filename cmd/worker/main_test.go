@@ -39,6 +39,16 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	if config.FetcherURL != "http://127.0.0.1:8083" {
 		t.Fatalf("Fetcher URL default=%q", config.FetcherURL)
 	}
+	if config.AgentRelease.String() != "nano.default@1" {
+		t.Fatalf("Agent release default=%q", config.AgentRelease)
+	}
+}
+
+func TestLoadWorkerConfigRejectsMutableAgentRelease(t *testing.T) {
+	t.Setenv("NANO_AGENT_RELEASE", "nano.default@latest")
+	if _, err := loadWorkerConfig(); err == nil {
+		t.Fatal("loadWorkerConfig accepted mutable Agent release")
+	}
 }
 
 func TestLoadWorkerConfigAcceptsRequiredRetrievalAuthority(t *testing.T) {

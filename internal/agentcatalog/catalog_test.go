@@ -168,6 +168,7 @@ func TestValidateBindingsAllowsOnlyCapabilityNarrowing(t *testing.T) {
 		Executors: map[string]ExecutorCapability{
 			"test": {
 				PromptPurposes: map[string]bool{"main": true}, Tools: map[string]bool{"tool": true},
+				Contracts: map[Reference]bool{MustParseReference("input.test@1"): true, MustParseReference("result.test@1"): true},
 				MaxLimits: Limits{ModelCalls: 2, Actions: 2, ActionBatch: 2, ContextBytes: 2048, ResultBytes: 2048, Attempts: 2},
 			},
 		},
@@ -180,6 +181,7 @@ func TestValidateBindingsAllowsOnlyCapabilityNarrowing(t *testing.T) {
 	bad.Executors = map[string]ExecutorCapability{
 		"test": {
 			PromptPurposes: map[string]bool{"main": true}, Tools: map[string]bool{"other": true},
+			Contracts: map[Reference]bool{MustParseReference("input.test@1"): true, MustParseReference("result.test@1"): true},
 			MaxLimits: Limits{ModelCalls: 1, Actions: 1, ActionBatch: 1, ContextBytes: 1024, ResultBytes: 1024, Attempts: 1},
 		},
 	}

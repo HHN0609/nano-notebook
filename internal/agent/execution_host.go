@@ -10,19 +10,20 @@ import (
 // AgentExecutionHost owns Role/executor compatibility dispatch. It does not
 // interpret Role outcomes or delegation payloads.
 type AgentExecutionHost struct {
-	pool     *pgxpool.Pool
-	registry *RoleRegistry
+	pool               *pgxpool.Pool
+	legacyRegistry     *RoleRegistry
+	configuredRegistry *ExecutorRegistry
 }
 
-func NewAgentExecutionHost(pool *pgxpool.Pool, registry *RoleRegistry) (*AgentExecutionHost, error) {
-	if pool == nil || registry == nil {
+func NewAgentExecutionHost(pool *pgxpool.Pool, legacyRegistry *RoleRegistry, configuredRegistry *ExecutorRegistry) (*AgentExecutionHost, error) {
+	if pool == nil || legacyRegistry == nil || configuredRegistry == nil {
 		return nil, errors.New("Agent Execution Host dependencies are incomplete")
 	}
-	return &AgentExecutionHost{pool: pool, registry: registry}, nil
+	return &AgentExecutionHost{pool: pool, legacyRegistry: legacyRegistry, configuredRegistry: configuredRegistry}, nil
 }
 
 func (h *AgentExecutionHost) ExecuteAttempt(ctx context.Context, attempt Attempt) AttemptResolution {
-	if h == nil || h.pool == nil || h.registry == nil {
+	if h == nil || h.pool == nil || h.legacyRegistry == nil || h.configuredRegistry == nil {
 		return ClassifyAttempt(errors.New("Agent Execution Host is invalid"), context.Cause(ctx))
 	}
 	var role AgentRole
@@ -32,7 +33,7 @@ func (h *AgentExecutionHost) ExecuteAttempt(ctx context.Context, attempt Attempt
 	`, attempt.RunID).Scan(&role, &executorVersion); err != nil {
 		return ClassifyAttempt(err, context.Cause(ctx))
 	}
-	executor, err := h.registry.Resolve(role, executorVersion)
+	executor, err := h.legacyRegistry.Resolve(role, executorVersion)
 	if err != nil {
 		return ClassifyAttempt(err, context.Cause(ctx))
 	}
