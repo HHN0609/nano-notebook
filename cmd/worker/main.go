@@ -169,6 +169,12 @@ func main() {
 		slog.Error("worker Agent Catalog release has no Chat root", "release", config.AgentRelease)
 		os.Exit(1)
 	}
+	chatDefinition, ok := definitionCatalog.ResolveDefinition(chatRoot)
+	if !ok || len(chatDefinition.Children) != 1 {
+		slog.Error("worker Chat root has invalid configured child topology", "definition", chatRoot)
+		os.Exit(1)
+	}
+	researchChild := chatDefinition.Children[0]
 	_, supportedAgentConfiguration, err := agent.DefaultAgentConfigurationBundle(
 		config.AgentConfigurationID, config.LeaderModel, config.ResearchModel, agent.DefaultRunConfig(config.AgentConfigurationID),
 	)
@@ -292,36 +298,6 @@ func main() {
 		slog.Error("Agent Trace purge Sender invalid", "error", err)
 		os.Exit(1)
 	}
-	grounder := agent.NewGroundingService(db.Pool())
-	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
-		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge),
-		agent.WithReplayStager(replayStager), agent.WithGroundingService(grounder))
-	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient)
-	calculateTool := agent.NewCalculateAction()
-	currentTimeTool := agent.NewCurrentTimeAction(nil)
-	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
-	registry, err := agent.NewActionRegistry(
-		calculateTool, currentTimeTool, searchEvidenceTool,
-	)
-	if err != nil {
-		slog.Error("worker Action registry invalid", "error", err)
-		os.Exit(1)
-	}
-	mcpToolRegistry, err := agent.NewMCPToolRegistry(
-		agent.MCPToolRegistration{Action: calculateTool, Scheduling: agentcatalog.ToolOrderedSync},
-		agent.MCPToolRegistration{Action: currentTimeTool, Scheduling: agentcatalog.ToolOrderedSync},
-		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolOrderedSync},
-	)
-	if err != nil {
-		slog.Error("worker MCP Tool Registry invalid", "error", err)
-		os.Exit(1)
-	}
-	mcpToolHost, err := agent.NewMCPToolHost(definitionCatalog, mcpToolRegistry, runtime)
-	if err != nil {
-		slog.Error("worker MCP Tool Host invalid", "error", err)
-		os.Exit(1)
-	}
-	controller := agent.NewMCPController(runtime, modelClient, registry, mcpToolHost, chatRoot)
 	var searchProvider websearch.Provider = notConfiguredWebSearchProvider{}
 	if config.BraveSearchAPIKey != "" {
 		searchProvider, err = websearch.NewBraveProvider(websearch.BraveConfig{
@@ -333,6 +309,38 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	grounder := agent.NewGroundingService(db.Pool())
+	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
+		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge),
+		agent.WithReplayStager(replayStager), agent.WithGroundingService(grounder))
+	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient)
+	calculateTool := agent.NewCalculateAction()
+	currentTimeTool := agent.NewCurrentTimeAction(nil)
+	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
+	webSearchTool := agent.NewWebSearchAction(searchProvider)
+	registry, err := agent.NewActionRegistry(
+		calculateTool, currentTimeTool, searchEvidenceTool, webSearchTool,
+	)
+	if err != nil {
+		slog.Error("worker Action registry invalid", "error", err)
+		os.Exit(1)
+	}
+	mcpToolRegistry, err := agent.NewMCPToolRegistry(
+		agent.MCPToolRegistration{Action: calculateTool, Scheduling: agentcatalog.ToolOrderedSync},
+		agent.MCPToolRegistration{Action: currentTimeTool, Scheduling: agentcatalog.ToolOrderedSync},
+		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolOrderedSync},
+		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync},
+	)
+	if err != nil {
+		slog.Error("worker MCP Tool Registry invalid", "error", err)
+		os.Exit(1)
+	}
+	mcpToolHost, err := agent.NewMCPToolHost(definitionCatalog, mcpToolRegistry, runtime)
+	if err != nil {
+		slog.Error("worker MCP Tool Host invalid", "error", err)
+		os.Exit(1)
+	}
+	controller := agent.NewMCPController(runtime, modelClient, registry, mcpToolHost, chatRoot)
 	remoteFetcher, err := fetcher.NewRemoteClient(
 		config.FetcherURL,
 		&http.Client{Timeout: 30 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)},
@@ -354,6 +362,7 @@ func main() {
 		db.Pool(), controller, agent.NewModelLeaderRouter(modelClient),
 		agent.NewModelResearchPlanner(modelClient), searchProvider, agent.WithLeaderTraceSink(traceExporter),
 		agent.WithLeaderReplayStager(replayStager), agent.WithResearchCandidateValidator(candidateValidator),
+		agent.WithResearchMCPToolPlane(mcpToolHost, researchChild),
 	)
 	leaderExecutor := agent.NewLeaderRoleExecutor(roleRuntime)
 	researchExecutor := agent.NewResearchRoleExecutor(roleRuntime)

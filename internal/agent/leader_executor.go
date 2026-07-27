@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
@@ -31,6 +33,8 @@ type LeaderExecutor struct {
 	router             LeaderRouter
 	planner            ResearchPlanner
 	provider           websearch.Provider
+	researchToolHost   *MCPToolHost
+	researchDefinition agentcatalog.Reference
 	candidateValidator sourcediscovery.CandidateValidator
 	traceSink          TraceSink
 	replayStager       ReplayStager
@@ -48,6 +52,13 @@ func WithLeaderReplayStager(stager ReplayStager) LeaderExecutorOption {
 
 func WithResearchCandidateValidator(validator sourcediscovery.CandidateValidator) LeaderExecutorOption {
 	return func(executor *LeaderExecutor) { executor.candidateValidator = validator }
+}
+
+func WithResearchMCPToolPlane(host *MCPToolHost, definition agentcatalog.Reference) LeaderExecutorOption {
+	return func(executor *LeaderExecutor) {
+		executor.researchToolHost = host
+		executor.researchDefinition = definition
+	}
 }
 
 func NewLeaderExecutor(pool *pgxpool.Pool, normal AttemptExecutor, router LeaderRouter, planner ResearchPlanner, provider websearch.Provider, options ...LeaderExecutorOption) *LeaderExecutor {
@@ -352,24 +363,44 @@ func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, r
 		}
 		progress.Plan = queries
 	}
-	resultGroups := make([][]websearch.Candidate, len(progress.Plan))
-	for ordinal, query := range progress.Plan {
-		if accepted, ok := progress.Results[ordinal]; ok {
-			resultGroups[ordinal] = accepted
-			continue
-		}
-		results, searchErr := e.provider.Search(ctx, websearch.Request{Query: query, Count: 10})
-		if searchErr != nil {
-			return searchErr
-		}
-		checkpoint, err := NewRoleCheckpoint(RoleResearch, ResearchStepSearchResult, ordinal, ResearchSearchResult{Query: query, Candidates: results})
+	var resultGroups [][]websearch.Candidate
+	if e.researchToolHost != nil {
+		resultGroups, err = e.searchResearchQueries(ctx, attempt, run, progress)
 		if err != nil {
 			return err
 		}
-		if err := e.appendResearchCheckpoint(ctx, attempt, checkpoint); err != nil {
-			return err
+		for ordinal, query := range progress.Plan {
+			if _, accepted := progress.Results[ordinal]; accepted {
+				continue
+			}
+			checkpoint, err := NewRoleCheckpoint(RoleResearch, ResearchStepSearchResult, ordinal, ResearchSearchResult{Query: query, Candidates: resultGroups[ordinal]})
+			if err != nil {
+				return err
+			}
+			if err := e.appendResearchCheckpoint(ctx, attempt, checkpoint); err != nil {
+				return err
+			}
 		}
-		resultGroups[ordinal] = results
+	} else {
+		resultGroups = make([][]websearch.Candidate, len(progress.Plan))
+		for ordinal, query := range progress.Plan {
+			if accepted, ok := progress.Results[ordinal]; ok {
+				resultGroups[ordinal] = accepted
+				continue
+			}
+			results, searchErr := e.provider.Search(ctx, websearch.Request{Query: query, Count: 10})
+			if searchErr != nil {
+				return searchErr
+			}
+			checkpoint, err := NewRoleCheckpoint(RoleResearch, ResearchStepSearchResult, ordinal, ResearchSearchResult{Query: query, Candidates: results})
+			if err != nil {
+				return err
+			}
+			if err := e.appendResearchCheckpoint(ctx, attempt, checkpoint); err != nil {
+				return err
+			}
+			resultGroups[ordinal] = results
+		}
 	}
 	candidates := mergeResearchCandidates(resultGroups)
 	if e.candidateValidator != nil {
@@ -382,6 +413,64 @@ func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, r
 		candidates = validated
 	}
 	return e.completeResearch(ctx, attempt, candidates)
+}
+
+func (e *LeaderExecutor) searchResearchQueries(ctx context.Context, attempt Attempt, run leaderRunContext, progress ResearchProgress) ([][]websearch.Candidate, error) {
+	groups := make([][]websearch.Candidate, len(progress.Plan))
+	missing := false
+	for ordinal, accepted := range progress.Results {
+		if ordinal >= 0 && ordinal < len(groups) {
+			groups[ordinal] = append([]websearch.Candidate(nil), accepted...)
+		}
+	}
+	for ordinal := range progress.Plan {
+		if _, accepted := progress.Results[ordinal]; !accepted {
+			missing = true
+		}
+	}
+	if !missing {
+		return groups, nil
+	}
+	if e == nil || e.researchToolHost == nil {
+		return nil, errors.New("Research MCP Tool Plane is unavailable")
+	}
+	session, err := e.researchToolHost.OpenAttempt(ctx, AttemptToolScope{
+		Definition: e.researchDefinition, Attempt: attempt, DefaultTimeZone: run.TimeZone,
+		RemainingActions: 1, Deadline: run.DeadlineAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer session.Close()
+	input, err := json.Marshal(webSearchInput{Queries: progress.Plan})
+	if err != nil {
+		return nil, err
+	}
+	result, err := session.CallTool(ctx, "web_search", input, "research:web_search:0")
+	if err != nil {
+		return nil, err
+	}
+	var output webSearchOutput
+	if result.Status != ActionSucceeded || json.Unmarshal(result.Output, &output) != nil || len(output.Results) != len(progress.Plan) {
+		return nil, websearch.ErrInvalidResponse
+	}
+	for ordinal, item := range output.Results {
+		if item.Query != progress.Plan[ordinal] {
+			return nil, websearch.ErrInvalidResponse
+		}
+		if _, accepted := progress.Results[ordinal]; accepted {
+			continue
+		}
+		group := make([]websearch.Candidate, 0, len(item.Candidates))
+		for _, candidate := range item.Candidates {
+			group = append(group, websearch.Candidate{
+				Title: candidate.Title, URL: candidate.URL, DisplayURL: candidate.DisplayURL,
+				Description: candidate.Description, Rank: candidate.Rank,
+			})
+		}
+		groups[ordinal] = group
+	}
+	return groups, nil
 }
 
 func (e *LeaderExecutor) loadResearchProgress(ctx context.Context, attempt Attempt) (ResearchProgress, error) {

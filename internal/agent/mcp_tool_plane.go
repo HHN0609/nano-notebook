@@ -16,6 +16,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -404,10 +405,7 @@ func (s *MCPAttemptSession) CallTool(ctx context.Context, name string, input jso
 		return ActionResult{}, &ToolCallError{Kind: ToolErrorInvariant, Code: "mcp_result_invalid", Cause: err}
 	}
 	if result.IsError {
-		var cause error
-		if envelope.ErrorCode == "attempt_authority_lost" {
-			cause = ErrLeaseLost
-		}
+		cause := mcpToolErrorCause(envelope.ErrorCode)
 		return ActionResult{}, &ToolCallError{Kind: envelope.ErrorKind, Code: envelope.ErrorCode, Cause: cause}
 	}
 	actionResult := ActionResult{Status: envelope.Status, Output: envelope.Output, ErrorCode: envelope.ErrorCode}
@@ -481,13 +479,7 @@ func (h *MCPToolHost) executeMCPTool(ctx context.Context, request *mcp.CallToolR
 		ActionID: actionID, Input: input, DefaultTimeZone: record.defaultTimeZone, Attempt: record.attempt,
 	})
 	if err != nil {
-		kind := ToolErrorInfrastructure
-		code := "tool_execution_failed"
-		if errors.Is(err, ErrLeaseLost) || errors.Is(err, ErrRunDeadlineExceeded) || errors.Is(err, context.Canceled) {
-			kind, code = ToolErrorAuthorization, "attempt_authority_lost"
-		} else if errors.Is(err, context.DeadlineExceeded) {
-			code = "tool_execution_timeout"
-		}
+		kind, code := classifyMCPToolExecutionError(err)
 		return mcpToolErrorResult(kind, code), nil
 	}
 	if err := result.Validate(); err != nil {
@@ -497,6 +489,48 @@ func (h *MCPToolHost) executeMCPTool(ctx context.Context, request *mcp.CallToolR
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(result.Status)}}, StructuredContent: envelope,
 	}, nil
+}
+
+func classifyMCPToolExecutionError(err error) (ToolErrorKind, string) {
+	switch {
+	case errors.Is(err, ErrLeaseLost), errors.Is(err, ErrRunDeadlineExceeded), errors.Is(err, context.Canceled):
+		return ToolErrorAuthorization, "attempt_authority_lost"
+	case errors.Is(err, websearch.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
+		return ToolErrorInfrastructure, "discovery_timeout"
+	case errors.Is(err, websearch.ErrRateLimited):
+		return ToolErrorInfrastructure, "discovery_rate_limited"
+	case errors.Is(err, websearch.ErrUnavailable):
+		return ToolErrorInfrastructure, "discovery_unavailable"
+	case errors.Is(err, websearch.ErrNotConfigured):
+		return ToolErrorInvariant, "discovery_not_configured"
+	case errors.Is(err, websearch.ErrInvalidQuery):
+		return ToolErrorSchema, "discovery_invalid_query"
+	case errors.Is(err, websearch.ErrInvalidResponse):
+		return ToolErrorInvariant, "discovery_invalid_response"
+	default:
+		return ToolErrorInfrastructure, "tool_execution_failed"
+	}
+}
+
+func mcpToolErrorCause(code string) error {
+	switch code {
+	case "attempt_authority_lost":
+		return ErrLeaseLost
+	case "discovery_timeout":
+		return websearch.ErrTimeout
+	case "discovery_rate_limited":
+		return websearch.ErrRateLimited
+	case "discovery_unavailable":
+		return websearch.ErrUnavailable
+	case "discovery_not_configured":
+		return websearch.ErrNotConfigured
+	case "discovery_invalid_query":
+		return websearch.ErrInvalidQuery
+	case "discovery_invalid_response":
+		return websearch.ErrInvalidResponse
+	default:
+		return nil
+	}
 }
 
 func (h *MCPToolHost) resolveContext(handle string) (attemptToolContext, error) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 )
 
 type mcpToolAction struct {
@@ -162,6 +163,31 @@ func TestControllerExecutesAcceptedProductionActionOnlyAcrossMCP(t *testing.T) {
 	}
 	if len(direct.calls) != 0 || len(mcpAction.calls) != 1 || mcpAction.calls[0].ActionID == "" {
 		t.Fatalf("direct=%d MCP=%+v", len(direct.calls), mcpAction.calls)
+	}
+}
+
+func TestMCPToolPlaneClassifiesRetryableWebSearchFailure(t *testing.T) {
+	catalog, _ := agentcatalog.LoadEmbedded()
+	provider := &webSearchActionProvider{err: websearch.ErrRateLimited}
+	registry, err := NewMCPToolRegistry(MCPToolRegistration{Action: NewWebSearchAction(provider), Scheduling: agentcatalog.ToolOrderedSync})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := NewMCPToolHost(catalog, registry, &mcpToolAuthority{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := host.OpenAttempt(context.Background(), AttemptToolScope{
+		Definition: agentcatalog.MustParseReference("research.source-discovery@1"),
+		Attempt:    Attempt{RunID: "run", JobID: "job", AttemptNo: 1, LeaseToken: "lease"}, RemainingActions: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	_, err = session.CallTool(context.Background(), "web_search", json.RawMessage(`{"queries":["alpha"]}`), "research:web_search:0")
+	if !isToolErrorKind(err, ToolErrorInfrastructure) || !errors.Is(err, websearch.ErrRateLimited) {
+		t.Fatalf("err=%v", err)
 	}
 }
 
