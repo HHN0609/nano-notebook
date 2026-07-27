@@ -38,9 +38,10 @@ type LeaderRouteDecision struct {
 }
 
 type LeaderRouteRequest struct {
-	Model       string
-	UserMessage string
-	RecentPairs []LeaderConversationPair
+	Model            string
+	UserMessage      string
+	RecentPairs      []LeaderConversationPair
+	InvocationPolicy models.ModelInvocationPolicy
 }
 
 type LeaderConversationPair struct {
@@ -57,8 +58,9 @@ type TracedLeaderRouter interface {
 }
 
 type ResearchPlanRequest struct {
-	Model       string
-	UserMessage string
+	Model            string
+	UserMessage      string
+	InvocationPolicy models.ModelInvocationPolicy
 }
 
 type ResearchPlanner interface {
@@ -87,7 +89,7 @@ func (r *ModelLeaderRouter) decideRoute(ctx context.Context, tracer *agentobs.Tr
 	if r == nil || r.model == nil || strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.UserMessage) == "" {
 		return LeaderRouteDecision{}, ErrInvalidLeaderRoute
 	}
-	modelRequest := models.ModelRequest{Model: request.Model, Messages: []models.ModelMessage{
+	modelRequest := models.ModelRequest{Model: request.Model, InvocationPolicy: request.InvocationPolicy, Messages: []models.ModelMessage{
 		{Role: models.RoleSystem, Content: mustPromptContent("agent.leader-router", 1)},
 		{Role: models.RoleUser, Content: buildLeaderRouteMessage(request.UserMessage, request.RecentPairs)},
 	}, ActionDefinitions: []models.ActionDefinition{leaderRouteActionDefinition()}, RequiredActionName: "select_leader_route"}
@@ -149,7 +151,7 @@ func (p *ModelResearchPlanner) expandQueries(ctx context.Context, tracer *agento
 	if p == nil || p.model == nil || strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.UserMessage) == "" {
 		return nil, ErrInvalidLeaderRoute
 	}
-	modelRequest := models.ModelRequest{Model: request.Model, Messages: []models.ModelMessage{
+	modelRequest := models.ModelRequest{Model: request.Model, InvocationPolicy: request.InvocationPolicy, Messages: []models.ModelMessage{
 		{Role: models.RoleSystem, Content: mustPromptContent("agent.research-planner", 1)},
 		{Role: models.RoleUser, Content: request.UserMessage},
 	}, ActionDefinitions: []models.ActionDefinition{researchQueriesActionDefinition()}, RequiredActionName: "submit_research_queries"}

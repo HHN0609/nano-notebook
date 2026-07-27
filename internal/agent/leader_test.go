@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
@@ -47,12 +48,18 @@ func (m *leaderDecisionModel) Decide(_ context.Context, request models.ModelRequ
 func TestModelLeaderRouterRequiresTypedClosedDecision(t *testing.T) {
 	input := json.RawMessage(`{"route":"delegate_research","reason_code":"explicit_source_discovery"}`)
 	model := &leaderDecisionModel{outcome: actionOutcome("select_leader_route", input)}
-	got, err := NewModelLeaderRouter(model).DecideRoute(context.Background(), LeaderRouteRequest{Model: "route-model", UserMessage: "find sources"})
+	temperature := 0.0
+	policy := models.ModelInvocationPolicy{Temperature: &temperature, MaxOutputTokens: 777, Timeout: 3 * time.Second}
+	got, err := NewModelLeaderRouter(model).DecideRoute(context.Background(), LeaderRouteRequest{Model: "route-model", UserMessage: "find sources", InvocationPolicy: policy})
 	if err != nil || got.Route != LeaderDelegateResearch || got.ReasonCode != LeaderReasonExplicitSourceDiscovery {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}
 	if len(model.requests) != 1 || model.requests[0].RequiredActionName != "select_leader_route" || len(model.requests[0].ActionDefinitions) != 1 {
 		t.Fatalf("request=%+v", model.requests)
+	}
+	if model.requests[0].InvocationPolicy.MaxOutputTokens != 777 || model.requests[0].InvocationPolicy.Temperature == nil ||
+		*model.requests[0].InvocationPolicy.Temperature != 0 || model.requests[0].InvocationPolicy.Timeout != 3*time.Second {
+		t.Fatalf("invocation policy=%+v", model.requests[0].InvocationPolicy)
 	}
 }
 
@@ -90,7 +97,9 @@ func TestModelLeaderRouterFailsClosedOnInvalidMissingMixedOrInconsistentContract
 
 func TestModelResearchPlannerRequiresOneTypedBoundedQueryBatch(t *testing.T) {
 	model := &leaderDecisionModel{outcome: actionOutcome("submit_research_queries", json.RawMessage(`{"queries":["film production workflow","screenplay cinematography editing","location scouting film budget"]}`))}
-	queries, err := NewModelResearchPlanner(model).ExpandQueries(context.Background(), ResearchPlanRequest{Model: "research-model", UserMessage: "collect film resources"})
+	temperature := 0.0
+	policy := models.ModelInvocationPolicy{Temperature: &temperature, MaxOutputTokens: 888, Timeout: 5 * time.Second}
+	queries, err := NewModelResearchPlanner(model).ExpandQueries(context.Background(), ResearchPlanRequest{Model: "research-model", UserMessage: "collect film resources", InvocationPolicy: policy})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +114,9 @@ func TestModelResearchPlannerRequiresOneTypedBoundedQueryBatch(t *testing.T) {
 	}
 	if len(model.requests) != 1 || model.requests[0].RequiredActionName != "submit_research_queries" || len(model.requests[0].ActionDefinitions) != 1 {
 		t.Fatalf("request=%+v", model.requests)
+	}
+	if model.requests[0].InvocationPolicy.MaxOutputTokens != 888 || model.requests[0].InvocationPolicy.Timeout != 5*time.Second {
+		t.Fatalf("invocation policy=%+v", model.requests[0].InvocationPolicy)
 	}
 }
 

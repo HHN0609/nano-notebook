@@ -167,6 +167,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		if err != nil {
 			return c.fail(ctx, attempt, "context_failed", err)
 		}
+		request.InvocationPolicy = execution.ModelInvocation
 		if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
 			return c.handleRuntimeError(ctx, attempt, err)
 		}
@@ -269,6 +270,7 @@ func (c *Controller) acceptContextualizedSearch(
 	if err != nil {
 		return c.fail(ctx, attempt, "context_failed", err)
 	}
+	request.InvocationPolicy = execution.ModelInvocation
 	if err := c.validateProposal(toolSession, []models.ActionProposal{fallback}); err != nil || fallback.Name != "search_evidence" {
 		if err == nil {
 			err = errors.New("query contextualization fallback must call search_evidence")

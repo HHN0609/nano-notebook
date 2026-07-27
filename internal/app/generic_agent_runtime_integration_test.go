@@ -16,6 +16,15 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+type capturingLeaderRouter struct {
+	request agent.LeaderRouteRequest
+}
+
+func (r *capturingLeaderRouter) DecideRoute(_ context.Context, request agent.LeaderRouteRequest) (agent.LeaderRouteDecision, error) {
+	r.request = request
+	return agent.LeaderRouteDecision{Route: agent.LeaderContinueChat, ReasonCode: agent.LeaderReasonOrdinaryConversation}, nil
+}
+
 func TestLegacyAdmissionDualWritesChatRunAndAgentTreeOwnership(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "generic-runtime@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c110")
@@ -383,6 +392,12 @@ func TestPostgresRuntimeLoadsConfiguredChatRootWithoutLegacyFields(t *testing.T)
 		Definition: definition, ModelPolicy: policy, DeadlineAt: deadline,
 		ContextManifest: json.RawMessage(`{"time_zone":"Asia/Shanghai"}`),
 	}
+	traceScope, err := agent.NewTraceScope(agent.DiscardTraceSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traceScope.Rollback()
+	ctx = agent.ContextWithTraceScope(ctx, traceScope)
 	if err := api.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `insert into chat_messages(id,chat_id,role,content) values($1,$2,'user',$3)`, command.InputMessageID, chatID, "Use configured runtime."); err != nil {
 			return err
@@ -393,10 +408,14 @@ func TestPostgresRuntimeLoadsConfiguredChatRootWithoutLegacyFields(t *testing.T)
 		if err := jobs.NewStore(tx).CreateAgentRun(ctx, "job_configured_load", command.RunID); err != nil {
 			return fmt.Errorf("create configured job: %w", err)
 		}
+		if err := agent.StartRunTraceInTx(ctx, tx, command.RunID, policy.ProviderModel, definition.Reference().String(), nil); err != nil {
+			return fmt.Errorf("start configured trace: %w", err)
+		}
 		return agent.NewStore(tx).FinalizeConfiguredChatOwnership(ctx, command.RunID)
 	}); err != nil {
 		t.Fatal(err)
 	}
+	_ = traceScope.PublishAfterCommit(ctx)
 	const leaseToken = "0190cdd2-5f2d-7ad8-b3f5-1b588788c113"
 	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set status='running',attempt_no=1,lease_token=$2,lease_expires_at=now()+interval '1 minute' where id=$1`, "job_configured_load", leaseToken); err != nil {
 		t.Fatal(err)
@@ -419,23 +438,28 @@ func TestPostgresRuntimeLoadsConfiguredChatRootWithoutLegacyFields(t *testing.T)
 		execution.ActionResultByteLimit != definition.Limits.ResultBytes || execution.ActionResultsByteLimit != definition.Limits.ResultBytes {
 		t.Fatalf("configured limits=%+v definition=%+v", execution, definition.Limits)
 	}
+	if execution.ModelInvocation.Temperature == nil || *execution.ModelInvocation.Temperature != policy.Temperature ||
+		execution.ModelInvocation.MaxOutputTokens != policy.MaxOutputTokens ||
+		execution.ModelInvocation.Timeout != time.Duration(policy.TimeoutMS)*time.Millisecond {
+		t.Fatalf("configured invocation=%+v policy=%+v", execution.ModelInvocation, policy)
+	}
 	if !execution.DeadlineAt.Equal(deadline) {
 		t.Fatalf("deadline=%s want=%s", execution.DeadlineAt, deadline)
 	}
-	if _, err := api.db.Pool().Exec(ctx, `
-		insert into agent_run_routes(run_id,route,requested_route,effective_route,intent_reason_code,policy_reason_code)
-		values($1,'continue_chat','continue_chat','continue_chat','ordinary_conversation','allowed')
-	`, command.RunID); err != nil {
-		t.Fatal(err)
-	}
 	normal := &recordingNormalExecutor{}
+	router := &capturingLeaderRouter{}
 	runtime := agent.NewLeaderExecutor(
-		api.db.Pool(), normal, fixedLeaderRouter{route: agent.LeaderContinueChat},
+		api.db.Pool(), normal, router,
 		fixedResearchPlanner{queries: []string{"unused"}}, &recordingResearchProvider{},
 	)
 	resolution := agent.NewChatLeaderDefinitionExecutor(runtime).ExecuteAttempt(ctx, attempt)
 	if resolution.Disposition != agent.AttemptCompleted || normal.calls != 1 {
 		t.Fatalf("resolution=%+v normal calls=%d", resolution, normal.calls)
+	}
+	if router.request.InvocationPolicy.Temperature == nil || *router.request.InvocationPolicy.Temperature != policy.Temperature ||
+		router.request.InvocationPolicy.MaxOutputTokens != policy.MaxOutputTokens ||
+		router.request.InvocationPolicy.Timeout != time.Duration(policy.TimeoutMS)*time.Millisecond {
+		t.Fatalf("router invocation=%+v policy=%+v", router.request.InvocationPolicy, policy)
 	}
 }
 

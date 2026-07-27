@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -13,8 +14,12 @@ import (
 )
 
 func TestReplayPayloadCodecsCaptureOnlyNormalizedModelAndActionData(t *testing.T) {
+	temperature := 0.0
 	request, err := agent.EncodeModelRequestReplay(models.ModelRequest{
 		Model: "openai/gpt-5",
+		InvocationPolicy: models.ModelInvocationPolicy{
+			Temperature: &temperature, MaxOutputTokens: 2048, Timeout: 30 * time.Second,
+		},
 		Messages: []models.ModelMessage{
 			{Role: models.RoleSystem, Content: "Answer with one concise paragraph."},
 			{Role: models.RoleUser, Content: "Plan dinner in Shanghai."},
@@ -65,6 +70,9 @@ func TestReplayPayloadCodecsCaptureOnlyNormalizedModelAndActionData(t *testing.T
 		}
 		if document["class"] != string(wantClasses[index]) || document["schema_version"] != float64(1) {
 			t.Fatalf("payload %d header = %#v", index, document)
+		}
+		if index == 0 && (document["temperature"] != float64(0) || document["max_output_tokens"] != float64(2048) || document["timeout_ms"] != float64(30000)) {
+			t.Fatalf("model invocation Replay = %#v", document)
 		}
 	}
 	joined := bytes.Join([][]byte{request.Bytes, decision.Bytes, actionInput.Bytes, actionResult.Bytes}, nil)

@@ -47,6 +47,13 @@ type ModelRequest struct {
 	Messages           []ModelMessage
 	ActionDefinitions  []ActionDefinition
 	RequiredActionName string
+	InvocationPolicy   ModelInvocationPolicy
+}
+
+type ModelInvocationPolicy struct {
+	Temperature     *float64
+	MaxOutputTokens int
+	Timeout         time.Duration
 }
 
 type ErrorKind string
@@ -91,6 +98,11 @@ func NewBifrostClient(baseURL string, httpClient *http.Client, maxCompletionToke
 }
 
 func (c *BifrostClient) Decide(ctx context.Context, request ModelRequest) (ModelOutcome, error) {
+	if request.InvocationPolicy.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, request.InvocationPolicy.Timeout)
+		defer cancel()
+	}
 	return c.request(ctx, request)
 }
 
@@ -208,10 +220,15 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 			"function": map[string]string{"name": requiredName},
 		}
 	}
+	maxCompletionTokens := request.InvocationPolicy.MaxOutputTokens
+	if maxCompletionTokens <= 0 {
+		maxCompletionTokens = c.maxCompletionTokens
+	}
 	body, err := json.Marshal(struct {
 		Model               string            `json:"model"`
 		Messages            []providerMessage `json:"messages"`
 		Stream              bool              `json:"stream"`
+		Temperature         *float64          `json:"temperature,omitempty"`
 		MaxCompletionTokens int               `json:"max_completion_tokens"`
 		Tools               []providerTool    `json:"tools,omitempty"`
 		ToolChoice          any               `json:"tool_choice,omitempty"`
@@ -219,7 +236,8 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		Model:               request.Model,
 		Messages:            messages,
 		Stream:              false,
-		MaxCompletionTokens: c.maxCompletionTokens,
+		Temperature:         request.InvocationPolicy.Temperature,
+		MaxCompletionTokens: maxCompletionTokens,
 		Tools:               tools,
 		ToolChoice:          toolChoice,
 	})

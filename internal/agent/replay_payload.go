@@ -23,6 +23,9 @@ type modelRequestReplay struct {
 	Model             string                   `json:"model"`
 	Messages          []modelReplayMessage     `json:"messages"`
 	ActionDefinitions []replayActionDefinition `json:"action_definitions,omitempty"`
+	Temperature       *float64                 `json:"temperature,omitempty"`
+	MaxOutputTokens   int                      `json:"max_output_tokens,omitempty"`
+	TimeoutMS         int64                    `json:"timeout_ms,omitempty"`
 }
 
 type modelReplayMessage struct {
@@ -55,6 +58,9 @@ func EncodeModelRequestReplay(request models.ModelRequest) (replay.PlainPayload,
 		replayPayloadHeader: replayHeader(replay.ClassModelRequest),
 		Model:               request.Model, Messages: make([]modelReplayMessage, 0, len(request.Messages)),
 		ActionDefinitions: make([]replayActionDefinition, 0, len(request.ActionDefinitions)),
+		Temperature:       request.InvocationPolicy.Temperature,
+		MaxOutputTokens:   request.InvocationPolicy.MaxOutputTokens,
+		TimeoutMS:         request.InvocationPolicy.Timeout.Milliseconds(),
 	}
 	for _, message := range request.Messages {
 		budget.addString(message.Content)

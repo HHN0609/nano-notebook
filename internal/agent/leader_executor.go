@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
@@ -83,6 +84,7 @@ type leaderRunContext struct {
 	NotebookID         string
 	Message            string
 	Model              string
+	ModelInvocation    models.ModelInvocationPolicy
 	PromptVersion      string
 	TimeZone           string
 	MemberRole         string
@@ -138,7 +140,7 @@ func (e *LeaderExecutor) execute(ctx context.Context, attempt Attempt, expectedR
 		return ErrInvalidLeaderRoute
 	}
 	if run.ExistingRoute == nil {
-		request := LeaderRouteRequest{Model: run.Model, UserMessage: run.Message, RecentPairs: run.RecentPairs}
+		request := LeaderRouteRequest{Model: run.Model, UserMessage: run.Message, RecentPairs: run.RecentPairs, InvocationPolicy: run.ModelInvocation}
 		var decision LeaderRouteDecision
 		if traced, ok := e.router.(TracedLeaderRouter); ok {
 			traceContext, tracer, traceErr := e.modelTraceContext(ctx, attempt)
@@ -200,6 +202,8 @@ func (r leaderRunContext) isChatLeader() bool {
 func (e *LeaderExecutor) loadRun(ctx context.Context, runID string) (leaderRunContext, error) {
 	var run leaderRunContext
 	var route, delegationState *string
+	var temperature *float64
+	var maxOutputTokens, timeoutMS *int
 	tx, err := e.workerTx(ctx)
 	if err != nil {
 		return leaderRunContext{}, err
@@ -212,10 +216,14 @@ func (e *LeaderExecutor) loadRun(ctx context.Context, runID string) (leaderRunCo
 			coalesce(r.prompt_version,r.definition_identity||'@'||r.definition_version::text),
 			coalesce(r.time_zone,r.parent_context_manifest->>'time_zone','UTC'),
 			coalesce(member.role,''),r.status,coalesce(r.deadline_at,tree.absolute_deadline),
+			policy.temperature,policy.max_output_tokens,policy.timeout_ms,
 			(select count(*) from agent_run_delegations child_link where child_link.parent_run_id=tree.root_agent_run_id),
 			route.effective_route,delegation.state
 		from agent_runs r
 		left join agent_trees tree on tree.id=r.tree_id
+		left join agent_model_policy_versions policy
+			on policy.policy_identity=r.model_policy_identity and policy.policy_version=r.model_policy_version
+			and policy.canonical_sha256=r.model_policy_sha256 and policy.provider_model=r.provider_model
 		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
 		join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id)
 		join chat_messages m on m.id=coalesce(r.input_message_id,product.input_message_id)
@@ -225,9 +233,18 @@ func (e *LeaderExecutor) loadRun(ctx context.Context, runID string) (leaderRunCo
 		left join agent_run_delegations delegation on delegation.parent_run_id=tree.root_agent_run_id
 		where r.id=$1
 	`, runID).Scan(&run.RuntimeKind, &run.Role, &run.ExecutorIdentity, &run.UserID, &run.ChatID, &run.NotebookID, &run.Message, &run.Model,
-		&run.PromptVersion, &run.TimeZone, &run.MemberRole, &run.Status, &run.DeadlineAt, &run.ExistingChildCount, &route, &delegationState)
+		&run.PromptVersion, &run.TimeZone, &run.MemberRole, &run.Status, &run.DeadlineAt,
+		&temperature, &maxOutputTokens, &timeoutMS, &run.ExistingChildCount, &route, &delegationState)
 	if err != nil {
 		return leaderRunContext{}, err
+	}
+	if run.RuntimeKind == "configured" {
+		if temperature == nil || maxOutputTokens == nil || timeoutMS == nil {
+			return leaderRunContext{}, errors.New("configured Model Policy pin is invalid")
+		}
+		run.ModelInvocation = models.ModelInvocationPolicy{
+			Temperature: temperature, MaxOutputTokens: *maxOutputTokens, Timeout: time.Duration(*timeoutMS) * time.Millisecond,
+		}
 	}
 	if route != nil {
 		parsed := LeaderRoute(*route)
@@ -378,7 +395,7 @@ func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, r
 		return err
 	}
 	if len(progress.Plan) == 0 {
-		request := ResearchPlanRequest{Model: run.Model, UserMessage: run.Message}
+		request := ResearchPlanRequest{Model: run.Model, UserMessage: run.Message, InvocationPolicy: run.ModelInvocation}
 		var queries []string
 		if traced, ok := e.planner.(TracedResearchPlanner); ok {
 			traceContext, tracer, traceErr := e.modelTraceContext(ctx, attempt)

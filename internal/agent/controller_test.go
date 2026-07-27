@@ -20,6 +20,10 @@ func TestControllerCheckpointsOrderedActionsThenFinalAndPublishesOnce(t *testing
 		t.Fatal(err)
 	}
 	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	temperature := 0.0
+	runtime.execution.ModelInvocation = models.ModelInvocationPolicy{
+		Temperature: &temperature, MaxOutputTokens: 555, Timeout: 4 * time.Second,
+	}
 	model := &decisionModelStub{decisions: []models.ModelDecision{
 		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{
 			{Name: "record", Input: json.RawMessage(`{"value":"first"}`)},
@@ -54,6 +58,12 @@ func TestControllerCheckpointsOrderedActionsThenFinalAndPublishesOnce(t *testing
 	}
 	if len(model.requests) != 2 || len(model.requests[0].ActionDefinitions) != 1 || len(model.requests[1].ActionDefinitions) != 1 {
 		t.Fatalf("model requests = %+v", model.requests)
+	}
+	for _, request := range model.requests {
+		if request.InvocationPolicy.Temperature == nil || *request.InvocationPolicy.Temperature != 0 ||
+			request.InvocationPolicy.MaxOutputTokens != 555 || request.InvocationPolicy.Timeout != 4*time.Second {
+			t.Fatalf("model invocation policy = %+v", request.InvocationPolicy)
+		}
 	}
 	if len(runtime.published) != 1 || runtime.published[0].Text != "Finished in order." {
 		t.Fatalf("published = %+v", runtime.published)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
@@ -131,6 +132,9 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 	defer tx.Rollback(ctx)
 	var execution Execution
 	var deadlineValid bool
+	var configured bool
+	var temperature *float64
+	var maxOutputTokens, timeoutMS *int
 	err = tx.QueryRow(ctx, `
 		select r.id, coalesce(r.chat_id,product.chat_id), coalesce(r.user_id,product.user_id),
 			coalesce(r.input_message_id,product.input_message_id), coalesce(r.model,r.provider_model),
@@ -145,12 +149,16 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 			coalesce(r.action_result_byte_limit,(definition.limits->>'result_bytes')::integer),
 			coalesce(r.action_results_byte_limit,(definition.limits->>'result_bytes')::integer),
 			coalesce(r.selected_source_count,0),
+			r.runtime_kind='configured',policy.temperature,policy.max_output_tokens,policy.timeout_ms,
 			coalesce(r.deadline_at,tree.absolute_deadline) > now()
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
 		left join chat_runs product on product.root_agent_run_id=r.id
 		left join agent_trees tree on tree.id=r.tree_id
 		left join agent_definition_versions definition on definition.definition_identity=r.definition_identity and definition.definition_version=r.definition_version
+		left join agent_model_policy_versions policy
+			on policy.policy_identity=r.model_policy_identity and policy.policy_version=r.model_policy_version
+			and policy.canonical_sha256=r.model_policy_sha256 and policy.provider_model=r.provider_model
 		join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id) and c.creator_user_id=coalesce(r.user_id,product.user_id)
 		join notebook_memberships m on m.notebook_id=c.notebook_id and m.user_id=coalesce(r.user_id,product.user_id)
 		where r.id = $1 and j.id = $2 and j.lease_token = $3::uuid
@@ -163,6 +171,7 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 			&execution.ActionLimit, &execution.ActionBatchLimit,
 			&execution.ActionResultByteLimit, &execution.ActionResultsByteLimit,
 			&execution.SelectedSourceCount,
+			&configured, &temperature, &maxOutputTokens, &timeoutMS,
 			&deadlineValid,
 		)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -173,6 +182,14 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 	}
 	if !deadlineValid {
 		return Execution{}, ErrRunDeadlineExceeded
+	}
+	if configured {
+		if temperature == nil || maxOutputTokens == nil || timeoutMS == nil {
+			return Execution{}, errors.New("configured Model Policy pin is invalid")
+		}
+		execution.ModelInvocation = models.ModelInvocationPolicy{
+			Temperature: temperature, MaxOutputTokens: *maxOutputTokens, Timeout: time.Duration(*timeoutMS) * time.Millisecond,
+		}
 	}
 	execution.Attempt = attempt
 	if err := tx.Commit(ctx); err != nil {

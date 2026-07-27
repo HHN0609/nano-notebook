@@ -50,6 +50,18 @@ func TestModelAdapterRecordsNormalizedMetadataWithoutContent(t *testing.T) {
 	}
 }
 
+func TestModelRequestHashIncludesInvocationPolicy(t *testing.T) {
+	request := models.ModelRequest{
+		Model: "aliyun/qwen-plus", Messages: []models.ModelMessage{{Role: models.RoleUser, Content: "private prompt"}},
+	}
+	defaultHash := modelRequestHash(request)
+	temperature := 0.0
+	request.InvocationPolicy = models.ModelInvocationPolicy{Temperature: &temperature, MaxOutputTokens: 2048}
+	if configuredHash := modelRequestHash(request); configuredHash == defaultHash {
+		t.Fatalf("configured and default invocation hashes are equal: %s", configuredHash)
+	}
+}
+
 func TestModelAdapterLabelsAnswerCompositionPhaseWithoutContent(t *testing.T) {
 	tracer, exporter, ctx := instrumentationTestTracer(t)
 	model := outcomeModelFunc(func(context.Context, models.ModelRequest) (models.ModelOutcome, error) {

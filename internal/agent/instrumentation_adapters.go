@@ -272,6 +272,13 @@ func modelTerminal(metadata models.ModelCallMetadata, callErr error) agentobs.Sp
 func modelRequestHash(request models.ModelRequest) string {
 	hash := sha256.New()
 	_, _ = fmt.Fprintf(hash, "%s\x00", request.Model)
+	if request.InvocationPolicy.Temperature == nil {
+		_, _ = fmt.Fprint(hash, "temperature:default\x00")
+	} else {
+		_, _ = fmt.Fprintf(hash, "temperature:%g\x00", *request.InvocationPolicy.Temperature)
+	}
+	_, _ = fmt.Fprintf(hash, "max_output_tokens:%d\x00timeout_ns:%d\x00",
+		request.InvocationPolicy.MaxOutputTokens, request.InvocationPolicy.Timeout.Nanoseconds())
 	for _, message := range request.Messages {
 		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00", message.Role, message.Content)
 		for _, call := range message.ActionCalls {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestBifrostClientReturnsANonStreamingFinalDecision(t *testing.T) {
@@ -60,6 +61,46 @@ func TestBifrostClientReturnsANonStreamingFinalDecision(t *testing.T) {
 	if metadata.RequestedModel != "aliyun/qwen-flash" || metadata.ResultKind != ModelResultFinalDraft || metadata.FinishReason != "stop" || metadata.InputTokens == nil || *metadata.InputTokens != 18 || metadata.OutputTokens == nil || *metadata.OutputTokens != 9 || metadata.TotalTokens == nil || *metadata.TotalTokens != 27 || metadata.Cost.Known || metadata.Cost.Amount != nil || metadata.Latency <= 0 {
 		t.Fatalf("normalized metadata = %+v", metadata)
 	}
+}
+
+func TestBifrostClientAppliesPerRequestInvocationPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Temperature         *float64 `json:"temperature"`
+			MaxCompletionTokens int      `json:"max_completion_tokens"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Temperature == nil || *request.Temperature != 0 || request.MaxCompletionTokens != 321 {
+			t.Fatalf("invocation request=%+v", request)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	temperature := 0.0
+	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "aliyun/qwen-plus", Messages: []ModelMessage{{Role: RoleUser, Content: "Decide."}},
+		InvocationPolicy: ModelInvocationPolicy{
+			Temperature: &temperature, MaxOutputTokens: 321, Timeout: 2 * time.Second,
+		},
+	})
+	if err != nil || outcome.Final == nil || outcome.Final.Text != "Done." {
+		t.Fatalf("outcome=%+v err=%v", outcome, err)
+	}
+}
+
+func TestBifrostClientEnforcesPerRequestInvocationTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Too late."},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	_, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "aliyun/qwen-plus", Messages: []ModelMessage{{Role: RoleUser, Content: "Wait."}},
+		InvocationPolicy: ModelInvocationPolicy{Timeout: 20 * time.Millisecond},
+	})
+	requireModelErrorKind(t, err, ErrorTimeout)
 }
 
 func TestBifrostTreatsJSONLookingAssistantContentAsPlainText(t *testing.T) {

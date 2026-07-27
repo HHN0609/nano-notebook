@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"time"
+
+	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
 
 type Execution struct {
@@ -11,6 +13,7 @@ type Execution struct {
 	UserID                 string
 	InputMessageID         string
 	Model                  string
+	ModelInvocation        models.ModelInvocationPolicy
 	PromptVersion          string
 	AgentConfigID          string
 	TimeZone               string
