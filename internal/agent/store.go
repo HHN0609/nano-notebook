@@ -379,10 +379,17 @@ func (s *Store) CitationViewForUser(ctx context.Context, userID, citationID stri
 
 func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]RunSnapshot, error) {
 	rows, err := s.db.Query(ctx, `
-		select distinct on (input_message_id) id, input_message_id, status, error_code, discovery_session_id
-		from agent_runs
-		where user_id = $1 and chat_id = $2 and agent_role='leader'
-		order by input_message_id, created_at desc, id desc`, userID, chatID)
+		select id, input_message_id, status, error_code, discovery_session_id
+		from (
+			select distinct on (r.input_message_id)
+				r.id, r.input_message_id, r.status, r.error_code, r.discovery_session_id,
+				m.created_at as input_created_at
+			from agent_runs r
+			join chat_messages m on m.id = r.input_message_id
+			where r.user_id = $1 and r.chat_id = $2 and r.agent_role='leader'
+			order by r.input_message_id, r.created_at desc, r.id desc
+		) latest
+		order by input_created_at, input_message_id`, userID, chatID)
 	if err != nil {
 		return nil, err
 	}
