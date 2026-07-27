@@ -152,6 +152,16 @@ func (r *PostgresRuntime) appendCheckpointOnce(ctx context.Context, attempt Atte
 	if err != nil {
 		return Checkpoint{}, err
 	}
+	charge := treeBudgetCharge{}
+	switch pending.Kind {
+	case CheckpointActionProposal, CheckpointFinalDraft:
+		charge.ModelCalls = 1
+	case CheckpointActionResult:
+		charge.Actions = 1
+	}
+	if err := chargeConfiguredTreeInTx(ctx, tx, attempt.RunID, charge); err != nil {
+		return Checkpoint{}, err
+	}
 	if err := RecordCheckpointAcceptedInTx(traceCtx, tx, attempt, checkpoint); err != nil {
 		return Checkpoint{}, err
 	}
@@ -168,16 +178,20 @@ func lockCheckpointAuthority(ctx context.Context, tx pgx.Tx, attempt Attempt) er
 	err := tx.QueryRow(ctx, `
 		select r.status, j.status,
 			coalesce(j.lease_expires_at > now(), false),
-			r.deadline_at > now(),
+			coalesce(r.deadline_at,tree.absolute_deadline) > now(),
 			r.output_message_id is null,
 			exists(
 				select 1
 				from chat_chats c
 				join notebook_memberships m on m.notebook_id = c.notebook_id
-				where c.id = r.chat_id and c.creator_user_id = r.user_id and m.user_id = r.user_id
+				where c.id=coalesce(r.chat_id,product.chat_id)
+				  and c.creator_user_id=coalesce(r.user_id,product.user_id)
+				  and m.user_id=coalesce(r.user_id,product.user_id)
 			)
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
 		where r.id = $1 and j.id = $2 and j.lease_token = $3::uuid and j.attempt_no = $4
 		for update of r, j`, attempt.RunID, attempt.JobID, attempt.LeaseToken, attempt.AttemptNo).
 		Scan(&runStatus, &jobStatus, &leaseValid, &deadlineValid, &outputEmpty, &authorized)
@@ -224,16 +238,20 @@ func (r *PostgresRuntime) reconcileCheckpoint(ctx context.Context, attempt Attem
 	var outputEmpty, deadlineValid, leaseValid, authorized bool
 	err = tx.QueryRow(ctx, `
 		select r.status, j.status, r.output_message_id is null,
-			r.deadline_at > now(),
+			coalesce(r.deadline_at,tree.absolute_deadline) > now(),
 			coalesce(j.lease_expires_at > now(), false),
 			exists(
 				select 1
 				from chat_chats c
 				join notebook_memberships m on m.notebook_id = c.notebook_id
-				where c.id = r.chat_id and c.creator_user_id = r.user_id and m.user_id = r.user_id
+				where c.id=coalesce(r.chat_id,product.chat_id)
+				  and c.creator_user_id=coalesce(r.user_id,product.user_id)
+				  and m.user_id=coalesce(r.user_id,product.user_id)
 			)
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
 		where r.id = $1 and j.id = $2 and j.lease_token = $3::uuid and j.attempt_no = $4`,
 		attempt.RunID, attempt.JobID, attempt.LeaseToken, attempt.AttemptNo).
 		Scan(&runStatus, &jobStatus, &outputEmpty, &deadlineValid, &leaseValid, &authorized)

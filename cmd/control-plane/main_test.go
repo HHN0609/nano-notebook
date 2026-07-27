@@ -47,4 +47,14 @@ func TestLoadControlPlaneConfigDefaultsToQwenPlus(t *testing.T) {
 	if config.DefaultModel != "aliyun/qwen-plus" {
 		t.Fatalf("Default model = %q, want aliyun/qwen-plus", config.DefaultModel)
 	}
+	if config.AgentRelease.String() != "nano.default@1" {
+		t.Fatalf("Agent release = %q", config.AgentRelease)
+	}
+}
+
+func TestLoadControlPlaneConfigRejectsMutableAgentRelease(t *testing.T) {
+	t.Setenv("NANO_AGENT_RELEASE", "nano.default@latest")
+	if _, err := loadControlPlaneConfig(); err == nil {
+		t.Fatal("loadControlPlaneConfig accepted mutable Agent release")
+	}
 }

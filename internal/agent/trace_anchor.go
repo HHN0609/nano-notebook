@@ -29,8 +29,11 @@ func createTraceAnchorInTx(ctx context.Context, tx pgx.Tx, runID string, root ag
 		SemanticConventionVersion: root.SemanticConventionVersion,
 	}
 	if err := tx.QueryRow(ctx, `
-		select r.chat_id, c.notebook_id
-		from agent_runs r join chat_chats c on c.id = r.chat_id
+		select coalesce(r.chat_id,product.chat_id),c.notebook_id
+		from agent_runs r
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+		join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id)
 		where r.id = $1
 	`, runID).Scan(&descriptor.ChatID, &descriptor.NotebookID); err != nil {
 		return collector.TraceDescriptor{}, err

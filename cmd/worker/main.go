@@ -175,6 +175,16 @@ func main() {
 		os.Exit(1)
 	}
 	researchChild := chatDefinition.Children[0]
+	researchDefinition, ok := definitionCatalog.ResolveDefinition(researchChild)
+	if !ok {
+		slog.Error("worker Research child Definition is missing", "definition", researchChild)
+		os.Exit(1)
+	}
+	researchResultContract, ok := definitionCatalog.ResolveContract(researchDefinition.Contracts.Result)
+	if !ok {
+		slog.Error("worker Research child Result Contract is missing", "contract", researchDefinition.Contracts.Result)
+		os.Exit(1)
+	}
 	_, supportedAgentConfiguration, err := agent.DefaultAgentConfigurationBundle(
 		config.AgentConfigurationID, config.LeaderModel, config.ResearchModel, agent.DefaultRunConfig(config.AgentConfigurationID),
 	)
@@ -363,10 +373,14 @@ func main() {
 		agent.NewModelResearchPlanner(modelClient), searchProvider, agent.WithLeaderTraceSink(traceExporter),
 		agent.WithLeaderReplayStager(replayStager), agent.WithResearchCandidateValidator(candidateValidator),
 		agent.WithResearchMCPToolPlane(mcpToolHost, researchChild),
+		agent.WithResearchResultContract(researchResultContract),
 	)
 	leaderExecutor := agent.NewLeaderRoleExecutor(roleRuntime)
 	researchExecutor := agent.NewResearchRoleExecutor(roleRuntime)
-	configuredRegistry, err := agent.NewNanoExecutorRegistry(definitionCatalog, promptCatalog, leaderExecutor, researchExecutor)
+	configuredRegistry, err := agent.NewNanoExecutorRegistry(
+		definitionCatalog, promptCatalog,
+		agent.NewChatLeaderDefinitionExecutor(roleRuntime), agent.NewResearchDefinitionExecutor(roleRuntime),
+	)
 	if err != nil {
 		slog.Error("Agent Executor Registry invalid", "error", err)
 		os.Exit(1)

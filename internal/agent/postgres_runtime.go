@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -130,20 +132,30 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 	var execution Execution
 	var deadlineValid bool
 	err = tx.QueryRow(ctx, `
-		select r.id, r.chat_id, r.user_id, r.input_message_id, r.model,
-			r.prompt_version, r.agent_config_id, r.time_zone, r.deadline_at,
-			r.action_decision_limit, r.final_decision_limit,
-			r.action_limit, r.action_batch_limit,
-			r.action_result_byte_limit, r.action_results_byte_limit,
-			r.selected_source_count,
-			r.deadline_at > now()
+		select r.id, coalesce(r.chat_id,product.chat_id), coalesce(r.user_id,product.user_id),
+			coalesce(r.input_message_id,product.input_message_id), coalesce(r.model,r.provider_model),
+			coalesce(r.prompt_version,case when coalesce(r.selected_source_count,0)>0 then $4 else $5 end),
+			coalesce(r.agent_config_id,r.definition_identity||'@'||r.definition_version::text),
+			coalesce(r.time_zone,r.parent_context_manifest->>'time_zone','UTC'),
+			coalesce(r.deadline_at,tree.absolute_deadline),
+			coalesce(r.action_decision_limit,greatest(0,(definition.limits->>'model_calls')::integer-1)),
+			coalesce(r.final_decision_limit,1),
+			coalesce(r.action_limit,(definition.limits->>'actions')::integer),
+			coalesce(r.action_batch_limit,(definition.limits->>'action_batch')::integer),
+			coalesce(r.action_result_byte_limit,(definition.limits->>'result_bytes')::integer),
+			coalesce(r.action_results_byte_limit,(definition.limits->>'result_bytes')::integer),
+			coalesce(r.selected_source_count,0),
+			coalesce(r.deadline_at,tree.absolute_deadline) > now()
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
-		join chat_chats c on c.id = r.chat_id and c.creator_user_id = r.user_id
-		join notebook_memberships m on m.notebook_id = c.notebook_id and m.user_id = r.user_id
+		left join chat_runs product on product.root_agent_run_id=r.id
+		left join agent_trees tree on tree.id=r.tree_id
+		left join agent_definition_versions definition on definition.definition_identity=r.definition_identity and definition.definition_version=r.definition_version
+		join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id) and c.creator_user_id=coalesce(r.user_id,product.user_id)
+		join notebook_memberships m on m.notebook_id=c.notebook_id and m.user_id=coalesce(r.user_id,product.user_id)
 		where r.id = $1 and j.id = $2 and j.lease_token = $3::uuid
 			and r.status = 'running' and j.status = 'running'
-			and j.lease_expires_at > now() and r.output_message_id is null`, attempt.RunID, attempt.JobID, attempt.LeaseToken).
+			and j.lease_expires_at > now() and r.output_message_id is null`, attempt.RunID, attempt.JobID, attempt.LeaseToken, GroundedPromptVersion, BarePromptVersion).
 		Scan(
 			&execution.RunID, &execution.ChatID, &execution.UserID, &execution.InputMessageID, &execution.Model,
 			&execution.PromptVersion, &execution.AgentConfigID, &execution.TimeZone, &execution.DeadlineAt,
@@ -276,7 +288,13 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 		return err
 	}
 	var chatID string
-	if err := tx.QueryRow(ctx, `select chat_id from agent_runs where id = $1`, attempt.RunID).Scan(&chatID); err != nil {
+	if err := tx.QueryRow(ctx, `
+		select coalesce(run.chat_id,product.chat_id)
+		from agent_runs run
+		left join agent_trees tree on tree.id=run.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+		where run.id=$1
+	`, attempt.RunID).Scan(&chatID); err != nil {
 		return err
 	}
 	if expectedFinal != nil {
@@ -296,6 +314,9 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 	}
 	groundingOutcome, err := validateGroundingPublication(ctx, tx, attempt.RunID, expectedFinal)
 	if err != nil {
+		return err
+	}
+	if err := storeConfiguredFinalResult(ctx, tx, attempt.RunID, text); err != nil {
 		return err
 	}
 	recorder, err := NewRunTraceRecorder(traceCtx, tx, attempt.RunID)
@@ -390,6 +411,50 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 	return nil
 }
 
+func storeConfiguredFinalResult(ctx context.Context, tx pgx.Tx, runID, text string) error {
+	var runtimeKind string
+	if err := tx.QueryRow(ctx, `select runtime_kind from agent_runs where id=$1`, runID).Scan(&runtimeKind); err != nil {
+		return err
+	}
+	if runtimeKind != "configured" {
+		return nil
+	}
+	var contract agentcatalog.ContractVersion
+	if err := tx.QueryRow(ctx, `
+		select definition.result_contract_identity,definition.result_contract_version,contract.canonical_sha256
+		from agent_runs run
+		join agent_definition_versions definition on definition.definition_identity=run.definition_identity and definition.definition_version=run.definition_version
+		join agent_contract_versions contract on contract.contract_identity=definition.result_contract_identity and contract.contract_version=definition.result_contract_version
+		where run.id=$1
+	`, runID).Scan(&contract.Identity, &contract.Version, &contract.SHA256); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]string{"content": text})
+	if err != nil {
+		return err
+	}
+	result, err := NewAgentResult("result_"+uuid.NewString(), runID, contract, payload)
+	if err != nil {
+		return err
+	}
+	if err := StoreAgentResultInTx(ctx, tx, result); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `
+		update agent_trees
+		set result_bytes_consumed=result_bytes_consumed+$2,updated_at=now()
+		where id=(select tree_id from agent_runs where id=$1)
+		  and result_bytes_consumed+$2<=result_byte_limit
+	`, runID, result.PayloadBytes)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("Agent Tree Result budget exhausted")
+	}
+	return nil
+}
+
 func valueOrEmptyFinal(draft *models.FinalDraft) models.FinalDraft {
 	if draft == nil {
 		return models.FinalDraft{}
@@ -418,9 +483,10 @@ func (r *PostgresRuntime) reconcilePublication(ctx context.Context, attempt Atte
 	err = tx.QueryRow(ctx, `
 		select r.status, r.output_message_id, j.status,
 			coalesce(j.id = $2 and j.lease_token = $3::uuid and j.lease_expires_at > now(), false),
-			r.deadline_at > now()
+			coalesce(r.deadline_at,tree.absolute_deadline) > now()
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
+		left join agent_trees tree on tree.id=r.tree_id
 		where r.id = $1`, attempt.RunID, attempt.JobID, attempt.LeaseToken).
 		Scan(&runStatus, &outputMessageID, &jobStatus, &currentLease, &deadlineValid)
 	if errors.Is(err, pgx.ErrNoRows) {

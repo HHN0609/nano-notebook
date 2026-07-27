@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
@@ -123,10 +124,13 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	}}
 	normal := &recordingNormalExecutor{}
 	validator := &researchCandidateValidator{accepted: map[string]bool{"https://example.com/workflow?utm_source=one": true}}
+	catalog, _ := agentcatalog.LoadEmbedded()
+	resultContract, _ := catalog.ResolveContract(agentcatalog.MustParseReference("research.discovery-result@1"))
 	executor := agent.NewLeaderExecutor(
 		api.db.Pool(), normal, fixedLeaderRouter{route: agent.LeaderDelegateResearch},
 		fixedResearchPlanner{queries: []string{"电影制作流程", "剧本 拍摄 后期"}}, provider,
 		agent.WithResearchCandidateValidator(validator),
+		agent.WithResearchResultContract(resultContract),
 	)
 	queue := jobs.NewQueue(api.db.Pool())
 
@@ -202,6 +206,20 @@ func TestLeaderDelegatesDurableResearchChildAndResumesWithPrivateDiscovery(t *te
 	}
 	if sessionID != *parentSessionID {
 		t.Fatalf("completed Session=%q, want delegated Session=%q", sessionID, *parentSessionID)
+	}
+	var resultID, storedResultContract string
+	var resultPayload []byte
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select result.id,result.contract_identity||'@'||result.contract_version::text,result.payload
+		from agent_run_delegations delegation
+		join agent_run_results result on result.id=delegation.result_id
+		where delegation.child_run_id=$1
+	`, childRunID).Scan(&resultID, &storedResultContract, &resultPayload); err != nil {
+		t.Fatal(err)
+	}
+	if resultID == "" || storedResultContract != "research.discovery-result@1" ||
+		!strings.Contains(string(resultPayload), "https://example.com/workflow?utm_source=one") {
+		t.Fatalf("Agent Result id=%q contract=%q payload=%s", resultID, storedResultContract, resultPayload)
 	}
 
 	resumed, ok, err := queue.ClaimNext(context.Background())

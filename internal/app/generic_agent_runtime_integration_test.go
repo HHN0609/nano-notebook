@@ -3,12 +3,16 @@ package app_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
+	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -69,6 +73,206 @@ func TestConfiguredAgentRunRequiresNoRoleExecutorVersionOrChatOwnership(t *testi
 	}
 }
 
+func TestExactAgentReleaseActivatesConfiguredAdmissionForNewChatRuns(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configured-release-admission@example.com")
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.server = app.NewServer(app.Config{
+		CookieSecure: false, AgentCatalog: catalog,
+		AgentRelease: agentcatalog.MustParseReference("nano.default@1"),
+	}, api.db)
+	api.handler = api.server.Handler()
+	messageID := "0190cdd2-5f2d-7ad8-b3f5-1b588788c114"
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": messageID, "content": "Use the released Agent.", "time_zone": "Asia/Shanghai",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, response, &body)
+	var runtimeKind, definition, executor, modelPolicy string
+	var role, executorVersion, userID *string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select runtime_kind,definition_identity||'@'||definition_version::text,executor_identity,
+			model_policy_identity||'@'||model_policy_version::text,agent_role,executor_version,user_id
+		from agent_runs where id=$1
+	`, body.RunID).Scan(&runtimeKind, &definition, &executor, &modelPolicy, &role, &executorVersion, &userID); err != nil {
+		t.Fatal(err)
+	}
+	if runtimeKind != "configured" || definition != "chat.leader@1" || executor != "chat_leader" ||
+		modelPolicy != "agent.chat-default@1" || role != nil || executorVersion != nil || userID != nil {
+		t.Fatalf("kind=%s definition=%s executor=%s policy=%s role=%v version=%v user=%v", runtimeKind, definition, executor, modelPolicy, role, executorVersion, userID)
+	}
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(context.Background())
+	if err != nil || !ok || claimed.RunID != body.RunID {
+		t.Fatalf("claim=%+v ok=%t err=%v", claimed, ok, err)
+	}
+	normal := &recordingNormalExecutor{}
+	runtime := agent.NewLeaderExecutor(
+		api.db.Pool(), normal, fixedLeaderRouter{route: agent.LeaderDelegateResearch},
+		fixedResearchPlanner{queries: []string{"unused"}}, &recordingResearchProvider{},
+	)
+	resolution := agent.NewChatLeaderDefinitionExecutor(runtime).ExecuteAttempt(context.Background(), attemptFromClaim(claimed))
+	if resolution.Disposition != agent.AttemptCompleted || normal.calls != 1 {
+		t.Fatalf("resolution=%+v normal calls=%d", resolution, normal.calls)
+	}
+	var requestedRoute, effectiveRoute, policyReason string
+	if err := api.db.Pool().QueryRow(context.Background(), `select requested_route,effective_route,policy_reason_code from agent_run_routes where run_id=$1`, body.RunID).Scan(&requestedRoute, &effectiveRoute, &policyReason); err != nil || requestedRoute != "delegate_research" || effectiveRoute != "continue_chat" || policyReason != "relationship_unregistered" {
+		t.Fatalf("route=%q/%q policy=%q err=%v", requestedRoute, effectiveRoute, policyReason, err)
+	}
+	postgresRuntime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, func() string { return "msg_configured_answer" })
+	draft := appendFinalDraft(t, postgresRuntime, attemptFromClaim(claimed), "Configured Agent completed.")
+	if err := postgresRuntime.PublishFinal(context.Background(), attemptFromClaim(claimed), draft); err != nil {
+		t.Fatal(err)
+	}
+	var runStatus, productStatus, outputMessageID, resultContract string
+	var resultPayload []byte
+	var resultPayloadBytes, modelCallsConsumed, contextBytesConsumed, resultBytesConsumed int
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select run.status,product.status,product.output_message_id,
+			result.contract_identity||'@'||result.contract_version::text,result.payload,result.payload_bytes,
+			tree.model_calls_consumed,tree.context_bytes_consumed,tree.result_bytes_consumed
+		from agent_runs run join chat_runs product on product.root_agent_run_id=run.id
+		join agent_trees tree on tree.id=run.tree_id
+		join agent_run_results result on result.producer_run_id=run.id
+		where run.id=$1
+	`, body.RunID).Scan(&runStatus, &productStatus, &outputMessageID, &resultContract, &resultPayload, &resultPayloadBytes,
+		&modelCallsConsumed, &contextBytesConsumed, &resultBytesConsumed); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "completed" || productStatus != "completed" || outputMessageID != "msg_configured_answer" ||
+		resultContract != "chat.answer@1" || !strings.Contains(string(resultPayload), "Configured Agent completed.") ||
+		resultBytesConsumed != resultPayloadBytes || modelCallsConsumed != 2 || contextBytesConsumed < 1 {
+		t.Fatalf("terminal run=%s product=%s output=%s result=%s payload=%s consumed=%d", runStatus, productStatus, outputMessageID, resultContract, resultPayload, resultBytesConsumed)
+	}
+	events := api.getWithCookie(t, "/api/v1/agent-runs/"+body.RunID+"/events", sessionCookie)
+	if events.Code != http.StatusOK || !strings.Contains(events.Body.String(), `"status":"completed"`) ||
+		!strings.Contains(events.Body.String(), "Configured Agent completed.") {
+		t.Fatalf("events status=%d body=%s", events.Code, events.Body.String())
+	}
+	chatProjection := api.getWithCookie(t, "/api/v1/chats/"+chatID, sessionCookie)
+	if chatProjection.Code != http.StatusOK || !strings.Contains(chatProjection.Body.String(), body.RunID) {
+		t.Fatalf("Chat projection status=%d body=%s", chatProjection.Code, chatProjection.Body.String())
+	}
+}
+
+func TestConfiguredAgentTreeDeadlineExpiresBeforeJobClaim(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configured-deadline@example.com")
+	catalog, _ := agentcatalog.LoadEmbedded()
+	api.server = app.NewServer(app.Config{
+		CookieSecure: false, AgentCatalog: catalog,
+		AgentRelease: agentcatalog.MustParseReference("nano.default@1"),
+	}, api.db)
+	api.handler = api.server.Handler()
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": "0190cdd2-5f2d-7ad8-b3f5-1b588788c115", "content": "Expire this configured run.",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, response, &body)
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update agent_trees set absolute_deadline=now()-interval '1 second'
+		where id=(select tree_id from agent_runs where id=$1)
+	`, body.RunID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(context.Background())
+	if err != nil || ok {
+		t.Fatalf("claim=%+v ok=%t err=%v", claimed, ok, err)
+	}
+	var runStatus, jobStatus, productStatus, errorCode string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select run.status,job.status,product.status,run.error_code
+		from agent_runs run join agent_jobs job on job.run_id=run.id
+		join chat_runs product on product.root_agent_run_id=run.id
+		where run.id=$1
+	`, body.RunID).Scan(&runStatus, &jobStatus, &productStatus, &errorCode); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "failed" || jobStatus != "failed" || productStatus != "failed" || errorCode != "run_deadline_exceeded" {
+		t.Fatalf("terminal=%s/%s/%s error=%s", runStatus, jobStatus, productStatus, errorCode)
+	}
+}
+
+func TestConfiguredAttemptFailureTerminalizesWithoutAgentRole(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configured-terminal@example.com")
+	catalog, _ := agentcatalog.LoadEmbedded()
+	api.server = app.NewServer(app.Config{
+		CookieSecure: false, AgentCatalog: catalog,
+		AgentRelease: agentcatalog.MustParseReference("nano.default@1"),
+	}, api.db)
+	api.handler = api.server.Handler()
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": "0190cdd2-5f2d-7ad8-b3f5-1b588788c116", "content": "Fail this configured attempt.",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, response, &body)
+	queue := jobs.NewQueue(api.db.Pool())
+	claimed, ok, err := queue.ClaimNext(context.Background())
+	if err != nil || !ok || claimed.RunID != body.RunID {
+		t.Fatalf("claim=%+v ok=%t err=%v", claimed, ok, err)
+	}
+	resolution, err := queue.ResolveAttempt(context.Background(), claimed, agent.AttemptResolution{
+		Disposition: agent.AttemptTerminal, ErrorCode: "agent_execution_failed",
+	})
+	if err != nil || resolution.Disposition != agent.AttemptTerminal {
+		t.Fatalf("resolution=%+v err=%v", resolution, err)
+	}
+	var runStatus, jobStatus, productStatus string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select run.status,job.status,product.status
+		from agent_runs run join agent_jobs job on job.run_id=run.id
+		join chat_runs product on product.root_agent_run_id=run.id where run.id=$1
+	`, body.RunID).Scan(&runStatus, &jobStatus, &productStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "failed" || jobStatus != "failed" || productStatus != "failed" {
+		t.Fatalf("terminal=%s/%s/%s", runStatus, jobStatus, productStatus)
+	}
+}
+
+func TestConfiguredChatRunCanBeCancelledThroughProductOwnership(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configured-cancel@example.com")
+	catalog, _ := agentcatalog.LoadEmbedded()
+	api.server = app.NewServer(app.Config{
+		CookieSecure: false, AgentCatalog: catalog,
+		AgentRelease: agentcatalog.MustParseReference("nano.default@1"),
+	}, api.db)
+	api.handler = api.server.Handler()
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": "0190cdd2-5f2d-7ad8-b3f5-1b588788c117", "content": "Cancel this configured run.",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, response, &body)
+	cancelled := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+body.RunID+"/cancel", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if cancelled.Code != http.StatusOK || !strings.Contains(cancelled.Body.String(), `"status":"cancelled"`) {
+		t.Fatalf("cancel status=%d body=%s", cancelled.Code, cancelled.Body.String())
+	}
+	var productStatus string
+	if err := api.db.Pool().QueryRow(context.Background(), `select status from chat_runs where root_agent_run_id=$1`, body.RunID).Scan(&productStatus); err != nil || productStatus != "cancelled" {
+		t.Fatalf("product status=%q err=%v", productStatus, err)
+	}
+}
+
 func TestConfiguredChatAdmissionPinsTransitiveDefinitionAndPolicy(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configured-admission@example.com")
 	legacyRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c112")
@@ -85,11 +289,38 @@ func TestConfiguredChatAdmissionPinsTransitiveDefinitionAndPolicy(t *testing.T) 
 		Definition: definition, ModelPolicy: policy, DeadlineAt: definitionAdmissionDeadline(),
 		ContextManifest: json.RawMessage(`{"time_zone":"Asia/Shanghai"}`),
 	}
+	traceScope, err := agent.NewTraceScope(agent.DiscardTraceSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traceScope.Rollback()
+	ctx = agent.ContextWithTraceScope(ctx, traceScope)
 	if err := api.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
-		return agent.NewStore(tx).CreateConfiguredChatQueued(ctx, command)
+		store := agent.NewStore(tx)
+		if err := store.CreateConfiguredChatQueued(ctx, command); err != nil {
+			return fmt.Errorf("create run: %w", err)
+		}
+		if err := store.PinEvidenceSet(ctx, command.RunID, userID, nil); err != nil {
+			return fmt.Errorf("pin evidence: %w", err)
+		}
+		if err := jobs.NewStore(tx).CreateAgentRun(ctx, "job_configured_admission", command.RunID); err != nil {
+			return fmt.Errorf("create job: %w", err)
+		}
+		var temporaryOwner, principal string
+		if err := tx.QueryRow(ctx, `select user_id,current_setting('app.principal_id',true) from agent_runs where id=$1`, command.RunID).Scan(&temporaryOwner, &principal); err != nil {
+			return fmt.Errorf("read temporary owner: %w", err)
+		}
+		if temporaryOwner != userID || principal != userID {
+			return fmt.Errorf("temporary owner=%q principal=%q", temporaryOwner, principal)
+		}
+		if err := agent.StartRunTraceInTx(ctx, tx, command.RunID, policy.ProviderModel, definition.Reference().String(), nil); err != nil {
+			return fmt.Errorf("start trace: %w", err)
+		}
+		return store.FinalizeConfiguredChatOwnership(ctx, command.RunID)
 	}); err != nil {
 		t.Fatal(err)
 	}
+	_ = traceScope.PublishAfterCommit(ctx)
 	var runtimeKind, definitionHash, policyHash, providerModel, executor string
 	var role, executorVersion *string
 	if err := api.db.Pool().QueryRow(ctx, `
@@ -105,6 +336,78 @@ func TestConfiguredChatAdmissionPinsTransitiveDefinitionAndPolicy(t *testing.T) 
 
 func definitionAdmissionDeadline() time.Time {
 	return time.Now().UTC().Add(10 * time.Minute)
+}
+
+func TestPostgresRuntimeLoadsConfiguredChatRootWithoutLegacyFields(t *testing.T) {
+	api, _, _, chatID := newChatFixture(t, "configured-runtime-load@example.com")
+	ctx := context.Background()
+	var userID string
+	if err := api.db.Pool().QueryRow(ctx, `select creator_user_id from chat_chats where id=$1`, chatID).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	catalog, _ := agentcatalog.LoadEmbedded()
+	definition, _ := catalog.ResolveDefinition(agentcatalog.MustParseReference("chat.leader@1"))
+	policy, _ := catalog.ResolveModelPolicy(definition.ModelPolicy)
+	deadline := definitionAdmissionDeadline()
+	command := agent.ConfiguredChatAdmission{
+		RunID: "run_configured_load", UserID: userID, ChatID: chatID, InputMessageID: "msg_configured_load",
+		Definition: definition, ModelPolicy: policy, DeadlineAt: deadline,
+		ContextManifest: json.RawMessage(`{"time_zone":"Asia/Shanghai"}`),
+	}
+	if err := api.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `insert into chat_messages(id,chat_id,role,content) values($1,$2,'user',$3)`, command.InputMessageID, chatID, "Use configured runtime."); err != nil {
+			return err
+		}
+		if err := agent.NewStore(tx).CreateConfiguredChatQueued(ctx, command); err != nil {
+			return fmt.Errorf("create configured run: %w", err)
+		}
+		if err := jobs.NewStore(tx).CreateAgentRun(ctx, "job_configured_load", command.RunID); err != nil {
+			return fmt.Errorf("create configured job: %w", err)
+		}
+		return agent.NewStore(tx).FinalizeConfiguredChatOwnership(ctx, command.RunID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const leaseToken = "0190cdd2-5f2d-7ad8-b3f5-1b588788c113"
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set status='running',attempt_no=1,lease_token=$2,lease_expires_at=now()+interval '1 minute' where id=$1`, "job_configured_load", leaseToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set status='running',started_at=now() where id=$1`, command.RunID); err != nil {
+		t.Fatal(err)
+	}
+	attempt := agent.Attempt{JobID: "job_configured_load", RunID: command.RunID, AttemptNo: 1, LeaseToken: leaseToken}
+	execution, err := agent.NewPostgresRuntime(api.db.Pool(), "", nil).Load(ctx, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.ChatID != chatID || execution.UserID != userID || execution.InputMessageID != command.InputMessageID ||
+		execution.Model != policy.ProviderModel || execution.PromptVersion != agent.BarePromptVersion ||
+		execution.AgentConfigID != definition.Reference().String() || execution.TimeZone != "Asia/Shanghai" {
+		t.Fatalf("configured execution=%+v", execution)
+	}
+	if execution.ActionDecisionLimit != definition.Limits.ModelCalls-1 || execution.FinalDecisionLimit != 1 ||
+		execution.ActionLimit != definition.Limits.Actions || execution.ActionBatchLimit != definition.Limits.ActionBatch ||
+		execution.ActionResultByteLimit != definition.Limits.ResultBytes || execution.ActionResultsByteLimit != definition.Limits.ResultBytes {
+		t.Fatalf("configured limits=%+v definition=%+v", execution, definition.Limits)
+	}
+	if !execution.DeadlineAt.Equal(deadline) {
+		t.Fatalf("deadline=%s want=%s", execution.DeadlineAt, deadline)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into agent_run_routes(run_id,route,requested_route,effective_route,intent_reason_code,policy_reason_code)
+		values($1,'continue_chat','continue_chat','continue_chat','ordinary_conversation','allowed')
+	`, command.RunID); err != nil {
+		t.Fatal(err)
+	}
+	normal := &recordingNormalExecutor{}
+	runtime := agent.NewLeaderExecutor(
+		api.db.Pool(), normal, fixedLeaderRouter{route: agent.LeaderContinueChat},
+		fixedResearchPlanner{queries: []string{"unused"}}, &recordingResearchProvider{},
+	)
+	resolution := agent.NewChatLeaderDefinitionExecutor(runtime).ExecuteAttempt(ctx, attempt)
+	if resolution.Disposition != agent.AttemptCompleted || normal.calls != 1 {
+		t.Fatalf("resolution=%+v normal calls=%d", resolution, normal.calls)
+	}
 }
 
 func TestAgentResultIsCanonicalTypedImmutableAndUniquePerProducer(t *testing.T) {

@@ -14,18 +14,24 @@ func TerminalizeAttemptStateInTx(ctx context.Context, tx pgx.Tx, attempt Attempt
 		!safeAttemptErrorCode.MatchString(errorCode) {
 		return errors.New("invalid Attempt terminalization")
 	}
-	var role AgentRole
-	if err := tx.QueryRow(ctx, `select agent_role from agent_runs where id=$1`, attempt.RunID).Scan(&role); err != nil {
+	var runtimeKind string
+	var role *AgentRole
+	var executorIdentity *string
+	if err := tx.QueryRow(ctx, `select runtime_kind,agent_role,executor_identity from agent_runs where id=$1`, attempt.RunID).Scan(&runtimeKind, &role, &executorIdentity); err != nil {
 		return err
 	}
-	if role == RoleResearch {
+	isResearch := (runtimeKind == "legacy_role" && role != nil && *role == RoleResearch) ||
+		(runtimeKind == "configured" && executorIdentity != nil && *executorIdentity == "research")
+	isChatLeader := (runtimeKind == "legacy_role" && role != nil && *role == RoleLeader) ||
+		(runtimeKind == "configured" && executorIdentity != nil && *executorIdentity == "chat_leader")
+	if isResearch {
 		if err := FailResearchPayloadInTx(ctx, tx, attempt.RunID, errorCode); err != nil {
 			return err
 		}
 		if err := (DelegationKernel{}).TerminalizeInTx(ctx, tx, attempt, DelegationFailed, errorCode); err != nil {
 			return err
 		}
-	} else if role == RoleLeader {
+	} else if isChatLeader {
 		jobTag, err := tx.Exec(ctx, `
 			update agent_jobs set status='failed',lease_token=null,lease_expires_at=null,last_error_code=$4,
 				finished_at=now(),updated_at=now()

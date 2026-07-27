@@ -16,6 +16,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
@@ -40,6 +41,7 @@ type controlPlaneConfig struct {
 	DefaultModel          string
 	ResearchModel         string
 	AgentConfigurationID  string
+	AgentRelease          agentcatalog.Reference
 	SourceS3              objectstore.S3Config
 	FetcherURL            string
 }
@@ -61,6 +63,15 @@ func main() {
 	defer db.Close()
 	if err := app.RunMigrations(ctx, db); err != nil {
 		slog.Error("migrations failed", "error", err)
+		os.Exit(1)
+	}
+	definitionCatalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		slog.Error("Control Plane Agent Catalog invalid", "error", err)
+		os.Exit(1)
+	}
+	if _, err := app.VerifyAgentCatalogReady(ctx, db, definitionCatalog, config.AgentRelease); err != nil {
+		slog.Error("Control Plane Agent Catalog readiness failed", "release", config.AgentRelease, "error", err)
 		os.Exit(1)
 	}
 	runConfig := agent.DefaultRunConfig(config.AgentConfigurationID)
@@ -139,6 +150,7 @@ func main() {
 	server := app.NewServer(app.Config{
 		CookieSecure: config.CookieSecure, Version: config.Version, DefaultModel: config.DefaultModel,
 		AgentRun: runConfig, AgentConfiguration: agentConfiguration,
+		AgentCatalog: definitionCatalog, AgentRelease: config.AgentRelease,
 		AdminTraces: queryClient, ReplaySealer: replaySealer, TraceSink: traceExporter,
 		SourceUploads: sourceStore,
 		SourceFetcher: remoteFetcher, SourceSnapshots: sourceStore,
@@ -193,6 +205,10 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 	if err != nil {
 		return controlPlaneConfig{}, fmt.Errorf("parse NANO_SOURCE_S3_USE_TLS: %w", err)
 	}
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@1"))
+	if err != nil {
+		return controlPlaneConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
+	}
 	config := controlPlaneConfig{
 		DatabaseURL:           env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
 		Addr:                  env("NANO_CONTROL_PLANE_ADDR", ":8080"),
@@ -205,6 +221,7 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 		DefaultModel:         env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
 		ResearchModel:        env("NANO_RESEARCH_MODEL", env("NANO_CHAT_MODEL", "aliyun/qwen-plus")),
 		AgentConfigurationID: env("NANO_AGENT_CONFIGURATION_ID", "nano-interactive-v1"),
+		AgentRelease:         agentRelease,
 		SourceS3: objectstore.S3Config{
 			Endpoint:        env("NANO_SOURCE_S3_ENDPOINT", "127.0.0.1:59000"),
 			AccessKeyID:     env("NANO_SOURCE_S3_ACCESS_KEY_ID", "nano"),

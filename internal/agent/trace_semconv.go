@@ -73,6 +73,9 @@ const (
 
 const (
 	TraceKeyRunID                        = "nano.run.id"
+	TraceKeyRuntimeKind                  = "nano.agent.runtime_kind"
+	TraceKeyDefinitionIdentity           = "nano.agent.definition"
+	TraceKeyExecutorIdentity             = "nano.agent.executor"
 	TraceKeyAgentRole                    = "nano.agent.role"
 	TraceKeyConfigurationSetID           = "nano.configuration_set.id"
 	TraceKeyConfigurationSetSHA256       = "nano.configuration_set.sha256"

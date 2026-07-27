@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/chat"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
@@ -45,6 +46,8 @@ type Config struct {
 	DefaultModel       string
 	AgentRun           agent.RunConfig
 	AgentConfiguration agent.AgentConfigurationSet
+	AgentCatalog       agentcatalog.Catalog
+	AgentRelease       agentcatalog.Reference
 	AdminTraces        collector.QueryClient
 	ReplaySealer       *replay.Sealer
 	TraceSink          agent.TraceSink
@@ -64,6 +67,13 @@ type Server struct {
 	sourceHub     *runHub
 	adminTraces   collector.QueryClient
 	replaySealer  *replay.Sealer
+	chatAgent     *configuredChatAgent
+}
+
+type configuredChatAgent struct {
+	Release    agentcatalog.Reference
+	Definition agentcatalog.Definition
+	Policy     agentcatalog.ModelPolicy
 }
 
 func NewServer(cfg Config, db *DB) *Server {
@@ -86,9 +96,30 @@ func NewServer(cfg Config, db *DB) *Server {
 	cfg.AgentRun = leaderProfile.Run
 	cfg.AgentRun.ID = cfg.AgentConfiguration.ID
 	cfg.AgentRun.ExecutorVersion = leaderProfile.ExecutorVersion
+	var chatAgent *configuredChatAgent
+	if cfg.AgentRelease.Identity != "" {
+		release, ok := cfg.AgentCatalog.ResolveRelease(cfg.AgentRelease)
+		if !ok {
+			panic(fmt.Errorf("unknown exact Agent release %s", cfg.AgentRelease))
+		}
+		root, ok := release.Roots["chat"]
+		if !ok {
+			panic(fmt.Errorf("Agent release %s has no Chat root", cfg.AgentRelease))
+		}
+		definition, ok := cfg.AgentCatalog.ResolveDefinition(root)
+		if !ok {
+			panic(fmt.Errorf("Agent release %s has unknown Chat root %s", cfg.AgentRelease, root))
+		}
+		policy, ok := cfg.AgentCatalog.ResolveModelPolicy(definition.ModelPolicy)
+		if !ok {
+			panic(fmt.Errorf("Agent Definition %s has unknown Model Policy %s", root, definition.ModelPolicy))
+		}
+		chatAgent = &configuredChatAgent{Release: cfg.AgentRelease, Definition: definition, Policy: policy}
+	}
 	s := &Server{
 		cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(),
 		runHub: newRunHub(), discoveryHub: newRunHub(), sourceHub: newRunHub(), adminTraces: cfg.AdminTraces, replaySealer: cfg.ReplaySealer,
+		chatAgent: chatAgent,
 	}
 	s.routes()
 	return s
@@ -1268,8 +1299,26 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		if len(sourceIDs) > 0 {
 			promptVersion = agent.GroundedPromptVersion
 		}
-		if err := agentStore.CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, promptVersion, normalizeBrowserTimeZone(req.TimeZone), s.cfg.AgentRun); err != nil {
-			return err
+		timeZone := normalizeBrowserTimeZone(req.TimeZone)
+		if s.chatAgent == nil {
+			if err := agentStore.CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, promptVersion, timeZone, s.cfg.AgentRun); err != nil {
+				return err
+			}
+		} else {
+			manifest, err := json.Marshal(map[string]any{
+				"agent_release": s.chatAgent.Release.String(), "time_zone": timeZone,
+				"selected_source_count": len(sourceIDs),
+			})
+			if err != nil {
+				return err
+			}
+			if err := agentStore.CreateConfiguredChatQueued(r.Context(), agent.ConfiguredChatAdmission{
+				RunID: runID, UserID: userID, ChatID: chatID, InputMessageID: req.ID,
+				Definition: s.chatAgent.Definition, ModelPolicy: s.chatAgent.Policy,
+				DeadlineAt: time.Now().Add(s.cfg.AgentRun.Deadline), ContextManifest: manifest,
+			}); err != nil {
+				return err
+			}
 		}
 		if err := agentStore.PinEvidenceSet(r.Context(), runID, userID, sourceIDs); err != nil {
 			return err
@@ -1277,8 +1326,17 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {
 			return err
 		}
-		if err := agent.StartRunTraceInTx(r.Context(), tx, runID, s.cfg.DefaultModel, promptVersion, nil); err != nil {
+		traceModel, tracePrompt := s.cfg.DefaultModel, promptVersion
+		if s.chatAgent != nil {
+			traceModel, tracePrompt = s.chatAgent.Policy.ProviderModel, s.chatAgent.Definition.Reference().String()
+		}
+		if err := agent.StartRunTraceInTx(r.Context(), tx, runID, traceModel, tracePrompt, nil); err != nil {
 			return err
+		}
+		if s.chatAgent != nil {
+			if err := agentStore.FinalizeConfiguredChatOwnership(r.Context(), runID); err != nil {
+				return err
+			}
 		}
 		_, err = tx.Exec(r.Context(), `select pg_notify('nano_agent_jobs', $1)`, jobID)
 		return err
@@ -1300,6 +1358,7 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		return
 	}
 	if err != nil {
+		slog.ErrorContext(r.Context(), "Agent Run admission failed", "error", err, "chat_id", chatID, "run_id", runID)
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}

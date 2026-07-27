@@ -102,6 +102,8 @@ func (h *AgentExecutionHost) resolvePinnedExecution(pinned pinnedExecution) (Def
 
 type LeaderRoleExecutor struct{ runtime *LeaderExecutor }
 type ResearchRoleExecutor struct{ runtime *LeaderExecutor }
+type ChatLeaderDefinitionExecutor struct{ runtime *LeaderExecutor }
+type ResearchDefinitionExecutor struct{ runtime *LeaderExecutor }
 
 func NewLeaderRoleExecutor(runtime *LeaderExecutor) *LeaderRoleExecutor {
 	return &LeaderRoleExecutor{runtime: runtime}
@@ -109,6 +111,14 @@ func NewLeaderRoleExecutor(runtime *LeaderExecutor) *LeaderRoleExecutor {
 
 func NewResearchRoleExecutor(runtime *LeaderExecutor) *ResearchRoleExecutor {
 	return &ResearchRoleExecutor{runtime: runtime}
+}
+
+func NewChatLeaderDefinitionExecutor(runtime *LeaderExecutor) *ChatLeaderDefinitionExecutor {
+	return &ChatLeaderDefinitionExecutor{runtime: runtime}
+}
+
+func NewResearchDefinitionExecutor(runtime *LeaderExecutor) *ResearchDefinitionExecutor {
+	return &ResearchDefinitionExecutor{runtime: runtime}
 }
 
 func (e *LeaderRoleExecutor) ExecuteAttempt(ctx context.Context, attempt Attempt) AttemptResolution {
@@ -123,4 +133,18 @@ func (e *ResearchRoleExecutor) ExecuteAttempt(ctx context.Context, attempt Attem
 		return ClassifyAttempt(errors.New("Research Role Executor is invalid"), context.Cause(ctx))
 	}
 	return ClassifyAttempt(e.runtime.executeExpectedRole(ctx, attempt, RoleResearch), context.Cause(ctx))
+}
+
+func (e *ChatLeaderDefinitionExecutor) ExecuteAttempt(ctx context.Context, attempt Attempt) AttemptResolution {
+	if e == nil || e.runtime == nil {
+		return ClassifyAttempt(errors.New("Chat Leader Definition Executor is invalid"), context.Cause(ctx))
+	}
+	return ClassifyAttempt(e.runtime.executeExpectedDefinition(ctx, attempt, "chat_leader"), context.Cause(ctx))
+}
+
+func (e *ResearchDefinitionExecutor) ExecuteAttempt(ctx context.Context, attempt Attempt) AttemptResolution {
+	if e == nil || e.runtime == nil {
+		return ClassifyAttempt(errors.New("Research Definition Executor is invalid"), context.Cause(ctx))
+	}
+	return ClassifyAttempt(e.runtime.executeExpectedDefinition(ctx, attempt, "research"), context.Cause(ctx))
 }

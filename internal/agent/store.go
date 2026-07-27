@@ -88,10 +88,12 @@ type CitationView struct {
 func (s *Store) ByInputMessage(ctx context.Context, messageID string) (RunRef, error) {
 	var run RunRef
 	err := s.db.QueryRow(ctx, `
-		select id, status
-		from agent_runs
-		where input_message_id = $1 and agent_role='leader'
-		order by created_at, id
+		select run.id,run.status
+		from agent_runs run
+		left join chat_runs product on product.root_agent_run_id=run.id
+		where coalesce(run.input_message_id,product.input_message_id)=$1
+		  and ((run.runtime_kind='legacy_role' and run.agent_role='leader') or run.runtime_kind='configured')
+		order by run.created_at,run.id
 		limit 1`, messageID).Scan(&run.ID, &run.Status)
 	return run, err
 }
@@ -99,9 +101,12 @@ func (s *Store) ByInputMessage(ctx context.Context, messageID string) (RunRef, e
 func (s *Store) ActiveByUser(ctx context.Context, userID string) (RunRef, bool, error) {
 	var run RunRef
 	err := s.db.QueryRow(ctx, `
-		select id, status
-		from agent_runs
-		where user_id = $1 and agent_role='leader' and status in ('queued', 'running')`, userID).Scan(&run.ID, &run.Status)
+		select run.id,run.status
+		from agent_runs run
+		left join chat_runs product on product.root_agent_run_id=run.id
+		where coalesce(run.user_id,product.user_id)=$1
+		  and ((run.runtime_kind='legacy_role' and run.agent_role='leader') or run.runtime_kind='configured')
+		  and run.status in ('queued','running')`, userID).Scan(&run.ID, &run.Status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunRef{}, false, nil
 	}
@@ -119,10 +124,12 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 		select r.id, j.id, j.attempt_no, j.status
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
 		where r.status in ('queued', 'running')
 			and j.status in ('queued', 'running', 'waiting')
-			and r.deadline_at <= now()
-			and ($1 = '' or r.user_id = $1)
+			and coalesce(r.deadline_at,tree.absolute_deadline) <= now()
+			and ($1 = '' or coalesce(r.user_id,product.user_id) = $1)
 			and ($2 = '' or r.id = $2 or exists(
 				select 1 from agent_run_delegations d where d.parent_run_id=$2 and d.child_run_id=r.id
 			))
@@ -156,7 +163,9 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 			update agent_runs
 			set status = 'failed', error_code = 'run_deadline_exceeded',
 				finished_at = now(), updated_at = now()
-			where id = $1 and status in ('queued', 'running') and deadline_at <= now()`, item.runID)
+			where id = $1 and status in ('queued', 'running') and coalesce(
+				deadline_at,(select absolute_deadline from agent_trees where agent_trees.id=agent_runs.tree_id)
+			) <= now()`, item.runID)
 		if err != nil {
 			return 0, err
 		}
@@ -208,9 +217,12 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 func (s *Store) ActiveForChat(ctx context.Context, userID, chatID string) (RunSnapshot, bool, error) {
 	var run RunSnapshot
 	err := s.db.QueryRow(ctx, `
-		select id, input_message_id, status, error_code
-		from agent_runs
-		where user_id = $1 and chat_id = $2 and agent_role='leader' and status in ('queued', 'running')`, userID, chatID).
+		select run.id,coalesce(run.input_message_id,product.input_message_id),run.status,run.error_code
+		from agent_runs run
+		left join chat_runs product on product.root_agent_run_id=run.id
+		where coalesce(run.user_id,product.user_id)=$1 and coalesce(run.chat_id,product.chat_id)=$2
+		  and ((run.runtime_kind='legacy_role' and run.agent_role='leader') or run.runtime_kind='configured')
+		  and run.status in ('queued','running')`, userID, chatID).
 		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunSnapshot{}, false, nil
@@ -225,9 +237,12 @@ func (s *Store) ProjectionForUser(ctx context.Context, userID, runID string) (Ru
 	var projection RunProjection
 	var outputMessageID *string
 	err := s.db.QueryRow(ctx, `
-		select id, input_message_id, status, error_code, output_message_id, discovery_session_id
-		from agent_runs
-		where id = $1 and user_id = $2 and agent_role='leader'`, runID, userID).
+		select run.id,coalesce(run.input_message_id,product.input_message_id),run.status,run.error_code,
+			coalesce(run.output_message_id,product.output_message_id),run.discovery_session_id
+		from agent_runs run
+		left join chat_runs product on product.root_agent_run_id=run.id
+		where run.id=$1 and coalesce(run.user_id,product.user_id)=$2
+		  and ((run.runtime_kind='legacy_role' and run.agent_role='leader') or run.runtime_kind='configured')`, runID, userID).
 		Scan(&projection.Run.ID, &projection.Run.InputMessageID, &projection.Run.Status, &projection.Run.ErrorCode, &outputMessageID, &projection.Run.DiscoverySessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunProjection{}, ErrRunNotFound
@@ -382,13 +397,16 @@ func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]Run
 	rows, err := s.db.Query(ctx, `
 		select id, input_message_id, status, error_code, discovery_session_id
 		from (
-			select distinct on (r.input_message_id)
-				r.id, r.input_message_id, r.status, r.error_code, r.discovery_session_id,
+			select distinct on (coalesce(r.input_message_id,product.input_message_id))
+				r.id,coalesce(r.input_message_id,product.input_message_id) as input_message_id,
+				r.status,r.error_code,r.discovery_session_id,
 				m.created_at as input_created_at
 			from agent_runs r
-			join chat_messages m on m.id = r.input_message_id
-			where r.user_id = $1 and r.chat_id = $2 and r.agent_role='leader'
-			order by r.input_message_id, r.created_at desc, r.id desc
+			left join chat_runs product on product.root_agent_run_id=r.id
+			join chat_messages m on m.id=coalesce(r.input_message_id,product.input_message_id)
+			where coalesce(r.user_id,product.user_id)=$1 and coalesce(r.chat_id,product.chat_id)=$2
+			  and ((r.runtime_kind='legacy_role' and r.agent_role='leader') or r.runtime_kind='configured')
+			order by coalesce(r.input_message_id,product.input_message_id),r.created_at desc,r.id desc
 		) latest
 		order by input_created_at, input_message_id`, userID, chatID)
 	if err != nil {
@@ -412,10 +430,12 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 	var attemptNo int
 	var jobStatus string
 	err := s.db.QueryRow(ctx, `
-		select r.id, r.input_message_id, r.status, r.error_code, j.id, j.attempt_no, j.status
+		select r.id,coalesce(r.input_message_id,product.input_message_id),r.status,r.error_code,j.id,j.attempt_no,j.status
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
-		where r.id = $1 and r.user_id = $2 and r.agent_role='leader'
+		left join chat_runs product on product.root_agent_run_id=r.id
+		where r.id=$1 and coalesce(r.user_id,product.user_id)=$2
+		  and ((r.runtime_kind='legacy_role' and r.agent_role='leader') or r.runtime_kind='configured')
 		for update of r, j`, runID, userID).
 		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &jobID, &attemptNo, &jobStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -441,7 +461,10 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 		from agent_run_delegations delegation
 		join agent_runs child on child.id=delegation.child_run_id
 		join agent_jobs child_job on child_job.run_id=child.id
-		where delegation.parent_run_id=$1 and child.agent_role='research'
+		where delegation.parent_run_id=$1 and (
+			(child.runtime_kind='legacy_role' and child.agent_role='research')
+			or (child.runtime_kind='configured' and child.executor_identity='research')
+		)
 		for update of child,child_job
 	`, runID).Scan(&childRunID, &childAttemptNo)
 	if childErr != nil && !errors.Is(childErr, pgx.ErrNoRows) {
@@ -659,10 +682,10 @@ func (s *Store) CreateConfiguredChatQueued(ctx context.Context, command Configur
 	treeID := "tree_" + command.RunID
 	if _, err := s.db.Exec(ctx, `
 		insert into agent_trees(
-			id,absolute_deadline,model_call_limit,action_limit,context_byte_limit,result_byte_limit
-		) values($1,$2,$3,$4,$5,$6)
+			id,absolute_deadline,model_call_limit,action_limit,context_byte_limit,result_byte_limit,context_bytes_consumed
+		) values($1,$2,$3,$4,$5,$6,$7)
 	`, treeID, command.DeadlineAt, command.Definition.Limits.ModelCalls, command.Definition.Limits.Actions,
-		command.Definition.Limits.ContextBytes, command.Definition.Limits.ResultBytes); err != nil {
+		command.Definition.Limits.ContextBytes, command.Definition.Limits.ResultBytes, len(manifest)); err != nil {
 		return err
 	}
 	if _, err := s.db.Exec(ctx, `
@@ -687,10 +710,19 @@ func (s *Store) CreateConfiguredChatQueued(ctx context.Context, command Configur
 	} else if result.RowsAffected() != 1 {
 		return errors.New("configured Agent Tree root was not pinned")
 	}
-	if result, err := s.db.Exec(ctx, `update agent_runs set user_id=null where id=$1 and runtime_kind='configured'`, command.RunID); err != nil {
+	return nil
+}
+
+func (s *Store) FinalizeConfiguredChatOwnership(ctx context.Context, runID string) error {
+	if s == nil || s.db == nil || strings.TrimSpace(runID) == "" {
+		return errors.New("invalid configured Chat ownership finalization")
+	}
+	result, err := s.db.Exec(ctx, `update agent_runs set user_id=null where id=$1 and runtime_kind='configured' and user_id is not null`, runID)
+	if err != nil {
 		return err
-	} else if result.RowsAffected() != 1 {
-		return errors.New("configured Agent Run retained product ownership")
+	}
+	if result.RowsAffected() != 1 {
+		return errors.New("configured Agent Run ownership was not finalized")
 	}
 	return nil
 }
@@ -780,8 +812,10 @@ func (s *Store) pinEvidenceSet(ctx context.Context, runID, userID string, source
 	var notebookID string
 	if err := s.db.QueryRow(ctx, `
 		select c.notebook_id
-		from agent_runs r join chat_chats c on c.id=r.chat_id
-		where r.id=$1 and r.user_id=$2 and r.status='queued'
+		from agent_runs r
+		left join chat_runs product on product.root_agent_run_id=r.id
+		join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id)
+		where r.id=$1 and coalesce(r.user_id,product.user_id)=$2 and r.status='queued'
 	`, runID, userID).Scan(&notebookID); err != nil {
 		return ErrEvidenceSetInvalid
 	}
@@ -821,7 +855,9 @@ func (s *Store) pinEvidenceSet(ctx context.Context, runID, userID string, source
 	}
 	tag, err := s.db.Exec(ctx, `
 		update agent_runs set selected_source_count=$3, updated_at=now()
-		where id=$1 and user_id=$2 and status='queued'
+		where id=$1 and status='queued' and (
+			user_id=$2 or exists(select 1 from chat_runs product where product.root_agent_run_id=agent_runs.id and product.user_id=$2)
+		)
 	`, runID, userID, len(sourceIDs))
 	if err != nil {
 		return err

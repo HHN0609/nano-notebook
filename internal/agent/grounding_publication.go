@@ -16,9 +16,12 @@ func validateGroundingPublication(ctx context.Context, tx pgx.Tx, runID string, 
 	var notebookID string
 	var authorized bool
 	if err := tx.QueryRow(ctx, `
-		select r.selected_source_count,c.notebook_id,
-			exists(select 1 from notebook_memberships m where m.notebook_id=c.notebook_id and m.user_id=r.user_id)
-		from agent_runs r join chat_chats c on c.id=r.chat_id and c.creator_user_id=r.user_id
+		select coalesce(r.selected_source_count,0),c.notebook_id,
+			exists(select 1 from notebook_memberships m where m.notebook_id=c.notebook_id and m.user_id=coalesce(r.user_id,product.user_id))
+		from agent_runs r
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+		join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id) and c.creator_user_id=coalesce(r.user_id,product.user_id)
 		where r.id=$1
 	`, runID).Scan(&selectedCount, &notebookID, &authorized); err != nil {
 		return "", err

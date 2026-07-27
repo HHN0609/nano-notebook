@@ -1087,6 +1087,24 @@ drop trigger if exists agent_runs_normalize_configured on agent_runs;
 create trigger agent_runs_normalize_configured before insert or update on agent_runs
 	for each row execute function nano_normalize_configured_agent_run();
 
+create or replace function nano_require_configured_agent_run_neutrality()
+returns trigger
+language plpgsql
+as $$
+begin
+	if exists(select 1 from agent_runs where id=new.id and runtime_kind='configured' and user_id is not null) then
+		raise exception 'configured Agent Run retained product ownership';
+	end if;
+	return null;
+end
+$$;
+
+drop trigger if exists agent_runs_configured_neutrality on agent_runs;
+create constraint trigger agent_runs_configured_neutrality
+	after insert or update of user_id on agent_runs
+	deferrable initially deferred
+	for each row execute function nano_require_configured_agent_run_neutrality();
+
 alter table agent_runs drop constraint if exists agent_runs_configured_shape_check;
 alter table agent_runs add constraint agent_runs_configured_shape_check check (
 	runtime_kind='legacy_role'
@@ -2705,24 +2723,35 @@ drop policy if exists source_discovery_jobs_worker on source_discovery_jobs;
 create policy source_discovery_jobs_worker on source_discovery_jobs
 	for all to nano_worker using (true) with check (true);
 
+create or replace function nano_run_owned(candidate_run_id text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select exists (
+		select 1
+		from public.agent_runs run
+		left join public.agent_trees tree on tree.id=run.tree_id
+		left join public.chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+		where run.id=candidate_run_id
+		  and coalesce(run.user_id,product.user_id)=nullif(current_setting('app.principal_id', true), '')
+	)
+$$;
+revoke all on function nano_run_owned(text) from public;
+grant execute on function nano_run_owned(text) to nano_app;
+
 drop policy if exists agent_runs_private on agent_runs;
 create policy agent_runs_private on agent_runs
 	for all to nano_app
 	using (
-		user_id = nullif(current_setting('app.principal_id', true), '')
-		or exists (
-			select 1 from chat_runs product
-			join agent_trees tree on tree.root_agent_run_id=product.root_agent_run_id
-			where tree.id=agent_runs.tree_id and product.user_id=nullif(current_setting('app.principal_id', true), '')
-		)
+		user_id=nullif(current_setting('app.principal_id', true), '')
+		or nano_run_owned(id)
 	)
 	with check (
-		user_id = nullif(current_setting('app.principal_id', true), '')
-		or exists (
-			select 1 from chat_runs product
-			join agent_trees tree on tree.root_agent_run_id=product.root_agent_run_id
-			where tree.id=agent_runs.tree_id and product.user_id=nullif(current_setting('app.principal_id', true), '')
-		)
+		user_id=nullif(current_setting('app.principal_id', true), '')
+		or nano_run_owned(id)
 	);
 
 drop policy if exists agent_runs_worker on agent_runs;
@@ -2788,20 +2817,8 @@ create policy agent_role_checkpoints_worker_append on agent_role_checkpoints
 drop policy if exists agent_run_evidence_set_app on agent_run_evidence_set;
 create policy agent_run_evidence_set_app on agent_run_evidence_set
 	for all to nano_app
-	using (
-		exists (
-			select 1 from agent_runs r
-			where r.id=agent_run_evidence_set.run_id
-			  and r.user_id=nullif(current_setting('app.principal_id', true), '')
-		)
-	)
-	with check (
-		exists (
-			select 1 from agent_runs r
-			where r.id=agent_run_evidence_set.run_id
-			  and r.user_id=nullif(current_setting('app.principal_id', true), '')
-		)
-);
+	using (nano_run_owned(run_id))
+	with check (nano_run_owned(run_id));
 
 drop policy if exists agent_run_delegations_owner_read on agent_run_delegations;
 create policy agent_run_delegations_owner_read on agent_run_delegations
@@ -2870,13 +2887,7 @@ create policy agent_run_checkpoints_worker_append on agent_run_checkpoints
 drop policy if exists agent_traces_app_insert on agent_traces;
 create policy agent_traces_app_insert on agent_traces
 	for insert to nano_app
-	with check (
-		exists (
-			select 1 from agent_runs r
-			where r.id = agent_traces.run_id
-			  and r.user_id = nullif(current_setting('app.principal_id', true), '')
-		)
-	);
+	with check (nano_run_owned(run_id));
 
 drop policy if exists agent_traces_worker_read on agent_traces;
 create policy agent_traces_worker_read on agent_traces
@@ -2900,7 +2911,7 @@ as $$
 		from public.agent_traces t
 		join public.agent_runs r on r.id = t.run_id
 		where t.trace_id = candidate_trace_id
-		  and r.user_id = nullif(current_setting('app.principal_id', true), '')
+		  and public.nano_run_owned(r.id)
 	)
 $$;
 revoke all on function nano_trace_owned(text) from public;
@@ -2918,7 +2929,7 @@ as $$
 		from public.agent_trace_refs t
 		join public.agent_runs r on r.id = t.run_id
 		where t.trace_id = candidate_trace_id
-		  and r.user_id = nullif(current_setting('app.principal_id', true), '')
+		  and public.nano_run_owned(r.id)
 	)
 $$;
 revoke all on function nano_trace_ref_owned(text) from public;
@@ -2945,7 +2956,7 @@ as $$
 	from public.agent_trace_refs t
 	join public.agent_runs r on r.id = t.run_id
 	where t.run_id = candidate_run_id
-	  and r.user_id = nullif(current_setting('app.principal_id', true), '')
+	  and public.nano_run_owned(r.id)
 $$;
 revoke all on function nano_owned_run_trace_descriptor(text) from public;
 grant execute on function nano_owned_run_trace_descriptor(text) to nano_app;
@@ -2969,13 +2980,7 @@ create policy agent_trace_records_worker_insert on agent_trace_records
 drop policy if exists agent_trace_refs_app_insert on agent_trace_refs;
 create policy agent_trace_refs_app_insert on agent_trace_refs
 	for insert to nano_app
-	with check (
-		exists (
-			select 1 from agent_runs r
-			where r.id = agent_trace_refs.run_id
-			  and r.user_id = nullif(current_setting('app.principal_id', true), '')
-		)
-	);
+	with check (nano_run_owned(run_id));
 
 drop policy if exists agent_trace_refs_worker on agent_trace_refs;
 create policy agent_trace_refs_worker on agent_trace_refs
@@ -2992,20 +2997,8 @@ create policy agentobs_outbox_command_objects_worker on agentobs_outbox_command_
 drop policy if exists agent_jobs_private on agent_jobs;
 create policy agent_jobs_private on agent_jobs
 	for all to nano_app
-	using (
-		exists (
-			select 1 from agent_runs r
-			where r.id = agent_jobs.run_id
-			  and r.user_id = nullif(current_setting('app.principal_id', true), '')
-		)
-	)
-	with check (
-		exists (
-			select 1 from agent_runs r
-			where r.id = agent_jobs.run_id
-			  and r.user_id = nullif(current_setting('app.principal_id', true), '')
-		)
-	);
+	using (nano_run_owned(run_id))
+	with check (nano_run_owned(run_id));
 
 drop policy if exists agent_jobs_worker on agent_jobs;
 create policy agent_jobs_worker on agent_jobs

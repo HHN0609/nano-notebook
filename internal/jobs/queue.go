@@ -66,10 +66,14 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		var job ClaimedJob
 		var status string
 		err = tx.QueryRow(ctx, `
-			select j.id, j.run_id, j.status, j.attempt_no, coalesce(j.lease_token::text,''), profile.max_attempts, r.deadline_at
+			select j.id, j.run_id, j.status, j.attempt_no, coalesce(j.lease_token::text,''),
+				coalesce(profile.max_attempts,(definition.limits->>'attempts')::integer),
+				coalesce(r.deadline_at,tree.absolute_deadline)
 			from agent_jobs j
 			join agent_runs r on r.id = j.run_id
-			join agent_role_profiles profile on profile.configuration_set_id=r.agent_config_id and profile.role=r.agent_role
+			left join agent_role_profiles profile on profile.configuration_set_id=r.agent_config_id and profile.role=r.agent_role
+			left join agent_definition_versions definition on definition.definition_identity=r.definition_identity and definition.definition_version=r.definition_version
+			left join agent_trees tree on tree.id=r.tree_id
 			where (j.status = 'queued' and j.available_at <= now() and r.status = 'queued')
 				or (j.status = 'running' and r.status = 'running' and j.lease_expires_at <= now())
 			order by j.available_at, j.created_at, j.id
@@ -229,11 +233,14 @@ func (q *Queue) ResolveAttempt(ctx context.Context, job ClaimedJob, requested ag
 	var currentLease *string
 	var storedErrorCode string
 	if err := tx.QueryRow(ctx, `
-		select j.status,r.deadline_at,profile.max_attempts,j.lease_token::text,
+		select j.status,coalesce(r.deadline_at,tree.absolute_deadline),
+			coalesce(profile.max_attempts,(definition.limits->>'attempts')::integer),j.lease_token::text,
 			coalesce(j.last_error_code,r.error_code,'already_terminal')
 		from agent_jobs j
 		join agent_runs r on r.id=j.run_id
-		join agent_role_profiles profile on profile.configuration_set_id=r.agent_config_id and profile.role=r.agent_role
+		left join agent_role_profiles profile on profile.configuration_set_id=r.agent_config_id and profile.role=r.agent_role
+		left join agent_definition_versions definition on definition.definition_identity=r.definition_identity and definition.definition_version=r.definition_version
+		left join agent_trees tree on tree.id=r.tree_id
 		where j.id=$1 and j.run_id=$2
 		for update of j,r
 	`, job.ID, job.RunID).Scan(&status, &deadline, &maxAttempts, &currentLease, &storedErrorCode); err != nil {
