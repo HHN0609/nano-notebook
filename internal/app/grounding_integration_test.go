@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	notebookapp "github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -73,6 +74,73 @@ func TestGroundingPersistsAllowlistedInlineSourceReferencesWithoutVerifier(t *te
 	}
 	if outcome != "source_cited" || !performed || sourceID != "src_marker" {
 		t.Fatalf("plan=%s performed=%t source=%s", outcome, performed, sourceID)
+	}
+}
+
+func TestConfiguredGroundingUsesProductOwnershipForPlanAndCitationReads(t *testing.T) {
+	api := newTestAPI(t)
+	sessionCookie, csrfCookie := api.registerWithCSRF(t, "configured-grounding@example.com")
+	notebookID, chatID := createNotebookAndChatForEvidenceSet(t, api, sessionCookie, csrfCookie)
+	installReadyEvidenceSetFixture(t, api, notebookID, "src_configured_ground", "evr_configured_ground", "", "")
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_evidence_units(id,revision_id,source_id,notebook_id,ordinal,kind,text_content,start_rune,end_rune)
+		values('unit_configured_ground','evr_configured_ground','src_configured_ground',$1,0,'paragraph','The launch date is 20 July.',0,27)
+	`, notebookID); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.server = notebookapp.NewServer(notebookapp.Config{
+		CookieSecure: false, AgentCatalog: catalog,
+		AgentRelease: agentcatalog.MustParseReference("nano.default@1"),
+	}, api.db)
+	api.handler = api.server.Handler()
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": "0190cdd2-5f2d-7ad8-b3f5-1b588788c120", "content": "When is launch?", "source_ids": []string{"src_configured_ground"},
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("admission=%d %s", response.Code, response.Body.String())
+	}
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	attempt := attemptFromClaim(claimed)
+	prefix := checkpointedEvidencePrefix("src_configured_ground", "evr_configured_ground", "unit_configured_ground", 0, 27, false, false)
+	draft := models.FinalDraft{Text: "The launch is 20 July [source:src_configured_ground]."}
+	prepared, err := agent.NewGroundingService(api.db.Pool()).Prepare(context.Background(), attempt, prefix, draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "", nil)
+	appendSearchCheckpoints(t, runtime, attempt, prefix)
+	checkpoint, err := agent.NewFinalDraftCheckpoint(2, prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(context.Background(), attempt, checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.PublishFinal(context.Background(), attempt, prepared); err != nil {
+		t.Fatal(err)
+	}
+	var citationID string
+	if err := api.db.Pool().QueryRow(context.Background(), `select citation_id from chat_citations where run_id=$1`, attempt.RunID).Scan(&citationID); err != nil {
+		t.Fatal(err)
+	}
+	chatSnapshot := api.getWithCookie(t, "/api/v1/chats/"+chatID, sessionCookie)
+	events := api.getWithCookie(t, "/api/v1/agent-runs/"+attempt.RunID+"/events", sessionCookie)
+	citation := api.getWithCookie(t, "/api/v1/citations/"+citationID, sessionCookie)
+	if chatSnapshot.Code != http.StatusOK || !strings.Contains(chatSnapshot.Body.String(), "src_configured_ground") {
+		t.Fatalf("Chat snapshot=%d %s", chatSnapshot.Code, chatSnapshot.Body.String())
+	}
+	if events.Code != http.StatusOK || !strings.Contains(events.Body.String(), "src_configured_ground") {
+		t.Fatalf("events=%d %s", events.Code, events.Body.String())
+	}
+	if citation.Code != http.StatusOK || !strings.Contains(citation.Body.String(), "src_configured_ground") {
+		t.Fatalf("Citation=%d %s", citation.Code, citation.Body.String())
 	}
 }
 

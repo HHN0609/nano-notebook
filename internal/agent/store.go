@@ -276,10 +276,12 @@ func (s *Store) CitationsForRun(ctx context.Context, userID, runID string) ([]Ci
 			c.source_id,src.title,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
 		from chat_citations c
 		join agent_runs r on r.id=c.run_id
-		join chat_chats chat on chat.id=r.chat_id
-		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=r.user_id
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+		join chat_chats chat on chat.id=coalesce(r.chat_id,product.chat_id)
+		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=coalesce(r.user_id,product.user_id)
 		left join source_sources src on src.id=c.source_id and src.notebook_id=chat.notebook_id
-		where c.run_id=$1 and r.user_id=$2
+		where c.run_id=$1 and coalesce(r.user_id,product.user_id)=$2
 		order by case when c.reference_kind='source' then 0 else 1 end,c.reference_ordinal,c.claim_ordinal,c.citation_ordinal
 	`, runID, userID)
 }
@@ -290,10 +292,12 @@ func (s *Store) CitationsForChat(ctx context.Context, userID, chatID string) ([]
 			c.source_id,src.title,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
 		from chat_citations c
 		join agent_runs r on r.id=c.run_id
-		join chat_chats chat on chat.id=r.chat_id
-		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=r.user_id
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+		join chat_chats chat on chat.id=coalesce(r.chat_id,product.chat_id)
+		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=coalesce(r.user_id,product.user_id)
 		left join source_sources src on src.id=c.source_id and src.notebook_id=chat.notebook_id
-		where r.chat_id=$1 and r.user_id=$2
+		where coalesce(r.chat_id,product.chat_id)=$1 and coalesce(r.user_id,product.user_id)=$2
 		order by r.created_at,case when c.reference_kind='source' then 0 else 1 end,c.reference_ordinal,c.claim_ordinal,c.citation_ordinal
 	`, chatID, userID)
 }
@@ -329,10 +333,12 @@ func (s *Store) CitationViewForUser(ctx context.Context, userID, citationID stri
 			c.source_id,src.title,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
 		from chat_citations c
 		join agent_runs r on r.id=c.run_id
-		join chat_chats chat on chat.id=r.chat_id
-		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=r.user_id
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+		join chat_chats chat on chat.id=coalesce(r.chat_id,product.chat_id)
+		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=coalesce(r.user_id,product.user_id)
 		left join source_sources src on src.id=c.source_id and src.notebook_id=chat.notebook_id
-		where c.citation_id=$1 and r.user_id=$2
+		where c.citation_id=$1 and coalesce(r.user_id,product.user_id)=$2
 	`, citationID, userID).Scan(
 		&view.Citation.ID, &view.Citation.MessageID, &view.Citation.ReferenceKind, &view.Citation.ReferenceOrdinal,
 		&view.Citation.ClaimOrdinal, &view.Citation.CitationOrdinal,

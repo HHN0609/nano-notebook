@@ -128,10 +128,11 @@ func (s *EvidenceSearchService) loadPinnedScope(ctx context.Context, attempt Att
 	defer func() { _ = tx.Rollback(ctx) }()
 	var selectedCount int
 	err = tx.QueryRow(ctx, `
-		select r.selected_source_count
+		select coalesce(r.selected_source_count,0)
 		from agent_runs r join agent_jobs j on j.run_id=r.id
+		left join agent_trees tree on tree.id=r.tree_id
 		where r.id=$1 and j.id=$2 and j.lease_token=$3::uuid and j.attempt_no=$4
-			and r.status='running' and r.output_message_id is null and r.deadline_at > now()
+			and r.status='running' and r.output_message_id is null and coalesce(r.deadline_at,tree.absolute_deadline)>now()
 			and j.status='running' and j.lease_expires_at > now()
 	`, attempt.RunID, attempt.JobID, attempt.LeaseToken, attempt.AttemptNo).Scan(&selectedCount)
 	if errors.Is(err, pgx.ErrNoRows) {

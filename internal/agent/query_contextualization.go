@@ -61,10 +61,13 @@ func (r *PostgresRuntime) loadCompletedConversation(ctx context.Context, executi
 		)
 		select input.content,output.content
 		from agent_runs prior
-		join chat_messages input on input.id=prior.input_message_id and input.chat_id=prior.chat_id and input.role='user'
-		join chat_messages output on output.id=prior.output_message_id and output.chat_id=prior.chat_id and output.role='assistant'
+		left join chat_runs product on product.root_agent_run_id=prior.id
+		join chat_messages input on input.id=coalesce(prior.input_message_id,product.input_message_id)
+			and input.chat_id=coalesce(prior.chat_id,product.chat_id) and input.role='user'
+		join chat_messages output on output.id=coalesce(prior.output_message_id,product.output_message_id)
+			and output.chat_id=coalesce(prior.chat_id,product.chat_id) and output.role='assistant'
 		cross join cutoff
-		where prior.chat_id=$1 and prior.status='completed'
+		where coalesce(prior.chat_id,product.chat_id)=$1 and prior.status='completed'
 			and (input.created_at,input.id)<(cutoff.created_at,cutoff.id)
 		order by input.created_at desc,input.id desc
 		limit $3

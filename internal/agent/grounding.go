@@ -240,9 +240,10 @@ func (s *GroundingService) selectedSourceCount(ctx context.Context, attempt Atte
 	defer func() { _ = tx.Rollback(ctx) }()
 	var count int
 	err = tx.QueryRow(ctx, `
-		select r.selected_source_count from agent_runs r join agent_jobs j on j.run_id=r.id
+		select coalesce(r.selected_source_count,0) from agent_runs r join agent_jobs j on j.run_id=r.id
+		left join agent_trees tree on tree.id=r.tree_id
 		where r.id=$1 and j.id=$2 and j.attempt_no=$3 and j.lease_token=$4::uuid
-			and r.status='running' and r.output_message_id is null and r.deadline_at>now()
+			and r.status='running' and r.output_message_id is null and coalesce(r.deadline_at,tree.absolute_deadline)>now()
 			and j.status='running' and j.lease_expires_at>now()
 	`, attempt.RunID, attempt.JobID, attempt.AttemptNo, attempt.LeaseToken).Scan(&count)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -272,9 +273,11 @@ func (s *GroundingService) persistSourcePlan(ctx context.Context, attempt Attemp
 		select c.notebook_id
 		from agent_runs r
 		join agent_jobs j on j.run_id=r.id
-		join chat_chats c on c.id=r.chat_id
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+		join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id)
 		where r.id=$1 and j.id=$2 and j.attempt_no=$3 and j.lease_token=$4::uuid
-			and r.status='running' and r.output_message_id is null and r.deadline_at>now()
+			and r.status='running' and r.output_message_id is null and coalesce(r.deadline_at,tree.absolute_deadline)>now()
 			and j.status='running' and j.lease_expires_at>now()
 	`, attempt.RunID, attempt.JobID, attempt.AttemptNo, attempt.LeaseToken).Scan(&notebookID)
 	if errors.Is(err, pgx.ErrNoRows) {
