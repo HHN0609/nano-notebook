@@ -159,8 +159,14 @@ func main() {
 		slog.Error("worker Prompt Catalog invalid", "error", err)
 		os.Exit(1)
 	}
-	if _, err := app.VerifyAgentCatalogReady(ctx, db, definitionCatalog, config.AgentRelease); err != nil {
+	activeRelease, err := app.VerifyAgentCatalogReady(ctx, db, definitionCatalog, config.AgentRelease)
+	if err != nil {
 		slog.Error("worker Agent Catalog readiness failed", "release", config.AgentRelease, "error", err)
+		os.Exit(1)
+	}
+	chatRoot, ok := activeRelease.Roots["chat"]
+	if !ok {
+		slog.Error("worker Agent Catalog release has no Chat root", "release", config.AgentRelease)
 		os.Exit(1)
 	}
 	_, supportedAgentConfiguration, err := agent.DefaultAgentConfigurationBundle(
@@ -291,14 +297,31 @@ func main() {
 		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge),
 		agent.WithReplayStager(replayStager), agent.WithGroundingService(grounder))
 	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient)
+	calculateTool := agent.NewCalculateAction()
+	currentTimeTool := agent.NewCurrentTimeAction(nil)
+	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
 	registry, err := agent.NewActionRegistry(
-		agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil), agent.NewSearchEvidenceAction(evidenceSearch),
+		calculateTool, currentTimeTool, searchEvidenceTool,
 	)
 	if err != nil {
 		slog.Error("worker Action registry invalid", "error", err)
 		os.Exit(1)
 	}
-	controller := agent.NewController(runtime, modelClient, registry)
+	mcpToolRegistry, err := agent.NewMCPToolRegistry(
+		agent.MCPToolRegistration{Action: calculateTool, Scheduling: agentcatalog.ToolOrderedSync},
+		agent.MCPToolRegistration{Action: currentTimeTool, Scheduling: agentcatalog.ToolOrderedSync},
+		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolOrderedSync},
+	)
+	if err != nil {
+		slog.Error("worker MCP Tool Registry invalid", "error", err)
+		os.Exit(1)
+	}
+	mcpToolHost, err := agent.NewMCPToolHost(definitionCatalog, mcpToolRegistry, runtime)
+	if err != nil {
+		slog.Error("worker MCP Tool Host invalid", "error", err)
+		os.Exit(1)
+	}
+	controller := agent.NewMCPController(runtime, modelClient, registry, mcpToolHost, chatRoot)
 	var searchProvider websearch.Provider = notConfiguredWebSearchProvider{}
 	if config.BraveSearchAPIKey != "" {
 		searchProvider, err = websearch.NewBraveProvider(websearch.BraveConfig{

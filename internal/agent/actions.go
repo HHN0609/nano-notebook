@@ -20,6 +20,7 @@ const (
 )
 
 type ActionRequest struct {
+	ActionID        string
 	Input           json.RawMessage
 	DefaultTimeZone string
 	Attempt         Attempt

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/instrumentation"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -54,9 +55,11 @@ type FinalPreparationTraceRuntime interface {
 }
 
 type Controller struct {
-	runtime  ControllerRuntime
-	model    DecisionModel
-	registry *ActionRegistry
+	runtime       ControllerRuntime
+	model         DecisionModel
+	registry      *ActionRegistry
+	mcpHost       *MCPToolHost
+	mcpDefinition agentcatalog.Reference
 }
 
 var _ ControllerRuntime = (*PostgresRuntime)(nil)
@@ -66,6 +69,24 @@ func NewController(runtime ControllerRuntime, model DecisionModel, registry *Act
 	return &Controller{runtime: runtime, model: model, registry: registry}
 }
 
+func NewMCPController(runtime ControllerRuntime, model DecisionModel, registry *ActionRegistry, host *MCPToolHost, definition agentcatalog.Reference) *Controller {
+	return &Controller{runtime: runtime, model: model, registry: registry, mcpHost: host, mcpDefinition: definition}
+}
+
+func (c *Controller) actionDefinitions(ctx context.Context, session *MCPAttemptSession, policy ActionPolicy) ([]models.ActionDefinition, error) {
+	if session == nil {
+		return c.registry.Definitions(policy), nil
+	}
+	return session.ActionDefinitions(ctx, policy)
+}
+
+func (c *Controller) validateProposal(session *MCPAttemptSession, proposals []models.ActionProposal) error {
+	if session == nil {
+		return c.registry.ValidateProposal(proposals)
+	}
+	return session.ValidateProposal(proposals)
+}
+
 func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 	if c.runtime == nil || c.model == nil || c.registry == nil {
 		return errors.New("Agent Controller dependencies are incomplete")
@@ -73,6 +94,17 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 	execution, err := c.runtime.Load(ctx, attempt)
 	if err != nil {
 		return err
+	}
+	var toolSession *MCPAttemptSession
+	if c.mcpHost != nil {
+		toolSession, err = c.mcpHost.OpenAttempt(ctx, AttemptToolScope{
+			Definition: c.mcpDefinition, Attempt: attempt, DefaultTimeZone: execution.TimeZone,
+			RemainingActions: execution.ActionLimit, Deadline: execution.DeadlineAt,
+		})
+		if err != nil {
+			return err
+		}
+		defer toolSession.Close()
 	}
 	var tracer *agentobs.Tracer
 	if traceRuntime, ok := c.runtime.(AttemptTraceRuntime); ok {
@@ -91,7 +123,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			return c.runtime.PublishFinal(ctx, attempt, *prefix.Final)
 		}
 		if proposal, action, ok := firstIncompleteAction(prefix); ok {
-			if err := c.executeAction(ctx, tracer, attempt, execution, prefix, proposal, action); err != nil {
+			if err := c.executeAction(ctx, tracer, toolSession, attempt, execution, prefix, proposal, action); err != nil {
 				return err
 			}
 			continue
@@ -101,7 +133,10 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		actionCapable := !forceFinalDecision && len(prefix.Proposals) < execution.ActionDecisionLimit && remainingActions > 0
 		definitions := []models.ActionDefinition(nil)
 		if actionCapable {
-			definitions = c.registry.Definitions(ActionPolicy{RemainingActions: remainingActions, Execution: &execution})
+			definitions, err = c.actionDefinitions(ctx, toolSession, ActionPolicy{RemainingActions: remainingActions, Execution: &execution})
+			if err != nil {
+				return c.handleRuntimeError(ctx, attempt, err)
+			}
 			if len(definitions) == 0 {
 				actionCapable = false
 			}
@@ -122,7 +157,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 				if !ok {
 					return c.fail(ctx, attempt, "context_failed", ErrGroundingIncomplete)
 				}
-				if err := c.acceptContextualizedSearch(ctx, tracer, attempt, execution, prefix, definition); err != nil {
+				if err := c.acceptContextualizedSearch(ctx, tracer, toolSession, attempt, execution, prefix, definition); err != nil {
 					return err
 				}
 				continue
@@ -199,7 +234,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		if len(batch.Actions) > execution.ActionBatchLimit {
 			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), errors.New("Action proposal exceeds batch limit"))
 		}
-		if err := c.registry.ValidateProposal(batch.Actions); err != nil {
+		if err := c.validateProposal(toolSession, batch.Actions); err != nil {
 			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
 		}
 		if len(batch.Actions) > remainingActions {
@@ -220,6 +255,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 func (c *Controller) acceptContextualizedSearch(
 	ctx context.Context,
 	tracer *agentobs.Tracer,
+	toolSession *MCPAttemptSession,
 	attempt Attempt,
 	execution Execution,
 	prefix CheckpointPrefix,
@@ -233,7 +269,7 @@ func (c *Controller) acceptContextualizedSearch(
 	if err != nil {
 		return c.fail(ctx, attempt, "context_failed", err)
 	}
-	if err := c.registry.ValidateProposal([]models.ActionProposal{fallback}); err != nil || fallback.Name != "search_evidence" {
+	if err := c.validateProposal(toolSession, []models.ActionProposal{fallback}); err != nil || fallback.Name != "search_evidence" {
 		if err == nil {
 			err = errors.New("query contextualization fallback must call search_evidence")
 		}
@@ -285,7 +321,7 @@ func (c *Controller) acceptContextualizedSearch(
 	if err == nil {
 		decision := outcome.ModelDecision
 		if decision.Validate() == nil && decision.Proposal != nil && len(decision.Proposal.Actions) == 1 &&
-			decision.Proposal.Actions[0].Name == "search_evidence" && c.registry.ValidateProposal(decision.Proposal.Actions) == nil {
+			decision.Proposal.Actions[0].Name == "search_evidence" && c.validateProposal(toolSession, decision.Proposal.Actions) == nil {
 			if preserved, preserveErr := preserveCurrentSearchQuery(decision.Proposal.Actions[0], fallback); preserveErr == nil {
 				proposal = preserved
 				fallbackUsed = false
@@ -329,6 +365,7 @@ func actionDefinitionByName(definitions []models.ActionDefinition, name string) 
 func (c *Controller) executeAction(
 	ctx context.Context,
 	tracer *agentobs.Tracer,
+	toolSession *MCPAttemptSession,
 	attempt Attempt,
 	execution Execution,
 	prefix CheckpointPrefix,
@@ -338,11 +375,21 @@ func (c *Controller) executeAction(
 	if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
 		return c.handleRuntimeError(ctx, attempt, err)
 	}
-	executor, ok := c.registry.Resolve(action.Name)
-	if !ok {
-		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), fmt.Errorf("accepted unknown Action %q", action.Name))
+	var executor Action
+	if toolSession == nil {
+		var ok bool
+		executor, ok = c.registry.Resolve(action.Name)
+		if !ok {
+			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), fmt.Errorf("accepted unknown Action %q", action.Name))
+		}
+	} else {
+		var ok bool
+		executor, ok = toolSession.actionAdapter(action.Name)
+		if !ok {
+			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), fmt.Errorf("accepted unknown MCP Tool %q", action.Name))
+		}
 	}
-	request := ActionRequest{Input: action.Input, DefaultTimeZone: execution.TimeZone, Attempt: attempt}
+	request := ActionRequest{ActionID: action.ActionID, Input: action.Input, DefaultTimeZone: execution.TimeZone, Attempt: attempt}
 	var result ActionResult
 	var err error
 	if tracer != nil {
@@ -368,6 +415,9 @@ func (c *Controller) executeAction(
 	if err != nil {
 		if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
 			return result
+		}
+		if errors.Is(err, ErrLeaseLost) {
+			return c.handleRuntimeError(ctx, attempt, err)
 		}
 		if ctx.Err() != nil {
 			return err
