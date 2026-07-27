@@ -637,6 +637,126 @@ func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, reque
 	return run, false, nil
 }
 
+func (s *Store) RetryConfiguredQueued(ctx context.Context, userID, sourceRunID, key, requestHash, jobID string, command ConfiguredChatAdmission) (RunSnapshot, bool, error) {
+	if command.UserID != userID {
+		return RunSnapshot{}, false, ErrRunNotFound
+	}
+	if _, err := s.db.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1,0))`, "admit_agent_run:"+userID); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	var existingHash, existingJSON string
+	err := s.db.QueryRow(ctx, `
+		select request_hash,response_json::text from platform_idempotency_keys
+		where principal_id=$1 and action='retry_agent_run' and key=$2
+	`, userID, key).Scan(&existingHash, &existingJSON)
+	if err == nil {
+		if existingHash != requestHash {
+			return RunSnapshot{}, false, ErrIdempotencyMismatch
+		}
+		var body struct {
+			Run RunSnapshot `json:"run"`
+		}
+		if err := json.Unmarshal([]byte(existingJSON), &body); err != nil {
+			return RunSnapshot{}, false, err
+		}
+		return body.Run, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return RunSnapshot{}, false, err
+	}
+	if _, err := s.ExpireIfOverdue(ctx, userID, ""); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	var inputMessageID, chatID, status string
+	err = s.db.QueryRow(ctx, `
+		select product.input_message_id,product.chat_id,run.status
+		from agent_runs run join chat_runs product on product.root_agent_run_id=run.id
+		where run.id=$1 and product.user_id=$2
+		for update of run,product
+	`, sourceRunID, userID).Scan(&inputMessageID, &chatID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RunSnapshot{}, false, ErrRunNotFound
+	}
+	if err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if status != "failed" && status != "cancelled" {
+		return RunSnapshot{}, false, ErrRunNotRetryable
+	}
+	command.ChatID = chatID
+	command.InputMessageID = inputMessageID
+	var latestRunID, latestMessageID string
+	var completed bool
+	err = s.db.QueryRow(ctx, `
+		select
+			(select run.id from agent_runs run left join chat_runs product on product.root_agent_run_id=run.id
+			 where coalesce(run.input_message_id,product.input_message_id)=$1
+			   and ((run.runtime_kind='legacy_role' and run.agent_role='leader') or run.runtime_kind='configured')
+			 order by run.created_at desc,run.id desc limit 1),
+			(select id from chat_messages where chat_id=$2 order by created_at desc,id desc limit 1),
+			exists(select 1 from agent_runs run left join chat_runs product on product.root_agent_run_id=run.id
+			 where coalesce(run.input_message_id,product.input_message_id)=$1 and run.status='completed'
+			   and ((run.runtime_kind='legacy_role' and run.agent_role='leader') or run.runtime_kind='configured'))
+	`, inputMessageID, chatID).Scan(&latestRunID, &latestMessageID, &completed)
+	if err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if latestRunID != sourceRunID || latestMessageID != inputMessageID {
+		return RunSnapshot{}, false, ErrRetryNotLatest
+	}
+	if completed {
+		return RunSnapshot{}, false, ErrRunNotRetryable
+	}
+	if _, active, err := s.ActiveByUser(ctx, userID); err != nil {
+		return RunSnapshot{}, false, err
+	} else if active {
+		return RunSnapshot{}, false, ErrActiveRun
+	}
+	sourceIDs, err := s.sourceIDsForRun(ctx, sourceRunID)
+	if err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if err := s.CreateConfiguredChatQueued(ctx, command); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if err := s.PinEvidenceSet(ctx, command.RunID, userID, sourceIDs); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `insert into agent_jobs(id,kind,run_id,status) values($1,'agent_run',$2,'queued')`, jobID, command.RunID); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	tx, ok := s.db.(pgx.Tx)
+	if !ok {
+		return RunSnapshot{}, false, errors.New("configured Run Retry requires a transaction")
+	}
+	sourceTrace, err := NewOwnedRunTraceRecorder(ctx, tx, sourceRunID)
+	if err != nil {
+		return RunSnapshot{}, false, err
+	}
+	retryFrom := sourceTrace.RootSpanContext()
+	if err := StartRunTraceInTx(ctx, tx, command.RunID, command.ModelPolicy.ProviderModel, command.Definition.Reference().String(), &retryFrom); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if err := s.FinalizeConfiguredChatOwnership(ctx, command.RunID); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	run := RunSnapshot{ID: command.RunID, InputMessageID: inputMessageID, Status: "queued"}
+	response, err := json.Marshal(map[string]any{"run": run})
+	if err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into platform_idempotency_keys(principal_id,action,key,request_hash,status_code,response_json)
+		values($1,'retry_agent_run',$2,$3,$4,$5::jsonb)
+	`, userID, key, requestHash, http.StatusAccepted, string(response)); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `select pg_notify('nano_agent_jobs',$1)`, jobID); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	return run, false, nil
+}
+
 func (s *Store) sourceIDsForRun(ctx context.Context, runID string) ([]string, error) {
 	rows, err := s.db.Query(ctx, `select source_id from agent_run_evidence_set where run_id=$1 order by ordinal`, runID)
 	if err != nil {

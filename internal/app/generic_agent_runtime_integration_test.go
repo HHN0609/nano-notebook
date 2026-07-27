@@ -271,6 +271,35 @@ func TestConfiguredChatRunCanBeCancelledThroughProductOwnership(t *testing.T) {
 	if err := api.db.Pool().QueryRow(context.Background(), `select status from chat_runs where root_agent_run_id=$1`, body.RunID).Scan(&productStatus); err != nil || productStatus != "cancelled" {
 		t.Fatalf("product status=%q err=%v", productStatus, err)
 	}
+	retry := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+body.RunID+"/retry", map[string]any{
+		"time_zone": "Asia/Shanghai",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "configured-retry")
+	if retry.Code != http.StatusAccepted {
+		t.Fatalf("retry status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	var retryBody struct {
+		Run agent.RunSnapshot `json:"run"`
+	}
+	decodeBody(t, retry, &retryBody)
+	var runtimeKind, definition string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select runtime_kind,definition_identity||'@'||definition_version::text from agent_runs where id=$1
+	`, retryBody.Run.ID).Scan(&runtimeKind, &definition); err != nil {
+		t.Fatal(err)
+	}
+	if retryBody.Run.ID == body.RunID || runtimeKind != "configured" || definition != "chat.leader@1" {
+		t.Fatalf("retry=%+v kind=%s definition=%s", retryBody.Run, runtimeKind, definition)
+	}
+	replayed := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+body.RunID+"/retry", map[string]any{
+		"time_zone": "Asia/Shanghai",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "configured-retry")
+	var replayedBody struct {
+		Run agent.RunSnapshot `json:"run"`
+	}
+	decodeBody(t, replayed, &replayedBody)
+	if replayed.Code != http.StatusAccepted || replayedBody.Run.ID != retryBody.Run.ID {
+		t.Fatalf("replayed status=%d run=%+v", replayed.Code, replayedBody.Run)
+	}
 }
 
 func TestConfiguredChatAdmissionPinsTransitiveDefinitionAndPolicy(t *testing.T) {

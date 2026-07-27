@@ -1066,7 +1066,22 @@ func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, source
 	var run agent.RunSnapshot
 	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		var err error
-		run, _, err = agent.NewStore(tx).RetryQueued(r.Context(), userID, sourceRunID, key, requestHash([]byte(sourceRunID+"\x00"+timeZone)), runID, jobID, timeZone, s.cfg.AgentRun)
+		store := agent.NewStore(tx)
+		if s.chatAgent == nil {
+			run, _, err = store.RetryQueued(r.Context(), userID, sourceRunID, key, requestHash([]byte(sourceRunID+"\x00"+timeZone)), runID, jobID, timeZone, s.cfg.AgentRun)
+			return err
+		}
+		manifest, marshalErr := json.Marshal(map[string]any{
+			"agent_release": s.chatAgent.Release.String(), "time_zone": timeZone,
+		})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		hash := requestHash([]byte(sourceRunID + "\x00" + timeZone + "\x00" + s.chatAgent.Release.String()))
+		run, _, err = store.RetryConfiguredQueued(r.Context(), userID, sourceRunID, key, hash, jobID, agent.ConfiguredChatAdmission{
+			RunID: runID, UserID: userID, Definition: s.chatAgent.Definition, ModelPolicy: s.chatAgent.Policy,
+			DeadlineAt: time.Now().Add(s.cfg.AgentRun.Deadline), ContextManifest: manifest,
+		})
 		return err
 	})
 	if errors.Is(err, agent.ErrRunNotFound) {
