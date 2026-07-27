@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
@@ -628,8 +629,70 @@ type Store struct {
 	db DBTX
 }
 
+type ConfiguredChatAdmission struct {
+	RunID           string
+	UserID          string
+	ChatID          string
+	InputMessageID  string
+	Definition      agentcatalog.Definition
+	ModelPolicy     agentcatalog.ModelPolicy
+	DeadlineAt      time.Time
+	ContextManifest json.RawMessage
+}
+
 func NewStore(db DBTX) *Store {
 	return &Store{db: db}
+}
+
+func (s *Store) CreateConfiguredChatQueued(ctx context.Context, command ConfiguredChatAdmission) error {
+	if s == nil || s.db == nil || strings.TrimSpace(command.RunID) == "" || strings.TrimSpace(command.UserID) == "" ||
+		strings.TrimSpace(command.ChatID) == "" || strings.TrimSpace(command.InputMessageID) == "" ||
+		command.Definition.Reference().Identity == "" || len(command.Definition.SHA256) != 64 ||
+		command.ModelPolicy.Reference() != command.Definition.ModelPolicy || len(command.ModelPolicy.SHA256) != 64 ||
+		!command.DeadlineAt.After(time.Now()) {
+		return errors.New("invalid configured Chat admission")
+	}
+	manifest, err := canonicalJSONObject(command.ContextManifest)
+	if err != nil || len(manifest) > command.Definition.Limits.ContextBytes {
+		return errors.New("invalid configured Chat context manifest")
+	}
+	treeID := "tree_" + command.RunID
+	if _, err := s.db.Exec(ctx, `
+		insert into agent_trees(
+			id,absolute_deadline,model_call_limit,action_limit,context_byte_limit,result_byte_limit
+		) values($1,$2,$3,$4,$5,$6)
+	`, treeID, command.DeadlineAt, command.Definition.Limits.ModelCalls, command.Definition.Limits.Actions,
+		command.Definition.Limits.ContextBytes, command.Definition.Limits.ResultBytes); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into agent_runs(
+			id,user_id,status,runtime_kind,tree_id,definition_identity,definition_version,definition_sha256,
+			executor_identity,model_policy_identity,model_policy_version,model_policy_sha256,provider_model,parent_context_manifest
+		) values($1,$2,'queued','configured',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+	`, command.RunID, command.UserID, treeID,
+		command.Definition.Identity, command.Definition.Version, command.Definition.SHA256, command.Definition.Executor,
+		command.ModelPolicy.Identity, command.ModelPolicy.Version, command.ModelPolicy.SHA256, command.ModelPolicy.ProviderModel,
+		string(manifest)); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into chat_runs(id,user_id,chat_id,input_message_id,root_agent_run_id,status)
+		values($1,$2,$3,$4,$1,'queued')
+	`, command.RunID, command.UserID, command.ChatID, command.InputMessageID); err != nil {
+		return err
+	}
+	if result, err := s.db.Exec(ctx, `update agent_trees set root_agent_run_id=$2,updated_at=now() where id=$1 and root_agent_run_id is null`, treeID, command.RunID); err != nil {
+		return err
+	} else if result.RowsAffected() != 1 {
+		return errors.New("configured Agent Tree root was not pinned")
+	}
+	if result, err := s.db.Exec(ctx, `update agent_runs set user_id=null where id=$1 and runtime_kind='configured'`, command.RunID); err != nil {
+		return err
+	} else if result.RowsAffected() != 1 {
+		return errors.New("configured Agent Run retained product ownership")
+	}
+	return nil
 }
 
 func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone string, config RunConfig) error {
@@ -639,7 +702,8 @@ func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMe
 	if config.ExecutorVersion == "" {
 		config.ExecutorVersion = "leader-executor-v1"
 	}
-	_, err := s.db.Exec(ctx, `
+	var deadlineAt time.Time
+	err := s.db.QueryRow(ctx, `
 		insert into agent_runs(
 			id, user_id, chat_id, input_message_id, status, model, prompt_version, agent_config_id, executor_version,
 			time_zone, deadline_at, action_decision_limit, final_decision_limit,
@@ -648,12 +712,38 @@ func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMe
 		values(
 			$1, $2, $3, $4, 'queued', $5, $6, $7, $8,
 			$9, now() + ($10 * interval '1 millisecond'), $11, $12, $13, $14, $15, $16
-		)`,
+		)
+		returning deadline_at`,
 		runID, userID, chatID, inputMessageID, model, promptVersion, config.ID, config.ExecutorVersion,
 		timeZone, config.Deadline.Milliseconds(), config.ActionDecisionLimit, config.FinalDecisionLimit,
 		config.ActionLimit, config.ActionBatchLimit, config.ActionResultByteLimit, config.ActionResultsByteLimit,
-	)
-	return err
+	).Scan(&deadlineAt)
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into chat_runs(id,user_id,chat_id,input_message_id,root_agent_run_id,status)
+		values($1,$2,$3,$4,$1,'queued')
+	`, runID, userID, chatID, inputMessageID); err != nil {
+		return err
+	}
+	treeID := "tree_" + runID
+	if _, err := s.db.Exec(ctx, `
+		insert into agent_trees(
+			id,root_agent_run_id,absolute_deadline,model_call_limit,action_limit,context_byte_limit,result_byte_limit
+		) values($1,$2,$3,$4,$5,$6,$7)
+	`, treeID, runID, deadlineAt, config.ActionDecisionLimit+config.FinalDecisionLimit,
+		config.ActionLimit, 65536, config.ActionResultsByteLimit); err != nil {
+		return err
+	}
+	result, err := s.db.Exec(ctx, `update agent_runs set tree_id=$2 where id=$1 and runtime_kind='legacy_role'`, runID, treeID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return errors.New("Agent Tree ownership was not pinned")
+	}
+	return nil
 }
 
 // PinEvidenceSet resolves member-supplied Source identities to the exact

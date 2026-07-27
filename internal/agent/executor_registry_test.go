@@ -66,6 +66,36 @@ func TestExecutorRegistryRejectsDuplicateMissingAndCapabilityExpansion(t *testin
 	}
 }
 
+func TestExecutionHostDispatchesConfiguredPinWithoutRoleOrExecutorVersion(t *testing.T) {
+	configured := newTestExecutorRegistry(t)
+	legacy, err := NewRoleRegistry(
+		RoleRegistration{Role: RoleLeader, ExecutorVersion: "leader-v1", Executor: noopRoleExecutor{}},
+		RoleRegistration{Role: RoleResearch, ExecutorVersion: "research-v1", Executor: noopRoleExecutor{}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &AgentExecutionHost{legacyRegistry: legacy, configuredRegistry: configured}
+	catalog, _ := agentcatalog.LoadEmbedded()
+	definition, _ := catalog.ResolveDefinition(agentcatalog.MustParseReference("chat.leader@1"))
+	policy, _ := catalog.ResolveModelPolicy(definition.ModelPolicy)
+	executor, err := host.resolvePinnedExecution(pinnedExecution{
+		runtimeKind: "configured", definition: definition.Reference(), definitionSHA256: definition.SHA256,
+		executorIdentity: definition.Executor, modelPolicy: policy.Reference(), modelPolicySHA256: policy.SHA256,
+		providerModel: policy.ProviderModel,
+	})
+	if err != nil || executor == nil {
+		t.Fatalf("executor=%v err=%v", executor, err)
+	}
+	if _, err := host.resolvePinnedExecution(pinnedExecution{
+		runtimeKind: "configured", definition: definition.Reference(), definitionSHA256: strings.Repeat("0", 64),
+		executorIdentity: definition.Executor, modelPolicy: policy.Reference(), modelPolicySHA256: policy.SHA256,
+		providerModel: policy.ProviderModel,
+	}); err == nil || !strings.Contains(err.Error(), "pin mismatch") {
+		t.Fatalf("mutated pin err=%v", err)
+	}
+}
+
 func newTestExecutorRegistry(t *testing.T) *ExecutorRegistry {
 	t.Helper()
 	catalog, err := agentcatalog.LoadEmbedded()

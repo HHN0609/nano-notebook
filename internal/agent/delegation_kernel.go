@@ -64,7 +64,7 @@ func (DelegationKernel) CreateInTx(ctx context.Context, tx pgx.Tx, command Creat
 		insert into agent_runs(
 			id,user_id,chat_id,input_message_id,status,model,prompt_version,agent_config_id,executor_version,time_zone,
 			deadline_at,action_decision_limit,final_decision_limit,action_limit,action_batch_limit,
-			action_result_byte_limit,action_results_byte_limit,agent_role
+			action_result_byte_limit,action_results_byte_limit,agent_role,tree_id
 		)
 		select $2,r.user_id,r.chat_id,r.input_message_id,'queued',profile.model,$4,r.agent_config_id,
 			profile.executor_version,r.time_zone,r.deadline_at,
@@ -73,7 +73,7 @@ func (DelegationKernel) CreateInTx(ctx context.Context, tx pgx.Tx, command Creat
 			coalesce((profile.run_config->>'action_limit')::integer,3),
 			coalesce((profile.run_config->>'action_batch_limit')::integer,1),
 			coalesce((profile.run_config->>'action_result_byte_limit')::integer,16384),
-			coalesce((profile.run_config->>'action_results_byte_limit')::integer,65536),$3
+			coalesce((profile.run_config->>'action_results_byte_limit')::integer,65536),$3,r.tree_id
 		from agent_runs r
 		join agent_role_profiles profile on profile.configuration_set_id=r.agent_config_id and profile.role=$3
 		where r.id=$1 and r.agent_role='leader' and r.status='running' and r.deadline_at>now()

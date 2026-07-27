@@ -1003,6 +1003,171 @@ alter table agent_runs add constraint agent_runs_role_shape_check check (
 	or (agent_role='research' and output_message_id is null)
 );
 
+create table if not exists agent_trees (
+	id text primary key check (char_length(id) between 3 and 255),
+	root_agent_run_id text unique references agent_runs(id) on delete cascade,
+	absolute_deadline timestamptz not null,
+	model_call_limit integer not null check (model_call_limit > 0),
+	action_limit integer not null check (action_limit > 0),
+	context_byte_limit integer not null check (context_byte_limit > 0),
+	result_byte_limit integer not null check (result_byte_limit > 0),
+	model_calls_consumed integer not null default 0 check (model_calls_consumed between 0 and model_call_limit),
+	actions_consumed integer not null default 0 check (actions_consumed between 0 and action_limit),
+	context_bytes_consumed bigint not null default 0 check (context_bytes_consumed between 0 and context_byte_limit),
+	result_bytes_consumed bigint not null default 0 check (result_bytes_consumed between 0 and result_byte_limit),
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now()
+);
+
+alter table agent_runs add column if not exists runtime_kind text not null default 'legacy_role';
+alter table agent_runs drop constraint if exists agent_runs_runtime_kind_check;
+alter table agent_runs add constraint agent_runs_runtime_kind_check check (runtime_kind in ('legacy_role','configured'));
+alter table agent_runs add column if not exists tree_id text references agent_trees(id) on delete cascade;
+alter table agent_runs add column if not exists definition_identity text;
+alter table agent_runs add column if not exists definition_version integer;
+alter table agent_runs add column if not exists definition_sha256 text;
+alter table agent_runs add column if not exists executor_identity text;
+alter table agent_runs add column if not exists model_policy_identity text;
+alter table agent_runs add column if not exists model_policy_version integer;
+alter table agent_runs add column if not exists model_policy_sha256 text;
+alter table agent_runs add column if not exists provider_model text;
+alter table agent_runs add column if not exists parent_context_manifest jsonb;
+
+alter table agent_runs add column if not exists time_zone text not null default 'UTC';
+alter table agent_runs add column if not exists deadline_at timestamptz not null default (now() + interval '10 minutes');
+alter table agent_runs add column if not exists action_decision_limit integer not null default 4;
+alter table agent_runs add column if not exists final_decision_limit integer not null default 1;
+alter table agent_runs add column if not exists action_limit integer not null default 8;
+alter table agent_runs add column if not exists action_batch_limit integer not null default 4;
+alter table agent_runs add column if not exists action_result_byte_limit integer not null default 16384;
+alter table agent_runs add column if not exists action_results_byte_limit integer not null default 65536;
+
+alter table agent_runs alter column user_id drop not null;
+alter table agent_runs alter column chat_id drop not null;
+alter table agent_runs alter column input_message_id drop not null;
+alter table agent_runs alter column model drop not null;
+alter table agent_runs alter column prompt_version drop not null;
+alter table agent_runs alter column agent_config_id drop not null;
+alter table agent_runs alter column executor_version drop not null;
+alter table agent_runs alter column agent_role drop not null;
+alter table agent_runs alter column time_zone drop not null;
+alter table agent_runs alter column deadline_at drop not null;
+alter table agent_runs alter column action_decision_limit drop not null;
+alter table agent_runs alter column final_decision_limit drop not null;
+alter table agent_runs alter column action_limit drop not null;
+alter table agent_runs alter column action_batch_limit drop not null;
+alter table agent_runs alter column action_result_byte_limit drop not null;
+alter table agent_runs alter column action_results_byte_limit drop not null;
+
+create or replace function nano_normalize_configured_agent_run()
+returns trigger
+language plpgsql
+as $$
+begin
+	if new.runtime_kind='configured' then
+		new.agent_role = null;
+		new.agent_config_id = null;
+		new.executor_version = null;
+		new.model = null;
+		new.prompt_version = null;
+		new.time_zone = null;
+		new.deadline_at = null;
+		new.action_decision_limit = null;
+		new.final_decision_limit = null;
+		new.action_limit = null;
+		new.action_batch_limit = null;
+		new.action_result_byte_limit = null;
+		new.action_results_byte_limit = null;
+	end if;
+	return new;
+end
+$$;
+
+drop trigger if exists agent_runs_normalize_configured on agent_runs;
+create trigger agent_runs_normalize_configured before insert or update on agent_runs
+	for each row execute function nano_normalize_configured_agent_run();
+
+alter table agent_runs drop constraint if exists agent_runs_configured_shape_check;
+alter table agent_runs add constraint agent_runs_configured_shape_check check (
+	runtime_kind='legacy_role'
+	or (
+		runtime_kind='configured' and tree_id is not null
+		and definition_identity is not null and definition_version > 0 and definition_sha256 ~ '^[0-9a-f]{64}$'
+		and executor_identity is not null
+		and model_policy_identity is not null and model_policy_version > 0 and model_policy_sha256 ~ '^[0-9a-f]{64}$'
+		and provider_model is not null
+		and agent_role is null and agent_config_id is null and executor_version is null
+	)
+);
+alter table agent_runs drop constraint if exists agent_runs_definition_reference_fkey;
+alter table agent_runs add constraint agent_runs_definition_reference_fkey
+	foreign key (definition_identity,definition_version)
+	references agent_definition_versions(definition_identity,definition_version);
+alter table agent_runs drop constraint if exists agent_runs_model_policy_reference_fkey;
+alter table agent_runs add constraint agent_runs_model_policy_reference_fkey
+	foreign key (model_policy_identity,model_policy_version)
+	references agent_model_policy_versions(policy_identity,policy_version);
+
+create table if not exists chat_runs (
+	id text primary key check (char_length(id) between 3 and 255),
+	user_id text not null references identity_users(id) on delete cascade,
+	chat_id text not null references chat_chats(id) on delete cascade,
+	input_message_id text not null references chat_messages(id) on delete restrict,
+	output_message_id text unique references chat_messages(id) on delete restrict,
+	root_agent_run_id text not null unique references agent_runs(id) on delete cascade,
+	status text not null check (status in ('queued','running','completed','failed','cancelled')),
+	error_code text check (char_length(error_code) between 1 and 64),
+	created_at timestamptz not null default now(),
+	started_at timestamptz,
+	finished_at timestamptz,
+	updated_at timestamptz not null default now()
+);
+
+create or replace function nano_sync_chat_run_projection()
+returns trigger
+language plpgsql
+as $$
+begin
+	update chat_runs
+	set output_message_id=new.output_message_id,status=new.status,error_code=new.error_code,
+		started_at=new.started_at,finished_at=new.finished_at,updated_at=new.updated_at
+	where root_agent_run_id=new.id;
+	return new;
+end
+$$;
+
+drop trigger if exists agent_runs_sync_chat_run on agent_runs;
+create trigger agent_runs_sync_chat_run
+	after update of output_message_id,status,error_code,started_at,finished_at,updated_at on agent_runs
+	for each row execute function nano_sync_chat_run_projection();
+
+create table if not exists agent_run_results (
+	id text primary key check (char_length(id) between 3 and 255),
+	producer_run_id text not null unique references agent_runs(id) on delete cascade,
+	contract_identity text not null,
+	contract_version integer not null,
+	contract_sha256 text not null check (contract_sha256 ~ '^[0-9a-f]{64}$'),
+	payload jsonb not null check (jsonb_typeof(payload)='object'),
+	payload_sha256 text not null check (payload_sha256 ~ '^[0-9a-f]{64}$'),
+	payload_bytes integer not null check (payload_bytes > 0 and payload_bytes <= 1048576),
+	created_at timestamptz not null default now(),
+	foreign key (contract_identity,contract_version)
+		references agent_contract_versions(contract_identity,contract_version)
+);
+
+create or replace function nano_reject_agent_run_result_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+	raise exception 'agent_run_results is immutable';
+end
+$$;
+
+drop trigger if exists agent_run_results_immutable on agent_run_results;
+create trigger agent_run_results_immutable before update or delete on agent_run_results
+	for each row execute function nano_reject_agent_run_result_mutation();
+
 create unique index if not exists agent_runs_one_research_child_idx
 	on agent_runs(parent_run_id) where agent_role='research';
 
@@ -1070,6 +1235,13 @@ create table if not exists agent_run_delegations (
 	unique(parent_run_id,child_role,child_ordinal)
 );
 
+alter table agent_run_delegations add column if not exists action_id text;
+alter table agent_run_delegations add column if not exists result_id text references agent_run_results(id) on delete restrict;
+alter table agent_run_delegations alter column parent_role drop not null;
+alter table agent_run_delegations alter column child_role drop not null;
+create unique index if not exists agent_run_delegations_parent_action_idx
+	on agent_run_delegations(parent_run_id,action_id) where action_id is not null;
+
 create table if not exists agent_research_outcomes (
 	delegation_id text primary key references agent_run_delegations(id) on delete cascade,
 	discovery_session_id text not null unique references source_discovery_sessions(id) on delete restrict,
@@ -1119,6 +1291,37 @@ from agent_research_delegations legacy
 join agent_run_delegations delegation on delegation.parent_run_id=legacy.parent_run_id
 where legacy.discovery_session_id is not null and delegation.state='succeeded'
 on conflict(delegation_id) do nothing;
+
+insert into agent_trees(
+	id,root_agent_run_id,absolute_deadline,model_call_limit,action_limit,context_byte_limit,result_byte_limit,created_at,updated_at
+)
+select 'tree_' || root.id,root.id,root.deadline_at,
+	greatest(1,coalesce(root.action_decision_limit,4)+coalesce(root.final_decision_limit,1)),
+	greatest(1,coalesce(root.action_limit,8)),65536,greatest(1,coalesce(root.action_results_byte_limit,65536)),
+	root.created_at,root.updated_at
+from agent_runs root
+where root.runtime_kind='legacy_role' and root.agent_role='leader'
+on conflict(id) do nothing;
+
+update agent_runs run
+set tree_id='tree_' || run.id
+where run.runtime_kind='legacy_role' and run.agent_role='leader' and run.tree_id is null;
+
+update agent_runs child
+set tree_id=parent.tree_id
+from agent_run_delegations delegation
+join agent_runs parent on parent.id=delegation.parent_run_id
+where child.id=delegation.child_run_id and child.tree_id is null;
+
+insert into chat_runs(
+	id,user_id,chat_id,input_message_id,output_message_id,root_agent_run_id,status,error_code,
+	created_at,started_at,finished_at,updated_at
+)
+select root.id,root.user_id,root.chat_id,root.input_message_id,root.output_message_id,root.id,root.status,root.error_code,
+	root.created_at,root.started_at,root.finished_at,root.updated_at
+from agent_runs root
+where root.runtime_kind='legacy_role' and root.agent_role='leader'
+on conflict(id) do nothing;
 
 insert into agent_role_checkpoints(
 	run_id,agent_role,step_key,ordinal,identity_key,payload,payload_sha256,created_at
@@ -1762,6 +1965,9 @@ alter table source_discovery_sessions enable row level security;
 alter table source_discovery_candidates enable row level security;
 alter table source_discovery_jobs enable row level security;
 alter table agent_runs enable row level security;
+alter table chat_runs enable row level security;
+alter table agent_trees enable row level security;
+alter table agent_run_results enable row level security;
 alter table agent_run_routes enable row level security;
 alter table agent_run_delegations enable row level security;
 alter table agent_research_outcomes enable row level security;
@@ -1809,6 +2015,8 @@ grant select, insert, update, delete on
 	chat_source_selections,
 	chat_messages,
 	agent_runs,
+	chat_runs,
+	agent_trees,
 	agent_run_evidence_set,
 	chat_citations,
 	agent_jobs
@@ -1829,6 +2037,8 @@ grant select on
 	chat_source_selections,
 	chat_messages,
 	agent_runs,
+	chat_runs,
+	agent_trees,
 	agent_run_evidence_set,
 	agent_run_grounding_plans,
 	agent_claim_support_records,
@@ -1837,6 +2047,8 @@ grant select on
 	chat_citations
 to nano_worker;
 grant insert on agent_run_evidence_set to nano_worker;
+grant select, insert on agent_run_results to nano_worker;
+grant insert, update on chat_runs,agent_trees to nano_worker;
 grant select, insert, update, delete on
 	agent_run_grounding_plans,
 	agent_claim_support_records,
@@ -2496,14 +2708,63 @@ create policy source_discovery_jobs_worker on source_discovery_jobs
 drop policy if exists agent_runs_private on agent_runs;
 create policy agent_runs_private on agent_runs
 	for all to nano_app
-	using (user_id = nullif(current_setting('app.principal_id', true), ''))
-	with check (user_id = nullif(current_setting('app.principal_id', true), ''));
+	using (
+		user_id = nullif(current_setting('app.principal_id', true), '')
+		or exists (
+			select 1 from chat_runs product
+			join agent_trees tree on tree.root_agent_run_id=product.root_agent_run_id
+			where tree.id=agent_runs.tree_id and product.user_id=nullif(current_setting('app.principal_id', true), '')
+		)
+	)
+	with check (
+		user_id = nullif(current_setting('app.principal_id', true), '')
+		or exists (
+			select 1 from chat_runs product
+			join agent_trees tree on tree.root_agent_run_id=product.root_agent_run_id
+			where tree.id=agent_runs.tree_id and product.user_id=nullif(current_setting('app.principal_id', true), '')
+		)
+	);
 
 drop policy if exists agent_runs_worker on agent_runs;
 create policy agent_runs_worker on agent_runs
 	for all to nano_worker
 	using (true)
 	with check (true);
+
+drop policy if exists chat_runs_private on chat_runs;
+create policy chat_runs_private on chat_runs
+	for all to nano_app
+	using (user_id = nullif(current_setting('app.principal_id', true), ''))
+	with check (user_id = nullif(current_setting('app.principal_id', true), ''));
+
+drop policy if exists chat_runs_worker on chat_runs;
+create policy chat_runs_worker on chat_runs
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists agent_trees_private on agent_trees;
+create policy agent_trees_private on agent_trees
+	for all to nano_app
+	using (root_agent_run_id is null or exists (
+		select 1 from chat_runs product
+		where product.root_agent_run_id=agent_trees.root_agent_run_id
+		  and product.user_id=nullif(current_setting('app.principal_id', true), '')
+	))
+	with check (root_agent_run_id is null or exists (
+		select 1 from chat_runs product
+		where product.root_agent_run_id=agent_trees.root_agent_run_id
+		  and product.user_id=nullif(current_setting('app.principal_id', true), '')
+	));
+
+drop policy if exists agent_trees_worker on agent_trees;
+create policy agent_trees_worker on agent_trees
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists agent_run_results_worker_read on agent_run_results;
+create policy agent_run_results_worker_read on agent_run_results
+	for select to nano_worker using (true);
+drop policy if exists agent_run_results_worker_append on agent_run_results;
+create policy agent_run_results_worker_append on agent_run_results
+	for insert to nano_worker with check (true);
 
 drop policy if exists agent_run_routes_worker on agent_run_routes;
 create policy agent_run_routes_worker on agent_run_routes
