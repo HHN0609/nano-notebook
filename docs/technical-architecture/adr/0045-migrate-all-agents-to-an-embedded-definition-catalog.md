@@ -1,0 +1,19 @@
+# Migrate all Agents to an embedded Definition Catalog
+
+Sprint 10 moves every existing production Agent—the Chat Leader and Research child—into one Git-owned Agent Catalog. Each Agent Definition is a strict JSON file embedded with the Go binary and binds immutable `identity + version` to one registered Executor, exact Model Policy, Prompt and Contract references, tool and child allowlists, and local limits. Startup rejects unknown fields and unresolved or capability-expanding references, canonicalizes accepted content, computes its SHA-256, and registers it immutably in PostgreSQL.
+
+The active Agent Configuration Set becomes a release manifest selecting exact Agent Definition and Model Policy versions for new admission. It no longer duplicates per-Role configuration. Sprint 10 removes Role from the new Definition and dispatch model: one Executor Registry maps stable `chat_leader` and `research` identities to one Go implementation and a code-owned capability ceiling. Definitions may narrow those ceilings but cannot add authority, delegation relationships, tool classes, or control flow that the selected Executor has not registered. Sprint 9 `agent_role` remains legacy recovery input only.
+
+Definitions permit no environment interpolation, templates, inheritance, includes, runtime overrides, mutable aliases, or arbitrary entrypoints. Prompt bodies remain in the separately versioned Prompt Catalog and are referenced exactly. These constraints make hashing, review, recovery, and rolling compatibility deterministic.
+
+The catalog is declarative rather than a workflow DSL. A Definition may select a registered Executor and narrow bindings, but cannot encode branches, loops, DAGs, state transitions, SQL, network endpoints, retry and Lease policy, authorization, publication, or dynamic capability names. Executors retain bounded control flow and lifecycle rules. A new orchestration shape or authority class requires reviewed code under a new Executor identity.
+
+Sprint 10 registers one implementation per Executor identity and carries no independent Executor version in new Definitions. Compatible code changes must continue to understand accepted Checkpoints. A breaking change requires draining affected Runs before replacement; concurrent multi-version Executor dispatch is deferred until operational evidence justifies it.
+
+Exact Provider model routes and non-secret invocation settings live in an embedded, versioned Model Policy Catalog. Definitions reference exact Policy versions, and admission pins the Policy hash and resolved Provider model. Environment configuration remains appropriate for Provider endpoints and credentials but cannot alter Agent behavior; existing Chat and Research model overrides retire with the legacy Profile adapter.
+
+We rejected a catalog used only by future Agents because it would leave Chat and Research on a second hard-coded configuration system. We also rejected retaining Role Registry because Role and Executor would duplicate identity without creating an independent security boundary; the implementation that can execute behavior must own its capability ceiling.
+
+Migration follows expand, activate, drain, and retire. Catalog schema, registrations, Executors, and compatibility readers deploy first. Admission then selects an exact release manifest. Already admitted Sprint 9 Runs continue through a read-only legacy Profile adapter. The adapter and obsolete columns retire only when durable state proves no non-terminal Run references them; historical records are not rewritten. This supersedes Role-based dispatch in ADR 0041 for newly admitted Runs.
+
+Sprint 10 intentionally adds no new product Agent Definition. Migrated `chat.leader@1` and `research.source-discovery@1` are the framework's compatibility and runtime proof; future feature Definitions require their own approved product scope.

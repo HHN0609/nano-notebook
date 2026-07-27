@@ -36,12 +36,20 @@ _Avoid_: Search response, shared Source list, RAG context
 The server-side adapter boundary that accepts a bounded query and locale hints and returns Provider-neutral discovery candidates. Brave is the first adapter; its raw envelope and credential never cross the boundary.
 _Avoid_: Evidence Search Action, Fetcher Adapter, browser search
 
+**Chat Run**:
+The Member-visible durable lifecycle of one requested Chat answer. It owns product status and the input/output Message relationship; one input Message may have later Chat Runs after explicit user retries.
+_Avoid_: Agent Run, Agent Job
+
 **Agent Run**:
-The user-visible durable lifecycle of one requested answer. It owns product status and the input/output Message relationship; one input Message may have later Runs after explicit user retries, but a Run does not double as Worker delivery state.
-_Avoid_: Queue item, model request
+One internal durable invocation of a pinned Agent Definition on behalf of a Chat Run or parent Agent Run. It owns its Executor binding, Checkpoints, Trace, Agent Tree membership, and delegation relationships but not product publication state; many Agent Runs may invoke the same Definition.
+_Avoid_: Chat Run, Agent Definition, Agent Job
+
+**Agent Tree**:
+The durable runtime aggregate shared by one root Agent Run and every delegated child, owning the absolute deadline plus reserved and consumed logical budgets independently of the owning Chat Run. The Chat Run references only the root; Agent Delegations define child membership.
+_Avoid_: Chat Run, workflow DAG, Agent Configuration Set
 
 **Leader Run**:
-The only Member-facing Agent Run. It durably routes a Chat turn into ordinary conversation or explicit Source Discovery delegation and remains the sole authority allowed to publish the Assistant Message.
+The root Agent Run owned by a Chat Run. It durably routes a Chat turn into ordinary conversation or explicit Source Discovery delegation, while the owning Chat Run remains the Member-facing lifecycle and Message publication authority.
 _Avoid_: HTTP router, hidden child Run, general orchestrator
 
 **Leader Route Decision**:
@@ -49,39 +57,79 @@ The typed model classification of the current Member turn as `continue_chat` or 
 _Avoid_: Tool permission, inherited search mode, model reasoning text
 
 **Delegation Policy**:
-The deterministic application gate that converts a requested Leader Route Decision into an effective route after checking Member authority, registered Role relationships, active-child limits, Provider availability, and root Run validity. Requested and effective routes remain distinguishable in durable state.
+The deterministic application gate that converts a requested Leader Route Decision into an effective route after checking Member authority, the pinned Definition and Executor relationship, active-child limits, Provider availability, and root Run validity. Requested and effective routes remain distinguishable in durable state.
 _Avoid_: Router prompt, model authorization, silent policy inference
 
 **Research child Run**:
-An internal Agent Run linked to a Leader through one durable Agent Delegation. It may create one private Discovery Session through the bounded Web Search Provider and cannot publish Chat content, import Sources, or delegate another Run.
+A child Agent Run linked to a Leader through one durable Agent Delegation. It may create one private Discovery Session through the bounded Web Search Provider and cannot publish Chat content, import Sources, or delegate another Run.
 _Avoid_: Research answer, prompt mode, crawler
 
-**Agent Role**:
-An application-registered execution responsibility that determines an Agent Run's executor, configuration policy, visibility, and permitted delegation relationships. A Role is fixed by deployed product code and cannot be invented or installed by a model or Member.
-_Avoid_: Prompt persona, dynamic plugin, user-defined agent
+**Legacy Agent Role**:
+The Sprint 9 `leader` or `research` classification stored on existing Agent Runs and interpreted only by the migration compatibility adapter. New Agent Definitions select a registered Agent Executor directly, so Role is not a separate runtime identity or authorization layer.
+_Avoid_: Agent Executor, new Definition field, extensibility mechanism
+
+**Agent Definition**:
+An immutable, Git-owned declarative configuration that gives one callable Agent identity its registered Executor, exact Model Policy, Prompt and Contract bindings, Tool and child allowlists, and local Run Budget. It can select and narrow registered capabilities but cannot encode control flow, lifecycle transitions, arbitrary code, or new authority; a model may select an allowlisted definition but cannot create or modify one.
+_Avoid_: Agent Run, Agent Executor, user prompt, runtime plugin
+
+**Agent Executor**:
+A Go implementation registered under one stable Executor identity that owns a bounded execution strategy, deterministic state transitions, capability ceiling, and permitted child Executor classes. Sprint 10 supports one implementation per identity; Agent Definitions select it and may narrow its bindings but cannot inject functions, workflow expressions, SQL, network endpoints, retry policy, or publication authority.
+_Avoid_: Agent Definition, workflow DSL, configuration script
+
+**Agent Catalog**:
+The embedded, Git-owned collection of strict versioned Agent Definition files for every production Agent. Startup rejects unknown fields, executable configuration constructs, or unresolved Executor, Model Policy, Prompt, Tool, child, and Contract references, canonicalizes each definition, hashes it, and registers it immutably before admission may pin it.
+_Avoid_: Go constructor defaults, mutable configuration service, feature-specific registry
+
+**Model Policy**:
+An immutable, Git-owned and versioned configuration that binds an exact Provider model route and non-secret invocation parameters such as temperature, maximum output tokens, and timeout. Agent Definitions reference an exact Model Policy version, and admission pins its identity, hash, and resolved Provider model; deployment environment variables may supply endpoints and credentials but cannot replace production Agent model behavior.
+_Avoid_: Model environment override, mutable alias, Provider credential
+
+**Agent Delegation MCP Tool**:
+One model-facing MCP Tool generated from an allowlisted Agent Definition, through which a parent Agent requests a bounded child task and receives a durable handle through the negotiated `io.modelcontextprotocol/tasks` Extension. Each visible Tool identifies exactly one child Definition and Result Contract; it grants no authority itself because application policy and the Delegation Kernel validate and execute the request.
+_Avoid_: Direct Run insert, MCP Sampling, child Agent server
+
+**Agent Definition Reference**:
+The exact `identity@version` reference used by release manifests, parent child-allowlists, and Agent Runs. A callable child Tool name is derived deterministically as `delegate.<identity>.v<version>`; configuration supplies only bounded delegation description and Contract metadata, never a second arbitrary Tool identity.
+_Avoid_: Latest Agent alias, model-supplied child ID, manually duplicated Tool name
+
+**Child Context Manifest**:
+The immutable, server-constructed input authority for one child Agent Run, combining its bounded parent task with authorized product, evidence, configuration, tool, budget, deadline, and result-contract references. It contains no inherited model reasoning or implicit copy of the parent's complete context.
+_Avoid_: Shared conversation, parent prompt dump, child memory
+
+**Agent Tree Budget**:
+The immutable aggregate deadline and logical model, Action, context, and result limits shared by one root Agent Run and its descendants. Each Agent Run also has a local Agent Definition budget and may consume only the smaller remaining allowance; Provider-reported monetary cost is observed rather than treated as exact authorization state.
+_Avoid_: Agent local budget, Provider quota, billing limit
 
 **Delegation Kernel**:
-The bounded Agent runtime capability that owns parent-child Run creation, waiting, continuation, cancellation propagation, and terminal handoff independently of any child Role's domain work. It executes only application-registered relationships and is not a general workflow graph.
+The bounded Agent runtime capability that owns parent-child Run creation, waiting, continuation, cancellation propagation, and terminal handoff independently of any child Executor's domain work. It executes only registered and configured relationships and is not a general workflow graph.
 _Avoid_: Research executor, workflow engine, agent-to-agent chat
 
 **Agent Delegation**:
-The durable lifecycle relationship between one parent Agent Run and one application-registered child Agent Run. Its generic record preserves relationship identity, ordinal, terminal status, safe failure, and parent consumption separately from any Role-owned outcome such as a Discovery Session.
+The durable lifecycle relationship between one parent Agent Run and one configured child Agent Run. Its generic record preserves relationship identity, ordinal, terminal status, safe failure, and parent consumption separately from any Executor-owned outcome such as a Discovery Session.
 _Avoid_: Research query plan, child result payload, workflow edge
 
 **Delegation Outcome**:
-The durable terminal handoff from one child Agent Run to its parent, with a bounded status and a Role-owned result or safe error reference. The Delegation Kernel records and delivers the outcome, while the parent Role decides whether to continue, degrade, or fail; consuming the outcome does not erase its terminal status, and the current Research policy maps child failure to Leader failure.
+The durable terminal handoff from one child Agent Run to its parent, with a bounded status and an Executor-owned result or safe error reference. The Delegation Kernel records and delivers the outcome, while the parent Executor decides whether to continue, degrade, or fail; consuming the outcome does not erase its terminal status, and the current Research policy maps child failure to Leader failure.
 _Avoid_: Assistant answer, kernel business decision, implicit fallback
 
+**Agent Result**:
+The single immutable, Contract-versioned canonical JSON payload produced by one successful child Agent Run, stored once with its SHA-256 and byte size. Delegation Outcome, MCP Task result, parent Action Result Checkpoint, and Trace carry only its stable reference and integrity metadata; authorized Context Builders or publication code resolve the payload when needed.
+_Avoid_: Copied child transcript, parent-owned draft, Tool Invocation ledger
+
+**Delegation Task Projection**:
+The MCP Tasks Extension view of one Agent Delegation, using `task_id = delegation_id` without a second Task table. `tasks/get` projects durable Delegation and child Run state and includes the terminal Result reference or safe error; `tasks/cancel` maps to bounded Kernel cancellation. Nano implements protocol-compatible `tasks/update` handling but never emits `input_required`, and it has no task enumeration or removed `tasks/result` method.
+_Avoid_: MCP Task store, Worker polling loop, 2025-11-25 Tasks API
+
 **Run Retry**:
-An explicit user request to answer the latest unanswered input Message again after its prior Run was cancelled or failed. It creates a new Agent Run, is unavailable after the Chat advances, and is distinct from automatic execution attempts inside an existing Run.
+An explicit user request to answer the latest unanswered input Message again after its prior Chat Run was cancelled or failed. It creates a new Chat Run and root Agent Run, is unavailable after the Chat advances, and is distinct from automatic execution Attempts inside an existing Agent Run.
 _Avoid_: Job retry, Attempt, reopening a terminal Run
 
 **Run Cancellation**:
-The durable product decision that an active Agent Run will publish no answer. It may become final before in-flight work actually stops, is never resumed from Checkpoints, and a later Retry creates a new Run.
+The durable product decision that an active Chat Run and its Agent Tree will publish no answer. It may become final before in-flight work actually stops, is never resumed from Checkpoints, and a later Retry creates a new Chat Run and root Agent Run.
 _Avoid_: Pause, process kill, guaranteed Provider cancellation
 
 **Agent Job**:
-The single internal durable delivery record that tells an Agent Worker which Run to advance across its model and Action steps. It remains one Job across Checkpoints and infrastructure Attempts, and the browser never depends on its state.
+The single internal durable delivery record that tells an Agent Worker which Agent Run to advance across its model and Action steps. It remains one Job across Checkpoints and infrastructure Attempts, and the browser never depends on its state.
 _Avoid_: Agent Run, frontend status
 
 **Attempt Disposition**:
@@ -97,8 +145,12 @@ The identity of the current leased execution of a Job. Reclaiming the Job replac
 _Avoid_: Session token, Worker identity, permanent ownership
 
 **Run Checkpoint**:
-An immutable, Provider-neutral durable boundary after an Agent outcome is accepted, from which later execution can reuse accepted results and continue with the first incomplete step. Its stable identity envelope is shared by Agent Roles, while each Role owns the typed payload schema for its bounded steps. It contains no transient running state, raw Provider payload, or diagnostic history and is not a snapshot of a Worker process or an in-flight model generation.
+An immutable, Provider-neutral durable boundary after an Agent outcome is accepted, from which a later Attempt can reuse accepted results and continue with the first incomplete step. Its stable identity envelope is shared by Agent Executors, while each Executor owns the typed payload schema for its bounded steps. It contains no transient running state, raw Provider payload, or diagnostic history and is not a snapshot of a Worker process or an in-flight model generation.
 _Avoid_: Mutable step status, process snapshot, partial-token continuation, Durable Agent Trace
+
+**Agent Context Projection**:
+The deterministic, Provider-neutral context rebuilt for each Model Call from the pinned Agent Definition, Prompt and authorized product input plus accepted Run Checkpoints. It is bounded before Provider encoding, never depends on an in-memory or Provider-owned conversation, and fails with `context_budget_exhausted` rather than silently dropping required Contracts, Evidence, or accepted Action Results.
+_Avoid_: Agent memory service, Provider thread, raw transcript, hidden reasoning
 
 **Workload Class**:
 A fixed product category such as interactive Agent, Source Processing, or offline Eval/Reindex, used to reserve concurrency and prevent background work from starving user-facing Jobs.
@@ -162,7 +214,7 @@ _Avoid_: One-shot RAG prompt, Qdrant query tool, web search
 An explicit retrieval outcome in which a versioned fallback policy permits useful candidates after one configured candidate or ranking stage fails. It is neither successful execution of the full hybrid pipeline nor evidence that the selected Sources lack support, and it never relaxes Retrieval Scope or groundedness rules.
 _Avoid_: Silent fallback, successful hybrid retrieval, insufficient evidence
 
-## Agent Execution
+## Agent Runtime
 
 **Prompt Catalog**:
 The application-owned collection of immutable, explicitly versioned instructions used by production Model Calls and model-assisted Source processing. Each use resolves one exact Prompt identity rather than depending on mutable or ad hoc instruction text.
@@ -177,20 +229,20 @@ The application-owned typed input or output shape paired with a Prompt Version a
 _Avoid_: Prompt formatting convention, model suggestion, chain of thought
 
 **Agent Prompt Set**:
-An immutable compatibility set that binds the Prompt Versions and Prompt Contracts available to one Agent Run. A Research child inherits its parent Leader's set, while non-Agent model-assisted work pins Prompt Versions through its own configuration lifecycle.
-_Avoid_: Global prompt bundle, current deployment prompts, per-call latest prompt
+The legacy Sprint 9 compatibility set that bound Prompt Versions and Contracts for Leader and Research Profiles. Sprint 10 reads it only for already admitted Runs; new Agent Definitions bind exact Prompt and Contract versions directly.
+_Avoid_: Agent Definition, global prompt bundle, new configuration layer
 
 **Agent Configuration Set**:
-The immutable compatibility configuration pinned when a Leader Run is admitted. It identifies the registered Agent Role Profiles and shared root policies that must remain fixed across delegation, continuation, and infrastructure retry; a child carries the same set identity but resolves its own Role Profile.
-_Avoid_: Current server config, mutable feature flags, copied parent settings
+The immutable deployment manifest that selects exact versioned Agent Definitions and Model Policies eligible for newly admitted Chat Runs. It no longer owns duplicate Role profiles or Prompt/Tool/model mappings; each Agent Run pins exact referenced definitions, and changing an environment variable never changes an admitted Run.
+_Avoid_: Agent Definition, current server config, mutable feature flags, latest configuration
 
 **Agent Configuration Lifecycle**:
-The bounded `expand -> activate -> retire` deployment protocol for immutable Agent Configuration Sets and their executor contracts. A release adds support before admission activates it and may retire old support only after durable state proves that no non-terminal Run still references it; unsupported active configuration prevents Worker readiness rather than failing the Run.
+The bounded `expand -> activate -> drain -> retire` deployment protocol for immutable Agent Configuration Sets and their Definition/Executor contracts. A release adds support before admission activates it and may retire old support only after durable state proves that no non-terminal Run still references it; unsupported active configuration prevents Worker readiness rather than failing the Run.
 _Avoid_: Latest-only deployment, runtime hot switch, capability-aware scheduler
 
 **Agent Role Profile**:
-The application-owned configuration for one Agent Role within an Agent Configuration Set, including model policy, Prompt bindings, allowed tools or Providers, local Run Budget, and executor compatibility. It cannot expand the Role relationships or Member authority registered in product code.
-_Avoid_: Agent persona, user-selected model, runtime plugin
+The legacy Sprint 9 configuration record that grouped model, Prompt, Tool, budget, and Executor bindings by Role inside an Agent Configuration Set. Sprint 10 reads it only for already admitted Runs through a compatibility adapter; new admissions use Agent Definitions from the Agent Catalog.
+_Avoid_: Agent Definition, new configuration extension point, runtime plugin
 
 **Run Evidence Set**:
 The fixed set of immutable Sources and their active Evidence Revisions selected when a question creates an Agent Run. The Run also pins the corresponding Retrieval Index Version; later Chat selection, Source processing, and new Sources do not enter it, while deletion of a member Source invalidates the active Run rather than silently changing its evidence.
@@ -201,47 +253,79 @@ The Run-owned classification of a newly published answer as `source_less`, `sour
 _Avoid_: Message answer mode, mixed answer, UI toggle
 
 **Agent Controller**:
-The Go component that advances an Agent Run through its fixed outer stages while validating and bounding model-selected, read-only research actions.
+The Go component that advances an Agent Run through its Executor-owned outer stages while validating, authorizing, budgeting, checkpointing, and recovering model-selected MCP Tool actions.
 _Avoid_: Workflow engine, autonomous agent loop
 
 **Agent Action**:
-A model-proposed, Agent Controller-authorized operation from a finite application-defined set. Each Action has a canonical typed input and result, is read-only or pure computation, and remains distinct from Provider tool-call formats and general external tools.
-_Avoid_: General Tool, Provider Tool Call, MCP Tool, command
+A durable logical invocation of one allowlisted MCP Tool, accepted and authorized by the Agent Controller from a model proposal. Each Action has canonical typed input and result independent of Provider tool-call formats; synchronous tools complete inline, while delegation tools may suspend the execution behind a durable MCP Task.
+_Avoid_: Raw Provider Tool Call, arbitrary command, uncheckpointed MCP request
 
-**Action Registry**:
-The application-owned catalog through which the Agent Controller discovers registered Agent Action definitions and executors. It is extensible by code registration while remaining closed to runtime plugins, external discovery, and model-defined Actions.
-_Avoid_: Plugin manager, MCP registry, dynamic Tool marketplace
+**MCP Tool Plane**:
+The internal Host/Server boundary through which every production model-callable tool is discovered and invoked. The Nano Tools MCP Server exposes startup-registered application adapters plus generated Agent Delegation tools, while the Agent Controller owns allowlisting, authorization, budget, Checkpoints, recovery, and task suspension; it is not a second Agent runtime.
+_Avoid_: External Tool marketplace, direct executor shortcut, second orchestration runtime
+
+**Attempt Context Handle**:
+A short-lived, opaque, process-local identifier that the MCP Host injects into request metadata outside model-visible Tool arguments. It binds one leased Agent Attempt to its Agent Run, fencing authority, pinned Agent Definition, scoped Tool allowlist, product authorization, deadline, and remaining budget; the Nano Tools MCP Server validates it for both discovery and invocation and rejects it after the Attempt loses authority. Recovery mints a new Handle rather than persisting or reviving the old one.
+_Avoid_: Tool argument, Run ID supplied by the model, long-lived bearer token
+
+**Logical Action Identity**:
+The stable `action_id` assigned by an accepted Action Proposal and injected by the Host into MCP request metadata outside model-visible arguments. It survives infrastructure Attempts and is the idempotency key for state-changing Tool adapters, while the ephemeral Attempt Context Handle proves that the current caller may advance it.
+_Avoid_: Provider tool-call ID, Attempt Context Handle, random retry ID
+
+**Tool Registry**:
+The application-owned registry backing the Nano Tools MCP Server's `tools/list` and `tools/call` behavior. Ordinary tools register typed MCP adapters at startup and Agent Definitions generate delegation entries during controlled deployment; runtime plugins, model-defined tools, and unscoped external discovery are prohibited.
+_Avoid_: Legacy Action Registry, plugin manager, dynamic Tool marketplace
+
+**Materialized Tool Definition**:
+The immutable name, description, input/output schema, Contract identities, and SHA-256 returned by scoped MCP discovery for one Agent Run and Model Call. A later `tools/call` must resolve the same definition and hash or fail closed.
+_Avoid_: Global mutable Tool schema, unversioned JSON object, Provider-only function definition
+
+**Tool Scheduling Class**:
+The code-registered execution constraint attached to an MCP Tool adapter: `ordered_sync` may share a bounded proposal batch and executes sequentially, while `exclusive_task` must be the only Action because it suspends the parent Agent Run. Agent Definitions may lower batch limits but cannot change a Tool's class.
+_Avoid_: Model-selected concurrency, configurable Tool semantics, implicit fan-out
 
 **Action Proposal**:
-A Provider-independent, ordered model request to invoke one or more registered Agent Actions. It is input to Agent Controller validation, not execution authority.
-_Avoid_: Tool Call, command, approved Action
+A Provider-independent, ordered model request to invoke one or more exposed MCP Tools. It is input to Agent Controller validation and becomes an Agent Action only after schema, capability, authorization, and budget checks; the proposal itself grants no execution authority.
+_Avoid_: Authorized Tool Call, command, approved Action
 
 **Model Decision**:
 The Provider-neutral result presented to the Agent Controller by one completed model invocation. It contains exactly one Final Draft or one ordered Action Proposal batch.
 _Avoid_: Raw Provider response, Chat completion, chain of thought
+
+**Decision Contract**:
+A versioned schema that constrains a model's structured decision without invoking an executable capability or producing an Action Result. A Provider may encode it with function-call syntax, but the Models Module normalizes it as decision data rather than an MCP Tool; `select_leader_route` is the Sprint 10 example.
+_Avoid_: Agent Tool, MCP Tool, Provider function-call syntax
 
 **Model Call**:
 One Agent Controller invocation of the Models Module, recorded with application-normalized metadata even when the gateway performs multiple Provider attempts internally. It excludes raw gateway or Provider request and response payloads.
 _Avoid_: Provider request, Bifrost response, Agent Run
 
 **Action Result**:
-The accepted typed outcome of one Agent Action, containing either success data or an expected domain error. It is durable Run working state consumed by later model decisions and reused after recovery.
-_Avoid_: Tool response, log entry, Trace Event
+The accepted, normalized typed outcome of one Agent Action, containing either success data or an expected domain error from the MCP Tool Plane. It is durable Run working state consumed by later model decisions and reused after recovery, rather than raw transport output.
+_Avoid_: Raw MCP response, log entry, Trace Event
+
+**Tool Error Classification**:
+The Agent Controller's exhaustive mapping of a Tool outcome into `domain_error`, retryable infrastructure failure, lost-authority abandonment, or safe terminal invariant failure. Only bounded error codes declared by the Materialized Tool Definition become model-visible Action Results; Transport, authorization, Lease, Definition, and schema-integrity details never enter model context, and a Tool adapter cannot choose Agent Run or product status.
+_Avoid_: Raw MCP error passthrough, Tool-owned retry, model-visible authorization failure
+
+**Tool Invocation Semantics**:
+MCP Tool execution is at-least-once across infrastructure recovery: an Action whose Result Checkpoint is missing may be invoked again under a new Agent Attempt and Attempt Context Handle, but retains its Logical Action Identity. Read-only or pure Tools must tolerate repetition, state-changing Tools must enforce database-level idempotency by `action_id`, and only the currently fenced Attempt may append the accepted Action Result.
+_Avoid_: Exactly-once RPC, per-Attempt idempotency, generic Tool invocation ledger
 
 **Final Draft**:
 An accepted model-produced plain-text candidate answer that may become an Assistant Message only through Source-marker normalization and the Publication Barrier.
 _Avoid_: Assistant Message, published answer, raw model response
 
 **Run Budget**:
-The limits pinned to one Agent Run for model decisions, accepted logical Agent Actions, elapsed time, and retained Action Result size. Success and expected domain error consume one Action each, recovery re-execution does not consume another, and one final model decision without Actions is reserved for graceful exhaustion. A delegated child shares its root Leader's absolute deadline and adds Role-local limits; delegation never resets or pauses elapsed time.
+The Definition-local limits pinned to one Agent Run for model decisions, accepted logical Agent Actions, context, result size, Attempts, and elapsed time. Success and expected domain error consume one Action each, while recovery re-execution does not consume another. A child also shares its Agent Tree deadline and aggregate logical limits and may use only the smaller remaining allowance; delegation never resets or pauses elapsed time.
 _Avoid_: Provider quota, Job retry policy, context window
 
 **Fixed Agent Loop**:
-The Sprint 2A orchestration seam that executes exactly one `LoadRun -> BuildContext -> InvokeModel -> PublishAnswer` pass. It is named a loop for compatibility with later typed action iteration, but it contains no speculative loop or tool execution today.
+The bounded orchestration seam introduced in Sprint 2A and now advanced by the Agent Controller through Definition-limited model decisions and MCP Tool Actions until a terminal Executor-owned outcome. It is not an autonomous loop or general workflow engine.
 _Avoid_: Autonomous loop, generic workflow engine
 
 **Context Builder**:
-The component that constructs the bounded input for the next model call from authorized Chat content, the current Run checkpoint, accepted action results, selected Evidence Units, and versioned Agent configuration. Its output is a model-facing projection, not durable authority or a claim to capture model-internal memory.
+The component that constructs the bounded input for the next Model Call from the pinned Agent Definition and Prompt, authorized product input, accepted Run Checkpoints and Action Results, and selected Evidence Units. Its output is a model-facing projection, not durable authority or a claim to capture model-internal memory.
 _Avoid_: Transcript replay, memory store, model snapshot
 
 **Publication Barrier**:
