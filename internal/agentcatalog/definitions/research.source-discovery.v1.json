@@ -1,0 +1,26 @@
+{
+  "identity": "research.source-discovery",
+  "version": 1,
+  "executor": "research",
+  "model_policy": "agent.research-default@1",
+  "prompts": {
+    "planner": "agent.research-planner@1"
+  },
+  "contracts": {
+    "input": "research.discovery-task@1",
+    "result": "research.discovery-result@1"
+  },
+  "tools": ["web_search"],
+  "children": [],
+  "limits": {
+    "model_calls": 1,
+    "actions": 1,
+    "action_batch": 1,
+    "context_bytes": 65536,
+    "result_bytes": 262144,
+    "attempts": 3
+  },
+  "delegation": {
+    "description": "Discover bounded public web source candidates for an explicit source-discovery request"
+  }
+}

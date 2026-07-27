@@ -1,0 +1,7 @@
+{
+  "identity": "nano.default",
+  "version": 1,
+  "roots": {
+    "chat": "chat.leader@1"
+  }
+}

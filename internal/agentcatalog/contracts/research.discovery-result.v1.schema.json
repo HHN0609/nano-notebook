@@ -1,0 +1,26 @@
+{
+  "identity": "research.discovery-result",
+  "version": 1,
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["candidates"],
+    "properties": {
+      "candidates": {
+        "type": "array",
+        "maxItems": 30,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "title", "snippet"],
+          "properties": {
+            "url": {"type": "string", "format": "uri", "maxLength": 4096},
+            "title": {"type": "string", "maxLength": 1024},
+            "snippet": {"type": "string", "maxLength": 8192}
+          }
+        }
+      }
+    }
+  }
+}

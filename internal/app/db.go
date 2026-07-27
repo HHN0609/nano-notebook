@@ -89,7 +89,10 @@ func RunMigrations(ctx context.Context, db *DB) error {
 	if _, err := db.pool.Exec(ctx, migrationsSQL); err != nil {
 		return err
 	}
-	return registerEmbeddedPromptCatalog(ctx, db)
+	if err := registerEmbeddedPromptCatalog(ctx, db); err != nil {
+		return err
+	}
+	return registerEmbeddedAgentCatalog(ctx, db)
 }
 
 const migrationsSQL = `
@@ -812,6 +815,95 @@ create trigger agent_prompt_versions_immutable
 
 revoke all on agent_prompt_versions from nano_app, nano_worker;
 grant select on agent_prompt_versions to nano_worker;
+
+create table if not exists agent_contract_versions (
+	contract_identity text not null check (char_length(contract_identity) between 3 and 255),
+	contract_version integer not null check (contract_version > 0),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	json_schema jsonb not null check (jsonb_typeof(json_schema)='object'),
+	canonical_payload jsonb not null check (jsonb_typeof(canonical_payload)='object'),
+	source_path text not null check (char_length(source_path) between 1 and 500),
+	registered_at timestamptz not null default now(),
+	primary key (contract_identity,contract_version)
+);
+
+create table if not exists agent_model_policy_versions (
+	policy_identity text not null check (char_length(policy_identity) between 3 and 255),
+	policy_version integer not null check (policy_version > 0),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	provider_model text not null check (char_length(provider_model) between 1 and 255),
+	temperature double precision not null check (temperature >= 0),
+	max_output_tokens integer not null check (max_output_tokens > 0),
+	timeout_ms integer not null check (timeout_ms > 0),
+	canonical_payload jsonb not null check (jsonb_typeof(canonical_payload)='object'),
+	source_path text not null check (char_length(source_path) between 1 and 500),
+	registered_at timestamptz not null default now(),
+	primary key (policy_identity,policy_version)
+);
+
+create table if not exists agent_definition_versions (
+	definition_identity text not null check (char_length(definition_identity) between 3 and 255),
+	definition_version integer not null check (definition_version > 0),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	executor text not null check (char_length(executor) between 1 and 255),
+	model_policy_identity text not null,
+	model_policy_version integer not null,
+	prompt_bindings jsonb not null check (jsonb_typeof(prompt_bindings)='object'),
+	input_contract_identity text not null,
+	input_contract_version integer not null,
+	result_contract_identity text not null,
+	result_contract_version integer not null,
+	tool_allowlist jsonb not null check (jsonb_typeof(tool_allowlist)='array'),
+	children jsonb not null check (jsonb_typeof(children)='array'),
+	limits jsonb not null check (jsonb_typeof(limits)='object'),
+	delegation jsonb check (delegation is null or jsonb_typeof(delegation)='object'),
+	canonical_payload jsonb not null check (jsonb_typeof(canonical_payload)='object'),
+	source_path text not null check (char_length(source_path) between 1 and 500),
+	registered_at timestamptz not null default now(),
+	primary key (definition_identity,definition_version),
+	foreign key (model_policy_identity,model_policy_version)
+		references agent_model_policy_versions(policy_identity,policy_version),
+	foreign key (input_contract_identity,input_contract_version)
+		references agent_contract_versions(contract_identity,contract_version),
+	foreign key (result_contract_identity,result_contract_version)
+		references agent_contract_versions(contract_identity,contract_version)
+);
+
+create table if not exists agent_release_manifests (
+	release_identity text not null check (char_length(release_identity) between 3 and 255),
+	release_version integer not null check (release_version > 0),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	roots jsonb not null check (jsonb_typeof(roots)='object'),
+	canonical_payload jsonb not null check (jsonb_typeof(canonical_payload)='object'),
+	source_path text not null check (char_length(source_path) between 1 and 500),
+	registered_at timestamptz not null default now(),
+	primary key (release_identity,release_version)
+);
+
+create or replace function nano_reject_agent_catalog_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+	raise exception 'Agent catalog records are immutable';
+end
+$$;
+
+drop trigger if exists agent_contract_versions_immutable on agent_contract_versions;
+create trigger agent_contract_versions_immutable before update or delete on agent_contract_versions
+	for each row execute function nano_reject_agent_catalog_mutation();
+drop trigger if exists agent_model_policy_versions_immutable on agent_model_policy_versions;
+create trigger agent_model_policy_versions_immutable before update or delete on agent_model_policy_versions
+	for each row execute function nano_reject_agent_catalog_mutation();
+drop trigger if exists agent_definition_versions_immutable on agent_definition_versions;
+create trigger agent_definition_versions_immutable before update or delete on agent_definition_versions
+	for each row execute function nano_reject_agent_catalog_mutation();
+drop trigger if exists agent_release_manifests_immutable on agent_release_manifests;
+create trigger agent_release_manifests_immutable before update or delete on agent_release_manifests
+	for each row execute function nano_reject_agent_catalog_mutation();
+
+revoke all on agent_contract_versions,agent_model_policy_versions,agent_definition_versions,agent_release_manifests from nano_app,nano_worker;
+grant select on agent_contract_versions,agent_model_policy_versions,agent_definition_versions,agent_release_manifests to nano_worker;
 
 create table if not exists agent_prompt_sets (
 	id text primary key check (char_length(id) between 3 and 255),

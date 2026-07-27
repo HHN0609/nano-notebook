@@ -1,0 +1,13 @@
+{
+  "identity": "research.discovery-task",
+  "version": 1,
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["request"],
+    "properties": {
+      "request": {"type": "string", "minLength": 1, "maxLength": 32768}
+    }
+  }
+}
