@@ -148,7 +148,7 @@ test("desktop workspace shows sources, chat, and Studio as simultaneous panels",
   await expect(chatPanel).toContainText("Ask from model knowledge now.");
   await expect(chatPanel).toContainText("Answers use model knowledge and are not based on Notebook Sources.");
   await expect(chatPanel.getByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
-  await expect(studioPanel).toContainText("Studio output will be saved here");
+  await expect(studioPanel).toContainText("Your generated Studio outputs will appear here.");
   await expect(page.getByRole("tablist", { name: "Notebook panels" })).toBeHidden();
 
   const boxes = await panels.evaluateAll((nodes) =>
