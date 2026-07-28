@@ -9,8 +9,8 @@
 ## Slice 1: Baseline And MCP Dependency Gate
 
 1. Run the existing full Go/PostgreSQL test gate and record baseline failures separately from Sprint 10 regressions.
-2. Inspect the official MCP Go SDK version compatible with protocol 2026-07-28, in-memory transport, per-request metadata, and custom methods or first-class Tasks support.
-3. Add a focused compile/conformance spike proving the selected SDK path before production architecture depends on it.
+2. Inspect the official MCP Go SDK version compatible with protocol 2026-07-28, in-memory transport, per-request metadata, and standard Tool discovery/invocation.
+3. Add a focused compile/conformance spike proving the selected standard SDK path before production architecture depends on it.
 4. Update `go.mod`/`go.sum` and the declared Go version only when the spike proves the required surface.
 
 ## Slice 2: Embedded Catalogs
@@ -61,10 +61,10 @@
 
 1. Write failing materialization tests for exact configured children and deterministic names.
 2. Add a generated delegation adapter that cannot accept a Definition identity from model input.
-3. Implement exact SEP-2663 schemas over official SDK support, including per-request negotiation, task-returning `tools/call`, `tasks/get`, compatible `tasks/update`, and cooperative `tasks/cancel`.
-4. Project `task_id = delegation_id` directly from PostgreSQL; add no Task table or polling Worker.
+3. Use standard `tools/call` to atomically accept the child work and return a Controller-internal scheduling receipt; do not claim SEP-2663 semantics.
+4. Keep `delegation_id` as the PostgreSQL lifecycle handle; add no Task table or polling Worker.
 5. Make child creation and repeated `action_id` resolution transactional and idempotent.
-6. Store one immutable Agent Result, wake parent atomically, and checkpoint the terminal Task projection on resume.
+6. Store one immutable Agent Result, wake parent atomically, and checkpoint only its reference and integrity metadata on resume.
 7. Run conformance, crash-injection, cancellation, authorization, and missed-notification tests and commit.
 
 ## Slice 8: Activate And Drain
