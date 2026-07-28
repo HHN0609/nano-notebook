@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -88,6 +89,48 @@ type DataTableRow struct {
 	ID        string   `json:"id"`
 	Cells     []string `json:"cells"`
 	SourceIDs []string `json:"source_ids"`
+}
+
+// NormalizeGeneratedArtifact repairs the one common JSON ambiguity in model
+// output: ordinal Flashcard IDs emitted as numbers instead of strings. The
+// normalized payload still passes through the strict artifact validator.
+func NormalizeGeneratedArtifact(kind Kind, payload []byte) []byte {
+	if kind != KindFlashcards {
+		return payload
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var document map[string]any
+	if err := decoder.Decode(&document); err != nil {
+		return payload
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return payload
+	}
+	cards, ok := document["cards"].([]any)
+	if !ok {
+		return payload
+	}
+	for _, rawCard := range cards {
+		card, ok := rawCard.(map[string]any)
+		if !ok {
+			return payload
+		}
+		number, ok := card["id"].(json.Number)
+		if !ok {
+			continue
+		}
+		if _, err := strconv.ParseInt(number.String(), 10, 64); err != nil {
+			return payload
+		}
+		card["id"] = number.String()
+	}
+	normalized, err := json.Marshal(document)
+	if err != nil {
+		return payload
+	}
+	return normalized
 }
 
 func ValidateArtifact(kind Kind, payload []byte, pinnedSourceIDs []string) (Artifact, error) {

@@ -172,7 +172,7 @@ func TestStudioOutputSSEReconnectBeginsFromDurableState(t *testing.T) {
 	waitForSSEStop(t, done)
 }
 
-func TestStudioExecutorSearchesThenPublishesValidatedArtifact(t *testing.T) {
+func TestStudioExecutorNormalizesNumericFlashcardIDsBeforePublishing(t *testing.T) {
 	api := newTestAPI(t)
 	owner, csrf := api.registerWithCSRF(t, "studio-executor@example.com")
 	notebookID := createSourceTestNotebook(t, api, owner, "studio-executor")
@@ -181,8 +181,8 @@ func TestStudioExecutorSearchesThenPublishesValidatedArtifact(t *testing.T) {
 	api.server = app.NewServer(app.Config{CookieSecure: false, AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@2")}, api.db)
 	api.handler = api.server.Handler()
 	created := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks/"+notebookID+"/studio-outputs", map[string]any{
-		"kind": "report", "locale": "en", "source_ids": []string{"src_studio_exec"},
-	}, owner, csrf, csrf.Value, "studio-executor-report")
+		"kind": "flashcards", "locale": "en", "source_ids": []string{"src_studio_exec"},
+	}, owner, csrf, csrf.Value, "studio-executor-flashcards")
 	var body struct {
 		Output struct {
 			ID    string `json:"id"`
@@ -196,8 +196,8 @@ func TestStudioExecutorSearchesThenPublishesValidatedArtifact(t *testing.T) {
 	}
 	attempt := agent.Attempt{JobID: claimed.ID, RunID: claimed.RunID, AttemptNo: claimed.AttemptNo, LeaseToken: claimed.LeaseToken}
 	model := &sequenceDecisionModel{decisions: []models.ModelDecision{
-		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "search_evidence", Input: json.RawMessage(`{"query":"key facts","purpose":"build report"}`)}}}},
-		{Final: &models.FinalDraft{Text: `{"title":"Source brief","summary":"A concise summary.","sections":[{"id":"overview","heading":"Overview","markdown":"Grounded content.","source_ids":["src_studio_exec"]}]}`}},
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "search_evidence", Input: json.RawMessage(`{"query":"key facts","purpose":"build flashcards"}`)}}}},
+		{Final: &models.FinalDraft{Text: `{"title":"Source cards","cards":[{"id":1,"front":"Question 1","back":"Answer 1","source_ids":["src_studio_exec"]},{"id":2,"front":"Question 2","back":"Answer 2","source_ids":["src_studio_exec"]},{"id":3,"front":"Question 3","back":"Answer 3","source_ids":["src_studio_exec"]},{"id":4,"front":"Question 4","back":"Answer 4","source_ids":["src_studio_exec"]},{"id":5,"front":"Question 5","back":"Answer 5","source_ids":["src_studio_exec"]}]}`}},
 	}}
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil)
 	search := agent.NewSearchEvidenceAction(emptyEvidenceBackend{result: retrieval.SearchResult{CompleteEmpty: true}})
@@ -225,7 +225,8 @@ func TestStudioExecutorSearchesThenPublishesValidatedArtifact(t *testing.T) {
 		t.Fatalf("requests=%+v", model.requests)
 	}
 	detail := api.getWithCookie(t, "/api/v1/studio-outputs/"+body.Output.ID, owner)
-	if detail.Code != http.StatusOK || !containsString(detail.Body.String(), `"status":"completed"`) || !containsString(detail.Body.String(), `"title":"Source brief"`) {
+	if detail.Code != http.StatusOK || !containsString(detail.Body.String(), `"status":"completed"`) ||
+		!containsString(detail.Body.String(), `"title":"Source cards"`) || !containsString(detail.Body.String(), `"id":"1"`) {
 		t.Fatalf("detail status=%d body=%s", detail.Code, detail.Body.String())
 	}
 	var resultCount int

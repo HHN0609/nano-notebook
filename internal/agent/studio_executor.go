@@ -315,7 +315,8 @@ func (r *studioRuntime) PublishFinal(ctx context.Context, attempt Attempt, draft
 	if len(sourceIDs) != selectedCount {
 		return errors.New("Studio Source snapshot is no longer publishable")
 	}
-	artifact, err := studio.ValidateArtifact(kind, []byte(strings.TrimSpace(draft.Text)), sourceIDs)
+	payload := studio.NormalizeGeneratedArtifact(kind, []byte(strings.TrimSpace(draft.Text)))
+	artifact, err := studio.ValidateArtifact(kind, payload, sourceIDs)
 	if err != nil {
 		return fmt.Errorf("invalid Studio artifact: %w", err)
 	}
