@@ -124,7 +124,8 @@ func (DelegationKernel) TerminalizeInTx(ctx context.Context, tx pgx.Tx, attempt 
 	}
 	runTag, err := tx.Exec(ctx, `
 		update agent_runs set status=$2,error_code=nullif($3,''),finished_at=now(),updated_at=now()
-		where id=$1 and agent_role='research' and status='running'
+		where id=$1 and status='running'
+		  and exists(select 1 from agent_run_delegations where child_run_id=$1 and state='waiting')
 	`, attempt.RunID, runStatus, errorCode)
 	if err != nil {
 		return err
@@ -152,7 +153,8 @@ func (DelegationKernel) TerminalizeInTx(ctx context.Context, tx pgx.Tx, attempt 
 	parentRunTag, err := tx.Exec(ctx, `
 		update agent_runs parent set status='queued',updated_at=now()
 		from agent_run_delegations d
-		where d.child_run_id=$1 and parent.id=d.parent_run_id and parent.status='running' and parent.deadline_at>now()
+		where d.child_run_id=$1 and parent.id=d.parent_run_id and parent.status='running'
+		  and coalesce(parent.deadline_at,(select absolute_deadline from agent_trees where id=parent.tree_id))>now()
 	`, attempt.RunID)
 	if err != nil {
 		return err
@@ -161,7 +163,8 @@ func (DelegationKernel) TerminalizeInTx(ctx context.Context, tx pgx.Tx, attempt 
 		update agent_jobs parent_job set status='queued',updated_at=now()
 		from agent_run_delegations d join agent_runs parent on parent.id=d.parent_run_id
 		where d.child_run_id=$1 and parent_job.run_id=d.parent_run_id and parent_job.status='waiting'
-		  and parent.status='queued' and parent.deadline_at>now()
+		  and parent.status='queued'
+		  and coalesce(parent.deadline_at,(select absolute_deadline from agent_trees where id=parent.tree_id))>now()
 	`, attempt.RunID)
 	if err != nil {
 		return err
@@ -205,7 +208,8 @@ func (DelegationKernel) CompleteParentJobInTx(ctx context.Context, tx pgx.Tx, at
 	tag, err := tx.Exec(ctx, `
 		update agent_jobs set status='succeeded',lease_token=null,lease_expires_at=null,finished_at=now(),updated_at=now()
 		where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid
-		  and exists(select 1 from agent_runs where id=$2 and agent_role='leader' and status='completed')
+		  and exists(select 1 from agent_runs where id=$2 and status='completed')
+		  and exists(select 1 from agent_run_delegations where parent_run_id=$2)
 	`, attempt.JobID, attempt.RunID, attempt.LeaseToken)
 	if err != nil {
 		return err
@@ -222,7 +226,8 @@ func (DelegationKernel) FailParentInTx(ctx context.Context, tx pgx.Tx, attempt A
 	}
 	runTag, err := tx.Exec(ctx, `
 		update agent_runs set status='failed',error_code=$2,finished_at=now(),updated_at=now()
-		where id=$1 and agent_role='leader' and status='running' and output_message_id is null
+		where id=$1 and status='running' and output_message_id is null
+		  and exists(select 1 from agent_run_delegations where parent_run_id=$1)
 	`, attempt.RunID, errorCode)
 	if err != nil {
 		return err

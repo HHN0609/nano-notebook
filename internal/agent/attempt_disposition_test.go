@@ -27,6 +27,9 @@ func TestAttemptDispositionClassifiesRetryableTerminalAndAbandonedFailures(t *te
 		{name: "search rate", err: websearch.ErrRateLimited, want: AttemptResolution{Disposition: AttemptRetryable, ErrorCode: "discovery_rate_limited"}},
 		{name: "search unavailable", err: websearch.ErrUnavailable, want: AttemptResolution{Disposition: AttemptRetryable, ErrorCode: "discovery_unavailable"}},
 		{name: "invalid query", err: websearch.ErrInvalidQuery, want: AttemptResolution{Disposition: AttemptTerminal, ErrorCode: "discovery_invalid_query"}},
+		{name: "MCP infrastructure", err: &ToolCallError{Kind: ToolErrorInfrastructure, Code: "tool_execution_failed"}, want: AttemptResolution{Disposition: AttemptRetryable, ErrorCode: "tool_execution_failed"}},
+		{name: "MCP invariant", err: &ToolCallError{Kind: ToolErrorInvariant, Code: "materialized_tool_mismatch"}, want: AttemptResolution{Disposition: AttemptTerminal, ErrorCode: "materialized_tool_mismatch"}},
+		{name: "MCP lease lost", err: &ToolCallError{Kind: ToolErrorAuthorization, Code: "attempt_authority_lost", Cause: ErrLeaseLost}, want: AttemptResolution{Disposition: AttemptAbandoned, ErrorCode: AttemptCauseLeaseLost}},
 		{name: "authority lost", err: ErrResearchAuthorityLost, want: AttemptResolution{Disposition: AttemptTerminal, ErrorCode: "research_authority_lost"}},
 		{name: "unknown", err: errors.New("secret provider body"), want: AttemptResolution{Disposition: AttemptTerminal, ErrorCode: "agent_execution_failed"}},
 	}

@@ -120,6 +120,26 @@ func TestModelResearchPlannerRequiresOneTypedBoundedQueryBatch(t *testing.T) {
 	}
 }
 
+func TestModelResearchPlannerProposesConfiguredWebSearchAction(t *testing.T) {
+	model := &leaderDecisionModel{outcome: actionOutcome("web_search", json.RawMessage(`{"queries":["configured research"]}`))}
+	planner, ok := any(NewModelResearchPlanner(model)).(interface {
+		PlanWebSearch(context.Context, ResearchPlanRequest) (models.ActionProposal, error)
+	})
+	if !ok {
+		t.Fatal("configured Research planner does not expose an MCP Web Search proposal")
+	}
+	proposal, err := planner.PlanWebSearch(context.Background(), ResearchPlanRequest{Model: "research-model", UserMessage: "collect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposal.Name != "web_search" || string(proposal.Input) != `{"queries":["configured research"]}` {
+		t.Fatalf("proposal=%+v", proposal)
+	}
+	if len(model.requests) != 1 || model.requests[0].RequiredActionName != "web_search" || len(model.requests[0].ActionDefinitions) != 1 || model.requests[0].ActionDefinitions[0].Name != "web_search" {
+		t.Fatalf("request=%+v", model.requests)
+	}
+}
+
 func TestModelResearchPlannerFailsClosedOnMalformedOrNonTypedPlan(t *testing.T) {
 	tests := []models.ModelOutcome{
 		{ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: "QUERY: old format"}}},

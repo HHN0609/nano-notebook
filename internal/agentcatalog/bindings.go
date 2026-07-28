@@ -9,7 +9,8 @@ import (
 type ToolScheduling string
 
 const (
-	ToolOrderedSync ToolScheduling = "ordered_sync"
+	ToolOrderedSync         ToolScheduling = "ordered_sync"
+	ToolExclusiveDelegation ToolScheduling = "exclusive_delegation"
 )
 
 type ToolCapability struct {

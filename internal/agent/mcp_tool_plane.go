@@ -29,6 +29,7 @@ const (
 )
 
 var stableActionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
+var mcpToolNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 type ToolErrorKind string
 
@@ -84,10 +85,13 @@ type MCPToolRegistry struct {
 func NewMCPToolRegistry(registrations ...MCPToolRegistration) (*MCPToolRegistry, error) {
 	actions := make([]Action, 0, len(registrations))
 	for _, registration := range registrations {
-		if registration.Action == nil || registration.Scheduling != agentcatalog.ToolOrderedSync {
+		if registration.Action == nil ||
+			(registration.Scheduling != agentcatalog.ToolOrderedSync && registration.Scheduling != agentcatalog.ToolExclusiveDelegation) {
 			return nil, errors.New("invalid MCP Tool registration")
 		}
-		actions = append(actions, registration.Action)
+		if registration.Scheduling == agentcatalog.ToolOrderedSync {
+			actions = append(actions, registration.Action)
+		}
 	}
 	validated, err := NewActionRegistry(actions...)
 	if err != nil {
@@ -99,10 +103,20 @@ func NewMCPToolRegistry(registrations ...MCPToolRegistration) (*MCPToolRegistry,
 	}
 	for _, registration := range registrations {
 		definition := registration.Action.Definition()
+		var schema map[string]json.RawMessage
+		if !mcpToolNamePattern.MatchString(definition.Name) || strings.TrimSpace(definition.Description) == "" ||
+			len([]rune(strings.TrimSpace(definition.Description))) > 512 || len(definition.InputSchema) == 0 ||
+			len(definition.InputSchema) > 16*1024 || json.Unmarshal(definition.InputSchema, &schema) != nil || schema == nil {
+			return nil, fmt.Errorf("invalid MCP Tool definition %q", definition.Name)
+		}
 		if _, duplicate := registry.byName[definition.Name]; duplicate {
 			return nil, fmt.Errorf("duplicate MCP Tool %q", definition.Name)
 		}
-		if _, ok := validated.Resolve(definition.Name); !ok {
+		if registration.Scheduling == agentcatalog.ToolOrderedSync {
+			if _, ok := validated.Resolve(definition.Name); !ok {
+				return nil, fmt.Errorf("MCP Tool %q was not validated", definition.Name)
+			}
+		} else if !strings.HasPrefix(definition.Name, "delegate.") {
 			return nil, fmt.Errorf("MCP Tool %q was not validated", definition.Name)
 		}
 		tool := MaterializedMCPTool{
@@ -214,7 +228,15 @@ func (h *MCPToolHost) OpenAttempt(ctx context.Context, scope AttemptToolScope) (
 	if !ok {
 		return nil, &ToolCallError{Kind: ToolErrorInvariant, Code: "definition_not_found"}
 	}
-	tools, err := h.registry.Scoped(definition.Tools)
+	toolNames := append([]string(nil), definition.Tools...)
+	for _, child := range definition.Children {
+		name, nameErr := agentcatalog.DelegationToolName(child)
+		if nameErr != nil {
+			return nil, &ToolCallError{Kind: ToolErrorInvariant, Code: "tool_scope_invalid", Cause: nameErr}
+		}
+		toolNames = append(toolNames, name)
+	}
+	tools, err := h.registry.Scoped(toolNames)
 	if err != nil {
 		return nil, &ToolCallError{Kind: ToolErrorInvariant, Code: "tool_scope_invalid", Cause: err}
 	}
@@ -345,6 +367,9 @@ func (s *MCPAttemptSession) ValidateProposal(proposals []models.ActionProposal) 
 		}
 		if err := tool.Action.ValidateInput(proposal.Input); err != nil {
 			return fmt.Errorf("Action proposal %d input is invalid: %w", index, err)
+		}
+		if tool.Scheduling == agentcatalog.ToolExclusiveDelegation && len(proposals) != 1 {
+			return errors.New("exclusive delegation must be the only Action proposal")
 		}
 	}
 	return nil
@@ -477,6 +502,7 @@ func (h *MCPToolHost) executeMCPTool(ctx context.Context, request *mcp.CallToolR
 	}
 	result, err := tool.Action.Execute(ctx, ActionRequest{
 		ActionID: actionID, Input: input, DefaultTimeZone: record.defaultTimeZone, Attempt: record.attempt,
+		Definition: record.definition.Reference(), DefinitionSHA256: record.definition.SHA256,
 	})
 	if err != nil {
 		kind, code := classifyMCPToolExecutionError(err)
@@ -492,6 +518,10 @@ func (h *MCPToolHost) executeMCPTool(ctx context.Context, request *mcp.CallToolR
 }
 
 func classifyMCPToolExecutionError(err error) (ToolErrorKind, string) {
+	var toolErr *ToolCallError
+	if errors.As(err, &toolErr) && toolErr.Kind != "" && actionCodePattern.MatchString(toolErr.Code) {
+		return toolErr.Kind, toolErr.Code
+	}
 	switch {
 	case errors.Is(err, ErrLeaseLost), errors.Is(err, ErrRunDeadlineExceeded), errors.Is(err, context.Canceled):
 		return ToolErrorAuthorization, "attempt_authority_lost"
@@ -584,7 +614,7 @@ func decodeMCPToolEnvelope(value any) (mcpToolEnvelope, error) {
 		default:
 			return mcpToolEnvelope{}, errors.New("unknown MCP Tool error kind")
 		}
-		if !actionNamePattern.MatchString(envelope.ErrorCode) {
+		if !actionCodePattern.MatchString(envelope.ErrorCode) {
 			return mcpToolEnvelope{}, errors.New("invalid MCP Tool error code")
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
@@ -20,10 +21,12 @@ const (
 )
 
 type ActionRequest struct {
-	ActionID        string
-	Input           json.RawMessage
-	DefaultTimeZone string
-	Attempt         Attempt
+	ActionID         string
+	Input            json.RawMessage
+	DefaultTimeZone  string
+	Attempt          Attempt
+	Definition       agentcatalog.Reference
+	DefinitionSHA256 string
 }
 
 type ActionResult struct {
@@ -41,7 +44,7 @@ func (r ActionResult) Validate() error {
 			return fmt.Errorf("invalid succeeded Action result")
 		}
 	case ActionDomainError:
-		if len(r.Output) != 0 || !actionNamePattern.MatchString(r.ErrorCode) {
+		if len(r.Output) != 0 || !actionCodePattern.MatchString(r.ErrorCode) {
 			return fmt.Errorf("invalid domain-error Action result")
 		}
 	default:
@@ -76,7 +79,8 @@ type registeredAction struct {
 	executor   Action
 }
 
-var actionNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+var actionNamePattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,127}$`)
+var actionCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 func NewActionRegistry(actions ...Action) (*ActionRegistry, error) {
 	registered := make([]registeredAction, 0, len(actions))

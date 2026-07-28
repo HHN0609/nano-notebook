@@ -15,6 +15,7 @@ import (
 type mcpToolAction struct {
 	definition models.ActionDefinition
 	calls      []ActionRequest
+	err        error
 }
 
 func (a *mcpToolAction) Definition() models.ActionDefinition { return a.definition }
@@ -27,6 +28,9 @@ func (a *mcpToolAction) ValidateInput(raw json.RawMessage) error {
 }
 func (a *mcpToolAction) Execute(_ context.Context, request ActionRequest) (ActionResult, error) {
 	a.calls = append(a.calls, request)
+	if a.err != nil {
+		return ActionResult{}, a.err
+	}
 	return ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"value":"5"}`)}, nil
 }
 
@@ -51,6 +55,7 @@ func TestMCPToolPlaneUsesOfficialInMemoryProtocolAndDefinitionScope(t *testing.T
 		MCPToolRegistration{Action: testMCPAction("current_time"), Scheduling: agentcatalog.ToolOrderedSync},
 		MCPToolRegistration{Action: testMCPAction("search_evidence"), Scheduling: agentcatalog.ToolOrderedSync},
 		MCPToolRegistration{Action: testMCPAction("web_search"), Scheduling: agentcatalog.ToolOrderedSync},
+		testDelegationMCPRegistration(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -76,11 +81,12 @@ func TestMCPToolPlaneUsesOfficialInMemoryProtocolAndDefinitionScope(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolNames(tools); strings.Join(got, ",") != "calculate,current_time,search_evidence" {
+	if got := toolNames(tools); strings.Join(got, ",") != "calculate,current_time,delegate.research.source-discovery.v1,search_evidence" {
 		t.Fatalf("scoped tools=%v", got)
 	}
 	for _, tool := range tools {
-		if len(tool.SHA256) != 64 || tool.Scheduling != agentcatalog.ToolOrderedSync || len(tool.InputSchema) == 0 {
+		if len(tool.SHA256) != 64 || len(tool.InputSchema) == 0 ||
+			(tool.Scheduling != agentcatalog.ToolOrderedSync && tool.Scheduling != agentcatalog.ToolExclusiveDelegation) {
 			t.Fatalf("materialized tool=%+v", tool)
 		}
 	}
@@ -96,6 +102,56 @@ func TestMCPToolPlaneUsesOfficialInMemoryProtocolAndDefinitionScope(t *testing.T
 	}
 }
 
+func TestMCPToolPlaneMaterializesConfiguredChildAsExclusiveDelegation(t *testing.T) {
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegate := &mcpToolAction{definition: models.ActionDefinition{
+		Name:        "delegate.research.source-discovery.v1",
+		Description: "Schedule the configured source-discovery child Agent.",
+		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["request"],"properties":{"request":{"type":"string","minLength":1,"maxLength":32768}}}`),
+	}}
+	registry, err := NewMCPToolRegistry(
+		MCPToolRegistration{Action: testMCPAction("calculate"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("current_time"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("search_evidence"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: delegate, Scheduling: agentcatalog.ToolScheduling("exclusive_delegation")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := NewMCPToolHost(catalog, registry, &mcpToolAuthority{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := host.OpenAttempt(context.Background(), AttemptToolScope{
+		Definition: agentcatalog.MustParseReference("chat.leader@1"),
+		Attempt:    Attempt{RunID: "run", JobID: "job", AttemptNo: 1, LeaseToken: "lease"}, RemainingActions: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	tools, err := session.ListTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(toolNames(tools), ","); got != "calculate,current_time,delegate.research.source-discovery.v1,search_evidence" {
+		t.Fatalf("scoped tools=%s", got)
+	}
+	materialized, ok := session.byName["delegate.research.source-discovery.v1"]
+	if !ok || materialized.Scheduling != agentcatalog.ToolScheduling("exclusive_delegation") {
+		t.Fatalf("delegation tool=%+v found=%t", materialized, ok)
+	}
+	if err := session.ValidateProposal([]models.ActionProposal{
+		{Name: "delegate.research.source-discovery.v1", Input: json.RawMessage(`{"request":"find sources"}`)},
+		{Name: "calculate", Input: json.RawMessage(`{}`)},
+	}); err == nil || !strings.Contains(err.Error(), "exclusive") {
+		t.Fatalf("mixed delegation proposal err=%v", err)
+	}
+}
+
 func TestMCPToolPlaneFailsClosedForMissingActionIDAndLostLease(t *testing.T) {
 	catalog, _ := agentcatalog.LoadEmbedded()
 	action := testMCPAction("calculate")
@@ -103,6 +159,7 @@ func TestMCPToolPlaneFailsClosedForMissingActionIDAndLostLease(t *testing.T) {
 		MCPToolRegistration{Action: action, Scheduling: agentcatalog.ToolOrderedSync},
 		MCPToolRegistration{Action: testMCPAction("current_time"), Scheduling: agentcatalog.ToolOrderedSync},
 		MCPToolRegistration{Action: testMCPAction("search_evidence"), Scheduling: agentcatalog.ToolOrderedSync},
+		testDelegationMCPRegistration(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -132,6 +189,38 @@ func TestMCPToolPlaneFailsClosedForMissingActionIDAndLostLease(t *testing.T) {
 	}
 }
 
+func TestMCPToolPlanePreservesAdapterErrorClassification(t *testing.T) {
+	catalog, _ := agentcatalog.LoadEmbedded()
+	action := testMCPAction("calculate")
+	action.err = &ToolCallError{Kind: ToolErrorInvariant, Code: "delegation_relationship_invalid"}
+	registry, err := NewMCPToolRegistry(
+		MCPToolRegistration{Action: action, Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("current_time"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("search_evidence"), Scheduling: agentcatalog.ToolOrderedSync},
+		testDelegationMCPRegistration(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := NewMCPToolHost(catalog, registry, &mcpToolAuthority{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := host.OpenAttempt(context.Background(), AttemptToolScope{
+		Definition: agentcatalog.MustParseReference("chat.leader@1"),
+		Attempt:    Attempt{RunID: "run", JobID: "job", AttemptNo: 1, LeaseToken: "lease"}, RemainingActions: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	_, err = session.CallTool(context.Background(), "calculate", json.RawMessage(`{}`), "decision:1/action:0")
+	var toolErr *ToolCallError
+	if !errors.As(err, &toolErr) || toolErr.Kind != ToolErrorInvariant || toolErr.Code != "delegation_relationship_invalid" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestControllerExecutesAcceptedProductionActionOnlyAcrossMCP(t *testing.T) {
 	catalog, _ := agentcatalog.LoadEmbedded()
 	direct := testMCPAction("calculate")
@@ -144,6 +233,7 @@ func TestControllerExecutesAcceptedProductionActionOnlyAcrossMCP(t *testing.T) {
 		MCPToolRegistration{Action: mcpAction, Scheduling: agentcatalog.ToolOrderedSync},
 		MCPToolRegistration{Action: testMCPAction("current_time"), Scheduling: agentcatalog.ToolOrderedSync},
 		MCPToolRegistration{Action: testMCPAction("search_evidence"), Scheduling: agentcatalog.ToolOrderedSync},
+		testDelegationMCPRegistration(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -196,6 +286,14 @@ func testMCPAction(name string) *mcpToolAction {
 		Name: name, Description: "Execute the bounded " + name + " capability.",
 		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":true}`),
 	}}
+}
+
+func testDelegationMCPRegistration() MCPToolRegistration {
+	return MCPToolRegistration{Action: &mcpToolAction{definition: models.ActionDefinition{
+		Name:        "delegate.research.source-discovery.v1",
+		Description: "Schedule the configured source-discovery child Agent.",
+		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["request"],"properties":{"request":{"type":"string"}}}`),
+	}}, Scheduling: agentcatalog.ToolExclusiveDelegation}
 }
 
 func toolNames(tools []MaterializedMCPTool) []string {

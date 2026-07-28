@@ -63,6 +63,14 @@ func ClassifyAttempt(err, contextCause error) AttemptResolution {
 		}
 		return AttemptResolution{Disposition: disposition, ErrorCode: string(modelErr.Kind)}
 	}
+	var toolErr *ToolCallError
+	if errors.As(err, &toolErr) && safeAttemptErrorCode.MatchString(toolErr.Code) {
+		disposition := AttemptTerminal
+		if toolErr.Kind == ToolErrorInfrastructure {
+			disposition = AttemptRetryable
+		}
+		return AttemptResolution{Disposition: disposition, ErrorCode: toolErr.Code}
+	}
 	switch {
 	case errors.Is(err, websearch.ErrTimeout):
 		return AttemptResolution{Disposition: AttemptRetryable, ErrorCode: "discovery_timeout"}

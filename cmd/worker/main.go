@@ -335,12 +335,19 @@ func main() {
 		slog.Error("worker Action registry invalid", "error", err)
 		os.Exit(1)
 	}
-	mcpToolRegistry, err := agent.NewMCPToolRegistry(
+	mcpToolRegistrations := []agent.MCPToolRegistration{
 		agent.MCPToolRegistration{Action: calculateTool, Scheduling: agentcatalog.ToolOrderedSync},
 		agent.MCPToolRegistration{Action: currentTimeTool, Scheduling: agentcatalog.ToolOrderedSync},
 		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolOrderedSync},
 		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync},
-	)
+	}
+	configuredDelegationTools, err := agent.NewConfiguredDelegationToolRegistrations(definitionCatalog, db.Pool())
+	if err != nil {
+		slog.Error("configured Delegation Tools invalid", "error", err)
+		os.Exit(1)
+	}
+	mcpToolRegistrations = append(mcpToolRegistrations, configuredDelegationTools...)
+	mcpToolRegistry, err := agent.NewMCPToolRegistry(mcpToolRegistrations...)
 	if err != nil {
 		slog.Error("worker MCP Tool Registry invalid", "error", err)
 		os.Exit(1)

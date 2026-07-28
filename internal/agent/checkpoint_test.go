@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -41,6 +42,18 @@ func TestProposalCheckpointCanonicalizesPayloadAndAssignsStableActionIDs(t *test
 	}
 	if changed.PayloadSHA256 == first.PayloadSHA256 {
 		t.Fatal("different payload produced the same hash")
+	}
+}
+
+func TestProposalCheckpointAcceptsGeneratedMCPDelegationName(t *testing.T) {
+	checkpoint, err := NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{{
+		Name: "delegate.research.source-discovery.v1", Input: json.RawMessage(`{"request":"find sources"}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.IdentityKey != "decision:1" || !strings.Contains(string(checkpoint.Payload), `"action_id":"decision:1/action:0"`) {
+		t.Fatalf("checkpoint=%+v", checkpoint)
 	}
 }
 

@@ -67,6 +67,14 @@ type ResearchPlanner interface {
 	ExpandQueries(context.Context, ResearchPlanRequest) ([]string, error)
 }
 
+type ConfiguredResearchPlanner interface {
+	PlanWebSearch(context.Context, ResearchPlanRequest) (models.ActionProposal, error)
+}
+
+type TracedConfiguredResearchPlanner interface {
+	PlanWebSearchTraced(context.Context, *agentobs.Tracer, ResearchPlanRequest, ModelTraceOptions) (models.ActionProposal, error)
+}
+
 type TracedResearchPlanner interface {
 	ExpandQueriesTraced(context.Context, *agentobs.Tracer, ResearchPlanRequest, ModelTraceOptions) ([]string, error)
 }
@@ -145,6 +153,43 @@ func (p *ModelResearchPlanner) ExpandQueries(ctx context.Context, request Resear
 
 func (p *ModelResearchPlanner) ExpandQueriesTraced(ctx context.Context, tracer *agentobs.Tracer, request ResearchPlanRequest, options ModelTraceOptions) ([]string, error) {
 	return p.expandQueries(ctx, tracer, request, options)
+}
+
+func (p *ModelResearchPlanner) PlanWebSearch(ctx context.Context, request ResearchPlanRequest) (models.ActionProposal, error) {
+	return p.planWebSearch(ctx, nil, request, ModelTraceOptions{})
+}
+
+func (p *ModelResearchPlanner) PlanWebSearchTraced(ctx context.Context, tracer *agentobs.Tracer, request ResearchPlanRequest, options ModelTraceOptions) (models.ActionProposal, error) {
+	return p.planWebSearch(ctx, tracer, request, options)
+}
+
+func (p *ModelResearchPlanner) planWebSearch(ctx context.Context, tracer *agentobs.Tracer, request ResearchPlanRequest, options ModelTraceOptions) (models.ActionProposal, error) {
+	if p == nil || p.model == nil || strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.UserMessage) == "" {
+		return models.ActionProposal{}, ErrInvalidLeaderRoute
+	}
+	definition := (&webSearchAction{}).Definition()
+	modelRequest := models.ModelRequest{Model: request.Model, InvocationPolicy: request.InvocationPolicy, Messages: []models.ModelMessage{
+		{Role: models.RoleSystem, Content: mustPromptContent("agent.research-planner", 1)},
+		{Role: models.RoleUser, Content: request.UserMessage},
+	}, ActionDefinitions: []models.ActionDefinition{definition}, RequiredActionName: definition.Name}
+	var outcome models.ModelOutcome
+	var err error
+	if tracer == nil {
+		outcome, err = p.model.Decide(ctx, modelRequest)
+	} else {
+		outcome, err = InvokeDecisionModel(ctx, tracer, p.model, modelRequest, 1, options)
+	}
+	if err != nil {
+		return models.ActionProposal{}, err
+	}
+	if outcome.Final != nil || outcome.Proposal == nil || len(outcome.Proposal.Actions) != 1 || outcome.Proposal.Actions[0].Name != definition.Name {
+		return models.ActionProposal{}, ErrInvalidLeaderRoute
+	}
+	proposal := outcome.Proposal.Actions[0]
+	if _, err := decodeWebSearchInput(proposal.Input); err != nil {
+		return models.ActionProposal{}, ErrInvalidLeaderRoute
+	}
+	return proposal, nil
 }
 
 func (p *ModelResearchPlanner) expandQueries(ctx context.Context, tracer *agentobs.Tracer, request ResearchPlanRequest, options ModelTraceOptions) ([]string, error) {
