@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-27
 
-**Status:** Approved in design discussion; written specification awaiting review
+**Status:** Approved; configured activation implemented, MCP Tasks delegation gated on official SDK support
 
 **Scope:** Sprint 10 Agent infrastructure only; no new Member-facing feature or product Agent
 

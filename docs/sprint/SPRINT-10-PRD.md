@@ -3,7 +3,7 @@
 ## Document Status
 
 - **Sprint:** Sprint 10
-- **Status:** Design approved; implementation pending
+- **Status:** Partially implemented; configured activation is complete, while configured delegation remains blocked by the official MCP Tasks SDK gate
 - **Date:** 2026-07-27
 - **Theme:** Configured Agent Framework and MCP Tool Plane
 - **Delivery boundary:** Agent infrastructure only; no new Member-facing feature or new product Agent
