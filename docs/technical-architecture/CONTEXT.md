@@ -41,8 +41,12 @@ The Member-visible durable lifecycle of one requested Chat answer. It owns produ
 _Avoid_: Agent Run, Agent Job
 
 **Agent Run**:
-One internal durable invocation of a pinned Agent Definition on behalf of a Chat Run or parent Agent Run. It owns its Executor binding, Checkpoints, Trace, Agent Tree membership, and delegation relationships but not product publication state; many Agent Runs may invoke the same Definition.
+One internal durable invocation of a pinned Agent Definition on behalf of a Chat Run, Studio Output, or parent Agent Run. It owns its Executor binding, Checkpoints, Trace, Agent Tree membership, and delegation relationships but not product publication state; many Agent Runs may invoke the same Definition.
 _Avoid_: Chat Run, Agent Definition, Agent Job
+
+**Studio Output**:
+A shared Notebook product record for one Report, Flashcards deck, Mind Map, or Data Table. It owns Member-visible lifecycle and the validated artifact, references exactly one configured root Agent Run, and is readable by current Notebook Members while remaining separate from every Member's private Chat.
+_Avoid_: Agent Result, Chat Run, Note, generic artifact
 
 **Agent Tree**:
 The durable runtime aggregate shared by one root Agent Run and every delegated child, owning the absolute deadline plus reserved and consumed logical budgets independently of the owning Chat Run. The Chat Run references only the root; Agent Delegations define child membership.
@@ -233,7 +237,7 @@ The legacy Sprint 9 compatibility set that bound Prompt Versions and Contracts f
 _Avoid_: Agent Definition, global prompt bundle, new configuration layer
 
 **Agent Configuration Set**:
-The immutable deployment manifest that selects exact versioned Agent Definitions and Model Policies eligible for newly admitted Chat Runs. It no longer owns duplicate Role profiles or Prompt/Tool/model mappings; each Agent Run pins exact referenced definitions, and changing an environment variable never changes an admitted Run.
+The immutable deployment manifest that selects exact versioned Agent Definitions and Model Policies eligible for newly admitted Chat or Studio root Runs. It no longer owns duplicate Role profiles or Prompt/Tool/model mappings; each Agent Run pins exact referenced definitions, and changing an environment variable never changes an admitted Run.
 _Avoid_: Agent Definition, current server config, mutable feature flags, latest configuration
 
 **Agent Configuration Lifecycle**:

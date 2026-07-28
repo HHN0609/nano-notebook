@@ -41,7 +41,7 @@ An inline link from a key factual claim or synthesized conclusion in a Grounded 
 _Avoid_: Bibliography entry, unlinked source name
 
 **Output**:
-A durable, shared Notebook result derived from selected Sources, such as a report, study guide, mind map, quiz, slide deck, or audio overview. Outputs are a committed future product area but are not part of the initial release.
+A durable, shared Notebook result derived from selected Sources. Sprint 11 ships reports, flashcards, mind maps, and data tables; study-guide variants, quizzes, slide decks, and audio or video overviews remain later possibilities.
 _Avoid_: Note, chat response, artifact
 
 **Member**:

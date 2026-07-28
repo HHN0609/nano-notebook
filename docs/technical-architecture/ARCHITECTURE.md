@@ -6,7 +6,7 @@ Nano Notebook is a small, single-region SaaS research workspace implemented with
 
 The current milestone is a complete local product. Production launch is a later delivery stage with AWS as the intended direction, S3 as the production Blob Store, and static Web Client delivery through S3 and CloudFront. Exact AWS compute, networking, backup, OIDC, email, and secret-management services are not prerequisites for local completion.
 
-The current local product does not include an Agent Sandbox, arbitrary code execution, browser or computer use, general external tools, cloud-drive synchronization, Notes, or generated Outputs. It includes bounded Web Source Discovery through an approved provider and the restricted public-URL Fetcher; this is not browser automation or general Agent egress.
+The current local product does not include an Agent Sandbox, arbitrary code execution, browser or computer use, general external tools, cloud-drive synchronization, Notes, generated media, or editable Outputs. Sprint 11 adds bounded shared Report, Flashcards, Mind Map, and Data Table Outputs over the configured Agent runtime. It also includes bounded Web Source Discovery through an approved provider and the restricted public-URL Fetcher; neither capability is browser automation or general Agent egress.
 
 ## 2. System Shape
 

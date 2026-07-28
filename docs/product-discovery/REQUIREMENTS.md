@@ -20,7 +20,7 @@ The initial product is not a general-purpose assistant, a team knowledge base, o
 | Research | Disclosed model-knowledge Chat plus read-only multi-step Agent and strict grounded mode | Search-assisted Source discovery | External actions, code, user-visible execution traces, undisclosed evidence blending |
 | Evidence | Text, structure, tables, transcripts, OCR, visual evidence, passage-level Citations | None required | Mutable or silently refreshed evidence |
 | Collaboration | Email invites, Viewer/Editor/Owner, shared Sources, private Chats | None required | Public links, shared Chats, organizations |
-| Durable content | Private Chats | Reports, guides, maps, quizzes, slides, audio Outputs | Notes and shared drafts |
+| Durable content | Private Chats | Reports, flashcards, mind maps, and data-table Outputs | Notes, shared drafts, quizzes, slides, and audio/video Outputs |
 | Clients | Responsive web | None required | Native mobile application |
 | Commercial surface | None | None required | Billing, plans, enterprise administration |
 
@@ -50,9 +50,9 @@ The desktop Notebook workspace has three stable regions:
 
 - **Sources**: add, inspect, select, rename, and remove evidence.
 - **Chat**: manage private Chats and interact with the Research Agent.
-- **Outputs**: a reserved information-architecture region for future generated work.
+- **Outputs / Studio**: a stable information-architecture region for shared generated work. Sprint 11 enables Report, Flashcards, Mind Map, and Data Table creation from selected Ready Sources.
 
-The initial interface does not show dead Output controls or empty promotional placeholders. It preserves enough layout and navigation capacity to add the Output workspace later without redefining the Notebook mental model.
+The initial interface reserved this region without dead controls. Sprint 11 activates it with four real creation actions and a durable Recent list without redefining the Notebook mental model.
 
 The initial release is a responsive web product. A native mobile application is not required.
 
@@ -224,9 +224,11 @@ Each Notebook has exactly one transferable Owner and at most 50 additional Membe
 
 These product capabilities are expected after the current committed delivery but are not current acceptance criteria:
 
-- An Output workspace for reports, study guides, mind maps, quizzes, slide decks, and audio overviews
+- Report presets such as Study Guide and FAQ
+- Quiz, slide, infographic, and audio or video Outputs
+- Output export, editing, comments, and version history
 
-These Outputs are committed product scope. Their decomposition, dependencies, delivery order, milestones, and estimates are intentionally deferred until the technical `grill-with-docs` session; no coarse roadmap is treated as an accepted schedule.
+Sprint 11's Report, Flashcards, Mind Map, and Data Table scope is defined in `docs/sprint/SPRINT-11-PRD.md`. The capabilities above remain intentionally undecomposed future work.
 
 Search never silently expands a Chat's evidence. A discovered item must be reviewed and added as a Source before the Research Agent can cite it.
 
