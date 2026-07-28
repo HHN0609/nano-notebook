@@ -82,6 +82,68 @@ func TestConfiguredAgentRunRequiresNoRoleExecutorVersionOrChatOwnership(t *testi
 	}
 }
 
+func TestLegacyRuntimeDrainStatusBlocksOnlyActiveLegacyRuns(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "legacy-drain-status@example.com")
+	legacyRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c122")
+	ctx := context.Background()
+	readStatus := func() (active, retained int64, ready bool) {
+		t.Helper()
+		if err := api.db.Pool().QueryRow(ctx, `
+			select active_legacy_runs,retained_legacy_runs,ready_to_contract
+			from agent_legacy_runtime_drain_status
+		`).Scan(&active, &retained, &ready); err != nil {
+			t.Fatal(err)
+		}
+		return active, retained, ready
+	}
+	active, retained, ready := readStatus()
+	if active != 1 || retained != 1 || ready {
+		t.Fatalf("active=%d retained=%d ready=%t want=1/1/false", active, retained, ready)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set status='completed',finished_at=now(),updated_at=now() where id=$1`, legacyRunID); err != nil {
+		t.Fatal(err)
+	}
+	active, retained, ready = readStatus()
+	if active != 1 || retained != 1 || ready {
+		t.Fatalf("terminal Run with active Job: active=%d retained=%d ready=%t want=1/1/false", active, retained, ready)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_jobs set status='succeeded',lease_token=null,lease_expires_at=null,updated_at=now()
+		where run_id=$1
+	`, legacyRunID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into agent_trees(
+			id,absolute_deadline,model_call_limit,action_limit,context_byte_limit,result_byte_limit
+		) values('tree_drain_configured',now()+interval '10 minutes',5,8,65536,262144)
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into agent_runs(
+			id,status,runtime_kind,tree_id,definition_identity,definition_version,definition_sha256,
+			executor_identity,model_policy_identity,model_policy_version,model_policy_sha256,provider_model
+		) select 'run_drain_configured','queued','configured','tree_drain_configured',
+			definition_identity,definition_version,definition.canonical_sha256,executor,
+			model_policy_identity,model_policy_version,policy.canonical_sha256,policy.provider_model
+		from agent_definition_versions definition
+		join agent_model_policy_versions policy
+		  on policy.policy_identity=definition.model_policy_identity
+		 and policy.policy_version=definition.model_policy_version
+		where definition_identity='chat.leader' and definition_version=1
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_trees set root_agent_run_id='run_drain_configured' where id='tree_drain_configured'`); err != nil {
+		t.Fatal(err)
+	}
+	active, retained, ready = readStatus()
+	if active != 0 || retained != 1 || !ready {
+		t.Fatalf("active=%d retained=%d ready=%t want=0/1/true", active, retained, ready)
+	}
+}
+
 func TestExactAgentReleaseActivatesConfiguredAdmissionForNewChatRuns(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configured-release-admission@example.com")
 	catalog, err := agentcatalog.LoadEmbedded()

@@ -1890,6 +1890,26 @@ alter table agent_jobs add constraint agent_jobs_execution_state_check check (
 	or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 10 and lease_token is null and lease_expires_at is null)
 );
 
+-- Contract migration is allowed only after this database-owned projection
+-- reports ready_to_contract. Retained terminal history does not block drain,
+-- while an inconsistent active Job still fails closed even if its Run was
+-- prematurely terminalized.
+create or replace view agent_legacy_runtime_drain_status as
+with legacy_runs as (
+	select
+		run.status in ('queued','running') or exists (
+			select 1 from agent_jobs job
+			where job.run_id=run.id and job.status in ('queued','running','waiting')
+		) as active
+	from agent_runs run
+	where run.runtime_kind='legacy_role'
+)
+select
+	count(*) filter (where active) as active_legacy_runs,
+	count(*) as retained_legacy_runs,
+	count(*) filter (where active)=0 as ready_to_contract
+from legacy_runs;
+
 -- Adopt only active pre-Trace Runs. Terminal history remains untouched because
 -- reconstructing unobserved execution would fabricate evidence. A running
 -- legacy Job is returned to the queue so its first Sprint 4 claim can create a
