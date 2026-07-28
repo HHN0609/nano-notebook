@@ -2401,19 +2401,15 @@ span.source-list-title {
   filter: brightness(1.1);
 }
 
+.studio-action-card:disabled {
+  filter: saturate(.45);
+  opacity: .62;
+}
+
 .studio-action-card > span:not(.material-symbol) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.studio-action-card .nn-badge {
-  position: absolute;
-  top: 7px;
-  right: 27px;
-  border: 0;
-  background: #101114;
-  color: var(--primary-foreground);
 }
 
 .studio-action-arrow {
@@ -2422,16 +2418,148 @@ span.source-list-title {
 }
 
 .studio-empty-state {
-  padding: 24px 28px 90px;
+  min-height: 150px;
+  padding: 24px 28px;
 }
 
-.studio-add-note {
-  width: fit-content;
-  min-height: 42px;
-  margin: 0 auto 18px;
-  border-radius: var(--control-radius);
-  padding: 0 20px;
+.studio-recent {
+  min-height: 0;
+  overflow-y: auto;
+  flex: 1;
+  padding: 16px 14px 24px;
+}
+
+.studio-recent > h3 {
+  margin: 0 4px 11px;
+  color: var(--primary-foreground);
+  font-size: 14px;
   font-weight: 500;
+}
+
+.studio-recent-empty,
+.studio-recent-error {
+  margin: 18px 5px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.studio-output-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  align-items: center;
+  border-radius: 10px;
+}
+
+.studio-output-row:hover {
+  background: var(--control-background-hover);
+}
+
+.studio-output-open {
+  justify-content: flex-start;
+  min-width: 0;
+  min-height: 54px;
+  gap: 10px;
+  padding: 7px;
+  text-align: left;
+}
+
+.studio-output-open:disabled {
+  opacity: 1;
+}
+
+.studio-output-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  place-items: center;
+  border-radius: 9px;
+  background: #2c2e38;
+  color: #bec5e8;
+}
+
+.studio-output-icon[data-tone="amber"] { background: #353328; color: #e4d9a9; }
+.studio-output-icon[data-tone="orange"] { background: #362e2c; color: #e4bab0; }
+.studio-output-icon[data-tone="rose"] { background: #362d36; color: #e0b7d5; }
+
+.studio-output-row[data-status="queued"] .studio-output-icon .material-symbol,
+.studio-output-row[data-status="running"] .studio-output-icon .material-symbol {
+  animation: studio-spin 1.2s linear infinite;
+}
+
+@keyframes studio-spin { to { transform: rotate(360deg); } }
+
+.studio-output-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.studio-output-copy strong,
+.studio-output-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.studio-output-copy strong { color: var(--primary-foreground); font-size: 13px; font-weight: 500; }
+.studio-output-copy small { color: var(--muted-foreground); font-size: 11px; }
+.studio-output-delete { width: 30px; min-width: 30px; height: 30px; min-height: 30px; opacity: 0; }
+.studio-output-row:hover .studio-output-delete, .studio-output-delete:focus-visible { opacity: 1; }
+
+.studio-viewer-dialog {
+  display: flex;
+  width: min(920px, calc(100vw - 32px));
+  height: min(760px, calc(100vh - 32px));
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 24px;
+  background: var(--panel-background);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, .45);
+}
+
+.studio-viewer-dialog > .nn-dialog-title { padding-right: 38px; color: var(--primary-foreground); font-size: 22px; font-weight: 500; }
+.studio-viewer-dialog > .nn-dialog-description { margin-top: 5px; color: var(--muted-foreground); font-size: 12px; }
+.studio-viewer-body { min-height: 0; overflow: auto; flex: 1; margin-top: 20px; }
+.studio-viewer-empty { color: var(--muted-foreground); }
+
+.studio-report { max-width: 720px; margin: 0 auto; color: var(--secondary-foreground); line-height: 1.65; }
+.studio-report-summary { margin: 0 0 28px; padding: 18px; border-radius: 12px; background: var(--control-background); font-size: 16px; }
+.studio-report section { margin-top: 30px; }
+.studio-report h3 { margin: 0 0 9px; color: var(--primary-foreground); font-size: 19px; }
+.studio-markdown p { white-space: pre-wrap; }
+.studio-source-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.studio-source-chips .nn-button { min-height: 28px; padding: 0 9px; font-size: 11px; }
+
+.studio-flashcards { display: grid; max-width: 680px; margin: 0 auto; gap: 14px; }
+.studio-flashcard { display: flex; min-height: 330px; flex-direction: column; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid var(--border); border-radius: 18px; padding: 24px; background: #2f2d25; color: #eee5bd; cursor: pointer; text-align: center; }
+.studio-flashcard.is-flipped { background: #30292b; color: #f1d1c9; }
+.studio-flashcard small, .studio-flashcard span { color: var(--muted-foreground); }
+.studio-flashcard strong { max-width: 560px; font-size: 24px; line-height: 1.45; }
+.studio-viewer-controls { display: flex; align-items: center; justify-content: center; gap: 8px; }
+
+.studio-mind-map { min-width: 620px; min-height: 420px; overflow: auto; }
+.studio-mind-map-canvas { padding: 22px; transition: transform .15s ease; }
+.studio-mind-map ul { margin: 0; padding-left: 32px; list-style: none; }
+.studio-mind-map > .studio-mind-map-canvas > ul { padding-left: 0; }
+.studio-mind-map li { position: relative; margin: 12px 0; }
+.studio-mind-map-node { width: fit-content; max-width: 460px; border: 1px solid var(--border); border-radius: 12px; padding: 11px 14px; background: var(--control-background); }
+.studio-mind-map-node > button { margin-right: 7px; border: 0; background: transparent; color: inherit; vertical-align: middle; }
+.studio-mind-map-node p { margin: 6px 0 0; color: var(--muted-foreground); font-size: 12px; }
+
+.studio-data-table > p { color: var(--secondary-foreground); }
+.studio-table-scroll { overflow: auto; border: 1px solid var(--border); border-radius: 12px; }
+.studio-data-table table { width: 100%; border-collapse: collapse; color: var(--secondary-foreground); font-size: 13px; }
+.studio-data-table th, .studio-data-table td { min-width: 120px; padding: 11px 13px; border-right: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle); text-align: left; vertical-align: top; }
+.studio-data-table th { position: sticky; top: 0; background: var(--control-background); color: var(--primary-foreground); font-weight: 500; }
+.studio-data-table .studio-source-chips { min-width: 170px; margin-top: 0; }
+
+@media (max-width: 720px) {
+  .studio-viewer-dialog { height: calc(100vh - 16px); width: calc(100vw - 16px); padding: 18px; }
+  .studio-mind-map { min-width: 560px; }
 }
 
 .workspace-system-state {

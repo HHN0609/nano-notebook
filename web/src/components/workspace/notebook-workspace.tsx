@@ -5,6 +5,7 @@ import { usePrivateChat } from "./private-chat";
 import { SourcePanelContent, type SourcePanelCopy } from "./source-panel";
 import { useNotebookSources, type MemberSource } from "./sources";
 import { StudioPanelContent } from "./studio-panel";
+import { useStudioOutputs } from "./studio-outputs";
 
 type WorkspacePanelCopy = ChatPanelCopy & Omit<SourcePanelCopy, "title" | "addSourcesLabel" | "emptyTitle" | "emptyBody" | "collapseLabel" | "comingSoonMessage"> & {
   panelsLabel: string;
@@ -16,10 +17,23 @@ type WorkspacePanelCopy = ChatPanelCopy & Omit<SourcePanelCopy, "title" | "addSo
   sourcesEmptyBody: string;
   collapsePanel: string;
   comingSoon: string;
-  beta: string;
-  studioEmptyTitle: string;
-  studioEmptyBody: string;
-  addNote: string;
+  studioRecent: string;
+  studioNoOutputs: string;
+  studioNoSource: string;
+  studioQueued: string;
+  studioGenerating: string;
+  studioFailed: string;
+  studioDelete: string;
+  studioUnavailable: string;
+  studioSource: string;
+  studioPrevious: string;
+  studioNext: string;
+  studioFlip: string;
+  studioShuffle: string;
+  studioRestart: string;
+  studioZoomIn: string;
+  studioZoomOut: string;
+  studioMissingArtifact: string;
   studioActions: ComponentProps<typeof StudioPanelContent>["actions"];
 };
 
@@ -29,6 +43,7 @@ export function NotebookWorkspace({ notebookID, copy, canMaintainSources = true 
   const [compactPanel, setCompactPanel] = useState("sources");
   const chatController = usePrivateChat(notebookID, copy);
   const sourcesController = useNotebookSources(notebookID, copy.sourceUnavailableLabel, chatController.snapshot?.chat.id, chatController.snapshot?.source_ids);
+  const studioController = useStudioOutputs(notebookID, copy.studioUnavailable);
   const requestedDiscoverySessionID = chatController.snapshot?.runs.slice().reverse().find((run) => Boolean(run.discovery_session_id))?.discovery_session_id;
   const viewingSource = sourcesController.sources.find((source) => source.id === viewSourceID && source.open_action?.kind === "inline_original");
   const openInlineOriginal = (source: MemberSource) => {
@@ -39,7 +54,17 @@ export function NotebookWorkspace({ notebookID, copy, canMaintainSources = true 
   const panels = {
     sources: <SourcePanelContent notebookID={notebookID} originChatID={chatController.snapshot?.chat.id} requestedDiscoverySessionID={requestedDiscoverySessionID} controller={sourcesController} viewingSource={viewingSource} onOpenSource={openInlineOriginal} onCloseSource={() => setViewSourceID(null)} canMaintain={canMaintainSources} onDiscoveryModeChange={setSourceDiscoveryOpen} copy={{ ...copy, title: copy.sources, addSourcesLabel: copy.addSources, emptyTitle: copy.sourcesEmptyTitle, emptyBody: copy.sourcesEmptyBody, collapseLabel: copy.collapsePanel, comingSoonMessage: copy.comingSoon }} />,
     chat: <ChatPanelContent copy={copy} controller={chatController} sources={sourcesController.sources} onOpenSource={openInlineOriginal} selectedSourceCount={sourcesController.selectedSourceIDs.length} />,
-    studio: <StudioPanelContent title={copy.studio} actions={copy.studioActions} betaLabel={copy.beta} emptyTitle={copy.studioEmptyTitle} emptyBody={copy.studioEmptyBody} addNoteLabel={copy.addNote} collapseLabel={copy.collapsePanel} comingSoonMessage={copy.comingSoon} />
+    studio: <StudioPanelContent
+      title={copy.studio} actions={copy.studioActions} collapseLabel={copy.collapsePanel}
+      recentLabel={copy.studioRecent} noOutputsLabel={copy.studioNoOutputs} noSourceLabel={copy.studioNoSource}
+      queuedLabel={copy.studioQueued} generatingLabel={copy.studioGenerating} failedLabel={copy.studioFailed}
+      deleteLabel={copy.studioDelete} unavailableLabel={copy.studioUnavailable} closeLabel={copy.closeLabel}
+      sourceLabel={copy.studioSource} previousLabel={copy.studioPrevious} nextLabel={copy.studioNext} flipLabel={copy.studioFlip}
+      shuffleLabel={copy.studioShuffle} restartLabel={copy.studioRestart} zoomInLabel={copy.studioZoomIn}
+      zoomOutLabel={copy.studioZoomOut} missingArtifactLabel={copy.studioMissingArtifact}
+      controller={studioController} selectedSourceIDs={sourcesController.selectedSourceIDs} sources={sourcesController.sources}
+      canMaintain={canMaintainSources} onOpenSource={openInlineOriginal}
+    />
   };
 
   return (

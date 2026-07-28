@@ -123,6 +123,75 @@ test("restores the private Chat and enables the composer", async () => {
   expect(fetch).toHaveBeenCalledWith("/api/v1/chats/chat_test", expect.anything());
 });
 
+test("offers exactly the four Sprint 11 Studio outputs and excludes Quiz", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = authenticatedWorkspaceHandler();
+
+  render(<App />);
+
+  const studio = await screen.findByRole("region", { name: "Studio" });
+  expect(within(studio).getByRole("button", { name: "Report" })).toBeInTheDocument();
+  expect(within(studio).getByRole("button", { name: "Flashcards" })).toBeInTheDocument();
+  expect(within(studio).getByRole("button", { name: "Mind map" })).toBeInTheDocument();
+  expect(within(studio).getByRole("button", { name: "Data table" })).toBeInTheDocument();
+  expect(within(studio).queryByRole("button", { name: "Quiz" })).not.toBeInTheDocument();
+  expect(studio.querySelectorAll(".studio-action-card")).toHaveLength(4);
+});
+
+test("creates a Report from the selected ready Sources", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  let admittedBody: Record<string, unknown> | undefined;
+  const workspace = authenticatedWorkspaceHandler();
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
+      { id: "src_ready", notebook_id: "nb_test", title: "research.pdf", format: "pdf", byte_size: 2048, state: "ready", open_action: { kind: "none" } }
+    ] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [], source_ids: ["src_ready"] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/studio-outputs") && method === "GET") return json({ outputs: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/studio-outputs") && method === "POST") {
+      admittedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toMatch(/^[0-9a-f-]{36}$/);
+      expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-token");
+      return json({ output: { id: "out_report", notebook_id: "nb_test", kind: "report", locale: "en", title: null, run_id: "run_report", source_count: 1, status: "queued", created_at: "2026-07-28T08:00:00Z", updated_at: "2026-07-28T08:00:00Z" } }, 202);
+    }
+    return workspace(input, init);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const studio = await screen.findByRole("region", { name: "Studio" });
+  await user.click(within(studio).getByRole("button", { name: "Report" }));
+
+  await waitFor(() => expect(admittedBody).toEqual({ kind: "report", locale: "en", source_ids: ["src_ready"] }));
+  expect(await within(studio).findByText("Generating…")).toBeInTheDocument();
+});
+
+test("opens a durable Report from Studio Recent", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  const workspace = authenticatedWorkspaceHandler();
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/notebooks/nb_test/studio-outputs") && method === "GET") return json({ outputs: [{
+      id: "out_report", notebook_id: "nb_test", kind: "report", locale: "en", title: "Attention Research", run_id: "run_report", source_count: 1, status: "completed",
+      artifact: { title: "Attention Research", summary: "A compact account of the key findings.", sections: [{ id: "sec_1", heading: "Key finding", markdown: "Attention is all you need.", source_ids: [] }] },
+      created_at: "2026-07-28T08:00:00Z", updated_at: "2026-07-28T08:01:00Z"
+    }] });
+    return workspace(input, init);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const studio = await screen.findByRole("region", { name: "Studio" });
+  await user.click(await within(studio).findByRole("button", { name: "Attention Research" }));
+
+  const viewer = await screen.findByRole("dialog", { name: "Attention Research" });
+  expect(within(viewer).getByText("A compact account of the key findings.")).toBeInTheDocument();
+  expect(within(viewer).getByRole("heading", { name: "Key finding" })).toBeInTheDocument();
+});
+
 test("opens Owner access management and queues a local invitation", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   let invitation: Record<string, unknown> | undefined;
@@ -1650,6 +1719,7 @@ function authenticatedWorkspaceHandler() {
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
     if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/studio-outputs") && method === "GET") return json({ outputs: [] });
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
     if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
     if (url.endsWith("/api/v1/auth/sign-out") && method === "POST") return new Response(null, { status: 204 });
