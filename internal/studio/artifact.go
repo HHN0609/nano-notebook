@@ -91,11 +91,11 @@ type DataTableRow struct {
 	SourceIDs []string `json:"source_ids"`
 }
 
-// NormalizeGeneratedArtifact repairs the one common JSON ambiguity in model
-// output: ordinal Flashcard IDs emitted as numbers instead of strings. The
-// normalized payload still passes through the strict artifact validator.
+// NormalizeGeneratedArtifact repairs bounded, known JSON shape variations in
+// model output. The normalized payload still passes through the strict
+// artifact validator before publication.
 func NormalizeGeneratedArtifact(kind Kind, payload []byte) []byte {
-	if kind != KindFlashcards {
+	if kind != KindFlashcards && kind != KindMindMap && kind != KindDataTable {
 		return payload
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -108,23 +108,62 @@ func NormalizeGeneratedArtifact(kind Kind, payload []byte) []byte {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return payload
 	}
-	cards, ok := document["cards"].([]any)
-	if !ok {
-		return payload
-	}
-	for _, rawCard := range cards {
-		card, ok := rawCard.(map[string]any)
+	switch kind {
+	case KindFlashcards:
+		cards, ok := document["cards"].([]any)
 		if !ok {
 			return payload
 		}
-		number, ok := card["id"].(json.Number)
-		if !ok {
-			continue
+		for _, rawCard := range cards {
+			card, ok := rawCard.(map[string]any)
+			if !ok {
+				return payload
+			}
+			number, ok := card["id"].(json.Number)
+			if !ok {
+				continue
+			}
+			if _, err := strconv.ParseInt(number.String(), 10, 64); err != nil {
+				return payload
+			}
+			card["id"] = number.String()
 		}
-		if _, err := strconv.ParseInt(number.String(), 10, 64); err != nil {
+	case KindMindMap:
+		nodes, ok := document["nodes"].([]any)
+		if !ok {
 			return payload
 		}
-		card["id"] = number.String()
+		for _, rawNode := range nodes {
+			node, ok := rawNode.(map[string]any)
+			if !ok {
+				return payload
+			}
+			if _, hasLabel := node["label"]; !hasLabel {
+				text, ok := node["text"].(string)
+				if !ok {
+					return payload
+				}
+				node["label"] = text
+			}
+			delete(node, "text")
+			if _, hasDetail := node["detail"]; !hasDetail {
+				node["detail"] = ""
+			}
+		}
+	case KindDataTable:
+		rows, ok := document["rows"].([]any)
+		if !ok {
+			return payload
+		}
+		for index, rawRow := range rows {
+			row, ok := rawRow.(map[string]any)
+			if !ok {
+				return payload
+			}
+			if _, hasID := row["id"]; !hasID {
+				row["id"] = fmt.Sprintf("row_%d", index+1)
+			}
+		}
 	}
 	normalized, err := json.Marshal(document)
 	if err != nil {

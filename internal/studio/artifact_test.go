@@ -69,6 +69,30 @@ func TestValidateArtifactFailsClosed(t *testing.T) {
 	}
 }
 
+func TestNormalizeGeneratedArtifactRepairsMindMapTextNodes(t *testing.T) {
+	payload := []byte(`{"title":"Map","nodes":[{"id":"root","text":"Root","parent_id":null,"source_ids":["src_1"]},{"id":"a","text":"A","parent_id":"root","source_ids":["src_1"]},{"id":"b","text":"B","parent_id":"root","source_ids":["src_1"]}]}`)
+	normalized := NormalizeGeneratedArtifact(KindMindMap, payload)
+	artifact, err := ValidateArtifact(KindMindMap, normalized, []string{"src_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(artifact.JSON), `"label":"Root"`) || !strings.Contains(string(artifact.JSON), `"detail":""`) {
+		t.Fatalf("artifact=%s", artifact.JSON)
+	}
+}
+
+func TestNormalizeGeneratedArtifactAddsDataTableRowIDs(t *testing.T) {
+	payload := []byte(`{"title":"Table","description":"Comparison","columns":["Name","Value"],"rows":[{"cells":["A","1"],"source_ids":["src_1"]}]}`)
+	normalized := NormalizeGeneratedArtifact(KindDataTable, payload)
+	artifact, err := ValidateArtifact(KindDataTable, normalized, []string{"src_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(artifact.JSON), `"id":"row_1"`) {
+		t.Fatalf("artifact=%s", artifact.JSON)
+	}
+}
+
 func validFlashcards(count int) string {
 	cards := make([]map[string]any, 0, count)
 	for index := 0; index < count; index++ {
