@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-27
 
-**Status:** Approved and in implementation; configured delegation uses standard MCP tools plus Nano-owned durable suspension
+**Status:** Implemented and accepted; configured delegation uses standard MCP tools plus Nano-owned durable suspension
 
 **Scope:** Sprint 10 Agent infrastructure only; no new Member-facing feature or product Agent
 
@@ -271,7 +271,7 @@ Nano Tools MCP Server
   `-- generated delegate.<identity>.v<version> adapter
 ```
 
-The first Host and Server are in the Agent Worker process over official-SDK in-memory transport. The boundary still uses MCP discovery, invocation, content/error normalization, and Tasks contracts. There is no alternate direct invocation path once migration completes.
+The first Host and Server are in the Agent Worker process over official-SDK in-memory transport. The boundary still uses MCP discovery, invocation, and content/error normalization. There is no alternate direct invocation path for configured Runs.
 
 The Server is an adapter layer. It has no independent queue, scheduler, Agent state machine, retry loop, authorization policy, Model gateway, or publication authority.
 

@@ -257,7 +257,7 @@ The Go component that advances an Agent Run through its Executor-owned outer sta
 _Avoid_: Workflow engine, autonomous agent loop
 
 **Agent Action**:
-A durable logical invocation of one allowlisted MCP Tool, accepted and authorized by the Agent Controller from a model proposal. Each Action has canonical typed input and result independent of Provider tool-call formats; synchronous tools complete inline, while delegation tools may suspend the execution behind a durable MCP Task.
+A durable logical invocation of one allowlisted MCP Tool, accepted and authorized by the Agent Controller from a model proposal. Each Action has canonical typed input and result independent of Provider tool-call formats; synchronous tools complete inline, while delegation tools atomically schedule a durable child Run and suspend the parent behind a Delegation.
 _Avoid_: Raw Provider Tool Call, arbitrary command, uncheckpointed MCP request
 
 **MCP Tool Plane**:

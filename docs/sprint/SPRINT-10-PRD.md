@@ -3,7 +3,7 @@
 ## Document Status
 
 - **Sprint:** Sprint 10
-- **Status:** In implementation; configured activation is complete and configured delegation uses Nano-owned durable suspension through the MCP Tool Plane
+- **Status:** Implemented and accepted; configured delegation uses Nano-owned durable suspension through the MCP Tool Plane
 - **Date:** 2026-07-27
 - **Theme:** Configured Agent Framework and MCP Tool Plane
 - **Delivery boundary:** Agent infrastructure only; no new Member-facing feature or new product Agent
