@@ -285,7 +285,7 @@ func TestMatchingUserAcceptsInvitationAtomically(t *testing.T) {
 	notebookID := createSourceTestNotebook(t, api, owner, "invite-accept")
 	ownerID := sourceTestUserID(t, api, "accept-owner@example.com")
 	recipientID := sourceTestUserID(t, api, "accept-viewer@example.com")
-	now := time.Date(2026, 7, 21, 9, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	tokenHash := strings.Repeat("c", 64)
 
 	err := api.db.WithRequestPrincipal(context.Background(), ownerID, func(tx pgx.Tx) error {
