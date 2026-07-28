@@ -2822,28 +2822,11 @@ create policy agent_run_evidence_set_app on agent_run_evidence_set
 
 drop policy if exists agent_run_delegations_owner_read on agent_run_delegations;
 create policy agent_run_delegations_owner_read on agent_run_delegations
-	for select to nano_app using (
-		exists (
-			select 1 from agent_runs r
-			where r.id=agent_run_delegations.parent_run_id
-			  and r.user_id=nullif(current_setting('app.principal_id',true),'')
-		)
-	);
+	for select to nano_app using (nano_run_owned(parent_run_id));
 drop policy if exists agent_run_delegations_owner_update on agent_run_delegations;
 create policy agent_run_delegations_owner_update on agent_run_delegations
-	for update to nano_app using (
-		exists (
-			select 1 from agent_runs r
-			where r.id=agent_run_delegations.parent_run_id
-			  and r.user_id=nullif(current_setting('app.principal_id',true),'')
-		)
-	) with check (
-		exists (
-			select 1 from agent_runs r
-			where r.id=agent_run_delegations.parent_run_id
-			  and r.user_id=nullif(current_setting('app.principal_id',true),'')
-		)
-	);
+	for update to nano_app using (nano_run_owned(parent_run_id))
+	with check (nano_run_owned(parent_run_id));
 
 drop policy if exists agent_run_evidence_set_worker on agent_run_evidence_set;
 create policy agent_run_evidence_set_worker on agent_run_evidence_set

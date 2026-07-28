@@ -311,6 +311,80 @@ func TestConfiguredChatRunCanBeCancelledThroughProductOwnership(t *testing.T) {
 	}
 }
 
+func TestConfiguredDelegationRLSResolvesParentProductOwnership(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configured-delegation-rls@example.com")
+	catalog, _ := agentcatalog.LoadEmbedded()
+	api.server = app.NewServer(app.Config{
+		CookieSecure: false, AgentCatalog: catalog,
+		AgentRelease: agentcatalog.MustParseReference("nano.default@1"),
+	}, api.db)
+	api.handler = api.server.Handler()
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": "0190cdd2-5f2d-7ad8-b3f5-1b588788c121", "content": "Create a configured root.",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("admission=%d %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, response, &body)
+	ctx := context.Background()
+	var userID string
+	if err := api.db.Pool().QueryRow(ctx, `select user_id from chat_runs where root_agent_run_id=$1`, body.RunID).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into agent_runs(
+			id,user_id,chat_id,input_message_id,status,error_code,model,prompt_version,
+			agent_config_id,executor_version,agent_role,finished_at
+		)
+		select 'run_configured_rls_child',product.user_id,product.chat_id,product.input_message_id,
+			'failed','fixture_failed','aliyun/qwen-plus',$2,'fixture-config','fixture-executor','research',now()
+		from chat_runs product where product.root_agent_run_id=$1
+	`, body.RunID, agent.BarePromptVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into agent_run_delegations(
+			id,parent_run_id,child_run_id,parent_role,child_role,child_ordinal,depth,state,error_code,completed_at,action_id
+		) values(
+			'delegation_configured_rls',$1,'run_configured_rls_child',null,null,0,1,'failed','fixture_failed',now(),'delegate.research.source-discovery.v1'
+		)
+	`, body.RunID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := api.db.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `set local role nano_app`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `select set_config('app.principal_id',$1,true)`, userID); err != nil {
+		t.Fatal(err)
+	}
+	var visible int
+	if err := tx.QueryRow(ctx, `select count(parent_run_id) from agent_run_delegations where parent_run_id=$1`, body.RunID).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 {
+		t.Fatalf("configured Delegations visible=%d want=1", visible)
+	}
+	result, err := tx.Exec(ctx, `
+		update agent_run_delegations
+		set error_code='fixture_updated',updated_at=now()
+		where parent_run_id=$1
+	`, body.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RowsAffected() != 1 {
+		t.Fatalf("configured Delegations updated=%d want=1", result.RowsAffected())
+	}
+}
+
 func TestConfiguredChatAdmissionPinsTransitiveDefinitionAndPolicy(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configured-admission@example.com")
 	legacyRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c112")
