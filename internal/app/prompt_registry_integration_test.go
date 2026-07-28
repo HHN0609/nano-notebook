@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
 )
 
 func TestPromptCatalogMigrationRegistersIdempotentlyAndGuardsMutation(t *testing.T) {
@@ -15,8 +16,9 @@ func TestPromptCatalogMigrationRegistersIdempotentlyAndGuardsMutation(t *testing
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_prompt_versions`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 6 {
-		t.Fatalf("registered prompts=%d want=6", count)
+	want := len(promptcatalog.MustLoadEmbedded().Versions())
+	if count != want {
+		t.Fatalf("registered prompts=%d want=%d", count, want)
 	}
 	if err := app.RunMigrations(ctx, api.db); err != nil {
 		t.Fatalf("idempotent re-registration: %v", err)
