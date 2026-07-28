@@ -1215,6 +1215,23 @@ create table if not exists studio_outputs (
 create index if not exists studio_outputs_notebook_recent_idx
 	on studio_outputs(notebook_id,created_at desc,id desc);
 
+create or replace function nano_reject_completed_studio_artifact_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+	if old.status='completed' then
+		raise exception 'completed Studio Output artifact is immutable';
+	end if;
+	return new;
+end
+$$;
+
+drop trigger if exists studio_outputs_completed_artifact_immutable on studio_outputs;
+create trigger studio_outputs_completed_artifact_immutable
+	before update of title,artifact,result_id on studio_outputs
+	for each row execute function nano_reject_completed_studio_artifact_mutation();
+
 create or replace function nano_sync_studio_output_projection()
 returns trigger
 language plpgsql

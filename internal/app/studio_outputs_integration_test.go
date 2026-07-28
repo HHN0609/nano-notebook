@@ -232,6 +232,9 @@ func TestStudioExecutorSearchesThenPublishesValidatedArtifact(t *testing.T) {
 	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_run_results where producer_run_id=$1`, body.Output.RunID).Scan(&resultCount); err != nil || resultCount != 1 {
 		t.Fatalf("result count=%d err=%v", resultCount, err)
 	}
+	if _, err := api.db.Pool().Exec(context.Background(), `update studio_outputs set artifact='{"title":"tampered"}'::jsonb where id=$1`, body.Output.ID); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("completed artifact mutation err=%v", err)
+	}
 }
 
 func containsJSONID(payload []byte, id string) bool {
