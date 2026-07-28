@@ -24,6 +24,7 @@ func TerminalizeAttemptStateInTx(ctx context.Context, tx pgx.Tx, attempt Attempt
 		(runtimeKind == "configured" && executorIdentity != nil && *executorIdentity == "research")
 	isChatLeader := (runtimeKind == "legacy_role" && role != nil && *role == RoleLeader) ||
 		(runtimeKind == "configured" && executorIdentity != nil && *executorIdentity == "chat_leader")
+	isStudio := runtimeKind == "configured" && executorIdentity != nil && *executorIdentity == "studio_structured_output"
 	if isResearch {
 		if err := FailResearchPayloadInTx(ctx, tx, attempt.RunID, errorCode); err != nil {
 			return err
@@ -31,7 +32,7 @@ func TerminalizeAttemptStateInTx(ctx context.Context, tx pgx.Tx, attempt Attempt
 		if err := (DelegationKernel{}).TerminalizeInTx(ctx, tx, attempt, DelegationFailed, errorCode); err != nil {
 			return err
 		}
-	} else if isChatLeader {
+	} else if isChatLeader || isStudio {
 		jobTag, err := tx.Exec(ctx, `
 			update agent_jobs set status='failed',lease_token=null,lease_expires_at=null,last_error_code=$4,
 				finished_at=now(),updated_at=now()

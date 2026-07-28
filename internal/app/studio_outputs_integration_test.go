@@ -238,6 +238,49 @@ func TestStudioExecutorNormalizesNumericFlashcardIDsBeforePublishing(t *testing.
 	}
 }
 
+func TestStudioTerminalDispositionFailsOutputAndJob(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "studio-terminal@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "studio-terminal")
+	installReadyEvidenceSetFixture(t, api, notebookID, "src_studio_terminal", "evr_studio_terminal", "src_studio_terminal_other", "evr_studio_terminal_other")
+	catalog := agentcatalog.MustLoadEmbedded()
+	api.server = app.NewServer(app.Config{CookieSecure: false, AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@2")}, api.db)
+	api.handler = api.server.Handler()
+	created := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks/"+notebookID+"/studio-outputs", map[string]any{
+		"kind": "mind_map", "locale": "en", "source_ids": []string{"src_studio_terminal"},
+	}, owner, csrf, csrf.Value, "studio-terminal-mind-map")
+	var body struct {
+		Output struct {
+			ID    string `json:"id"`
+			RunID string `json:"run_id"`
+		} `json:"output"`
+	}
+	decodeBody(t, created, &body)
+	queue := jobs.NewQueue(api.db.Pool())
+	claimed, ok, err := queue.ClaimNext(context.Background())
+	if err != nil || !ok || claimed.RunID != body.Output.RunID {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	resolution, err := queue.ResolveAttempt(context.Background(), claimed, agent.AttemptResolution{
+		Disposition: agent.AttemptTerminal, ErrorCode: "agent_execution_failed",
+	})
+	if err != nil || resolution.Disposition != agent.AttemptTerminal {
+		t.Fatalf("resolution=%+v err=%v", resolution, err)
+	}
+	var outputStatus, outputError, runStatus, runError, jobStatus, jobError string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select o.status,o.error_code,r.status,r.error_code,j.status,j.last_error_code
+		from studio_outputs o join agent_runs r on r.id=o.root_agent_run_id
+		join agent_jobs j on j.run_id=r.id where o.id=$1
+	`, body.Output.ID).Scan(&outputStatus, &outputError, &runStatus, &runError, &jobStatus, &jobError); err != nil {
+		t.Fatal(err)
+	}
+	if outputStatus != "failed" || runStatus != "failed" || jobStatus != "failed" ||
+		outputError != "agent_execution_failed" || runError != outputError || jobError != outputError {
+		t.Fatalf("terminal states=%s/%s/%s errors=%s/%s/%s", outputStatus, runStatus, jobStatus, outputError, runError, jobError)
+	}
+}
+
 func containsJSONID(payload []byte, id string) bool {
 	return string(payload) != "" && len(id) > 0 && string(payload) != `{}` && string(payload) != `null` &&
 		containsString(string(payload), `"id":"`+id+`"`)
