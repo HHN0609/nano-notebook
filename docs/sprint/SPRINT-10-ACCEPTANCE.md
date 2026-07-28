@@ -6,7 +6,7 @@
 - **Verified:** 2026-07-28
 - **Authority:** `docs/sprint/SPRINT-10-PRD.md`
 - **Automated gate:** `./scripts/test-go`
-- **Gate result:** exit 0 after the final compatibility patch. The gate passed formatting, all Go packages and PostgreSQL/MinIO integrations (`internal/app` in 135.851s), `go vet`, and production binary builds. `go test -race -count=1 ./internal/agent ./internal/agentcatalog ./internal/models` also passed.
+- **Gate result:** exit 0 after the final drain-readiness patch. The gate passed formatting, all Go packages and PostgreSQL/MinIO integrations (`internal/app` in 135.991s), `go vet`, and production binary builds. `go test -race -count=1 ./internal/agent ./internal/agentcatalog ./internal/models` also passed.
 - **Scope audit:** the delivery diff contains no Web/Studio/UI surface and the embedded catalog contains only `chat.leader@1` and `research.source-discovery@1`; no audio, quiz, test, or other product Agent was added.
 - **Protocol gate:** official `github.com/modelcontextprotocol/go-sdk v1.7.0-pre.3` cannot publicly encode the SEP-2663 polymorphic `tools/call` Task result and does not permit replacing its registered `tools/call` codec. A 2026-07-28 check found no newer published prerelease, and official `main` commit `bc72835f62eb` still exposes no public Task-result surface. Criteria 22–30 therefore remain gated rather than using a private wire format; this is the fail-closed behavior required by criterion 31.
 - **Done:** no. Criteria 10, 17, 19, 22–30, 37, 39, and the corresponding portion of 40 are not fully met.
@@ -53,7 +53,7 @@
 | 36 | Met | Configured cancellation, retry, grounded publication, citations, SSE, Chat projection, and legacy Research regression tests preserve product behavior. |
 | 37 | Partial / gated | Research Web Search is one bounded MCP Action and completion is deterministic from accepted results; configured Research admission is blocked with delegation. |
 | 38 | Met | Sprint 9 Profiles, Roles, Role Checkpoints, and planner/search recovery remain readable only through the legacy path. |
-| 39 | Partial / drain pending | Expand and activate are complete. Legacy readers/columns remain until durable active-Run evidence permits a later contract migration. |
+| 39 | Partial / drain pending | Expand and activate are complete. `agent_legacy_runtime_drain_status` now provides database-owned, fail-closed contract readiness evidence, but legacy readers/columns remain until the deployed state reports no active legacy Run or Job. |
 | 40 | Partial / gated | Catalog, registry, MCP, metadata, error, recovery, generic runtime, release, retry, grounding, and legacy tests are deterministic and credential-free; Tasks conformance cannot run until the SDK gate opens. |
 
 ## Delivery Commits
@@ -70,5 +70,6 @@
 - `dacb375` — configured retry through the active release.
 - `25606d5` — exact Model Policy invocation settings.
 - `7495b3f` — configured Delegation ownership through the product-neutral RLS boundary.
+- `a2241e7` — database-owned legacy Agent drain readiness.
 
 This document records the honest SDK-gated acceptance boundary; it does not claim configured delegation or legacy contract cleanup is complete.
