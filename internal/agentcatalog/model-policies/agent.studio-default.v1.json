@@ -1,0 +1,8 @@
+{
+  "identity": "agent.studio-default",
+  "version": 1,
+  "provider_model": "aliyun/qwen-plus",
+  "temperature": 0,
+  "max_output_tokens": 4096,
+  "timeout_ms": 45000
+}

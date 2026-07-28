@@ -35,6 +35,26 @@ func TestExecutorRegistryResolvesExactDefinitionAndPolicyWithoutRole(t *testing.
 	}
 }
 
+func TestExecutorRegistryResolvesEveryStudioDefinitionThroughOneBoundedExecutor(t *testing.T) {
+	registry := newTestExecutorRegistry(t)
+	for _, reference := range []string{"studio.report@1", "studio.flashcards@1", "studio.mind-map@1", "studio.data-table@1"} {
+		binding, err := registry.Resolve(agentcatalog.MustParseReference(reference))
+		if err != nil {
+			t.Fatalf("resolve %s: %v", reference, err)
+		}
+		if binding.Definition.Executor != "studio_structured_output" || binding.ModelPolicy.Reference().String() != "agent.studio-default@1" {
+			t.Fatalf("binding %s=%+v", reference, binding)
+		}
+		capability := binding.Capability
+		if capability.MaxLimits.ModelCalls != 2 || capability.MaxLimits.Actions != 1 || capability.MaxLimits.ActionBatch != 1 || capability.MaxChildren != 0 {
+			t.Fatalf("Studio capability=%+v", capability)
+		}
+		if len(capability.Tools) != 1 || !capability.Tools["search_evidence"] || len(capability.ChildExecutors) != 0 {
+			t.Fatalf("Studio authority=%+v", capability)
+		}
+	}
+}
+
 func TestExecutorRegistryRejectsDuplicateMissingAndCapabilityExpansion(t *testing.T) {
 	catalog, err := agentcatalog.LoadEmbedded()
 	if err != nil {
@@ -56,6 +76,7 @@ func TestExecutorRegistryRejectsDuplicateMissingAndCapabilityExpansion(t *testin
 		{"missing tool ceiling", []ExecutorRegistration{
 			{Identity: "chat_leader", Executor: noopDefinitionExecutor{}, Capability: leaderExecutorCapability(map[string]bool{"current_time": true, "search_evidence": true})},
 			registrations[1],
+			registrations[2],
 		}, "tool"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -138,6 +159,7 @@ func productionExecutorRegistrations() []ExecutorRegistration {
 				ModelCalls: 1, Actions: 1, ActionBatch: 1, ContextBytes: 65536, ResultBytes: 262144, Attempts: 3,
 			},
 		}},
+		{Identity: "studio_structured_output", Executor: noopDefinitionExecutor{}, Capability: StudioStructuredOutputExecutorCapability()},
 	}
 }
 

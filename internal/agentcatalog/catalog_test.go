@@ -7,13 +7,13 @@ import (
 	"testing/fstest"
 )
 
-func TestEmbeddedCatalogContainsOnlyMigratedProductionAgents(t *testing.T) {
+func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 	catalog, err := LoadEmbedded()
 	if err != nil {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 2; got != want {
+	if got, want := len(definitions), 6; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -29,6 +29,22 @@ func TestEmbeddedCatalogContainsOnlyMigratedProductionAgents(t *testing.T) {
 		"research.source-discovery@1": {
 			executor: "research", model: "agent.research-default@1",
 			tools: []string{"web_search"},
+		},
+		"studio.report@1": {
+			executor: "studio_structured_output", model: "agent.studio-default@1",
+			tools: []string{"search_evidence"},
+		},
+		"studio.flashcards@1": {
+			executor: "studio_structured_output", model: "agent.studio-default@1",
+			tools: []string{"search_evidence"},
+		},
+		"studio.mind-map@1": {
+			executor: "studio_structured_output", model: "agent.studio-default@1",
+			tools: []string{"search_evidence"},
+		},
+		"studio.data-table@1": {
+			executor: "studio_structured_output", model: "agent.studio-default@1",
+			tools: []string{"search_evidence"},
 		},
 	}
 	for _, definition := range definitions {
@@ -54,15 +70,34 @@ func TestEmbeddedCatalogContainsOnlyMigratedProductionAgents(t *testing.T) {
 			t.Fatalf("immutable identity missing for %s: %+v", key, definition)
 		}
 	}
-	if got, want := len(catalog.ModelPolicies()), 2; got != want {
+	if got, want := len(catalog.ModelPolicies()), 3; got != want {
 		t.Fatalf("model policies=%d want=%d", got, want)
 	}
-	if got, want := len(catalog.Contracts()), 4; got != want {
+	if got, want := len(catalog.Contracts()), 9; got != want {
 		t.Fatalf("contracts=%d want=%d", got, want)
 	}
 	manifest, ok := catalog.ResolveRelease(MustParseReference("nano.default@1"))
 	if !ok || manifest.Roots["chat"].String() != "chat.leader@1" || len(manifest.SHA256) != 64 {
 		t.Fatalf("manifest=%+v ok=%v", manifest, ok)
+	}
+	manifestV2, ok := catalog.ResolveRelease(MustParseReference("nano.default@2"))
+	if !ok {
+		t.Fatal("nano.default@2 is missing")
+	}
+	wantRoots := map[string]string{
+		"chat":              "chat.leader@1",
+		"studio_report":     "studio.report@1",
+		"studio_flashcards": "studio.flashcards@1",
+		"studio_mind_map":   "studio.mind-map@1",
+		"studio_data_table": "studio.data-table@1",
+	}
+	if len(manifestV2.Roots) != len(wantRoots) {
+		t.Fatalf("v2 roots=%v want=%v", manifestV2.Roots, wantRoots)
+	}
+	for name, wantReference := range wantRoots {
+		if got := manifestV2.Roots[name].String(); got != wantReference {
+			t.Fatalf("v2 root %s=%q want=%q", name, got, wantReference)
+		}
 	}
 }
 

@@ -16,6 +16,10 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.chat-composer-bare":                    "final_draft_text.v1",
 		"agent.chat-composer-grounded":                "grounded_final_draft_text.v1",
 		"agent.query-contextualizer":                  "search_evidence.v1",
+		"agent.studio-report":                         "studio_report_result.v1",
+		"agent.studio-flashcards":                     "studio_flashcards_result.v1",
+		"agent.studio-mind-map":                       "studio_mind_map_result.v1",
+		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
 	if got := len(catalog.Versions()); got != len(want) {

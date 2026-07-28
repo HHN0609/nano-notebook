@@ -73,11 +73,22 @@ func NewExecutorRegistry(catalog agentcatalog.Catalog, prompts promptcatalog.Cat
 	return registry, nil
 }
 
-func NewNanoExecutorRegistry(catalog agentcatalog.Catalog, prompts promptcatalog.Catalog, chatLeader, research DefinitionExecutor) (*ExecutorRegistry, error) {
+func NewNanoExecutorRegistry(catalog agentcatalog.Catalog, prompts promptcatalog.Catalog, chatLeader, research DefinitionExecutor, studio ...DefinitionExecutor) (*ExecutorRegistry, error) {
+	studioExecutor := DefinitionExecutor(unavailableStudioExecutor{})
+	if len(studio) > 0 && studio[0] != nil {
+		studioExecutor = studio[0]
+	}
 	return NewExecutorRegistry(catalog, prompts, NanoToolCapabilities(),
 		ExecutorRegistration{Identity: "chat_leader", Executor: chatLeader, Capability: ChatLeaderExecutorCapability()},
 		ExecutorRegistration{Identity: "research", Executor: research, Capability: ResearchExecutorCapability()},
+		ExecutorRegistration{Identity: "studio_structured_output", Executor: studioExecutor, Capability: StudioStructuredOutputExecutorCapability()},
 	)
+}
+
+type unavailableStudioExecutor struct{}
+
+func (unavailableStudioExecutor) ExecuteAttempt(context.Context, Attempt) AttemptResolution {
+	return AttemptResolution{Disposition: AttemptTerminal, ErrorCode: "studio_executor_unavailable"}
 }
 
 func (r *ExecutorRegistry) Resolve(reference agentcatalog.Reference) (ResolvedExecution, error) {
@@ -143,6 +154,26 @@ func ResearchExecutorCapability() agentcatalog.ExecutorCapability {
 		MaxLimits: agentcatalog.Limits{
 			ModelCalls: 1, Actions: 1, ActionBatch: 1, ContextBytes: 65536, ResultBytes: 262144, Attempts: 3,
 		},
+	}
+}
+
+func StudioStructuredOutputExecutorCapability() agentcatalog.ExecutorCapability {
+	return agentcatalog.ExecutorCapability{
+		PromptPurposes: map[string]bool{
+			"report": true, "flashcards": true, "mind_map": true, "data_table": true,
+		},
+		Contracts: map[agentcatalog.Reference]bool{
+			agentcatalog.MustParseReference("studio.output-request@1"):    true,
+			agentcatalog.MustParseReference("studio.report-result@1"):     true,
+			agentcatalog.MustParseReference("studio.flashcards-result@1"): true,
+			agentcatalog.MustParseReference("studio.mind-map-result@1"):   true,
+			agentcatalog.MustParseReference("studio.data-table-result@1"): true,
+		},
+		Tools: map[string]bool{"search_evidence": true},
+		MaxLimits: agentcatalog.Limits{
+			ModelCalls: 2, Actions: 1, ActionBatch: 1, ContextBytes: 65536, ResultBytes: 65536, Attempts: 3,
+		},
+		MemberVisible: true, CanPublish: true,
 	}
 }
 
