@@ -3,7 +3,7 @@
 ## Document Status
 
 - **Sprint:** Sprint 10
-- **Status:** Partially implemented; configured activation is complete, while configured delegation remains blocked by the official MCP Tasks SDK gate
+- **Status:** In implementation; configured activation is complete and configured delegation uses Nano-owned durable suspension through the MCP Tool Plane
 - **Date:** 2026-07-27
 - **Theme:** Configured Agent Framework and MCP Tool Plane
 - **Delivery boundary:** Agent infrastructure only; no new Member-facing feature or new product Agent
@@ -55,7 +55,7 @@ Deliver these dependent slices in order:
 1. **Definition governance:** strict embedded Agent Definition and Model Policy catalogs with immutable registration and exact references.
 2. **Executor dispatch:** replace new-path Role dispatch with a single Executor Registry whose code-owned ceilings configuration can only narrow.
 3. **MCP tool plane:** move existing executable Actions and Web Search behind one scoped in-process MCP Host/Server boundary.
-4. **Configured delegation:** materialize exact child Definition references as generated MCP tools backed by the Delegation Kernel and MCP Tasks.
+4. **Configured delegation:** materialize exact child Definition references as generated MCP tools backed by the Delegation Kernel and Nano's durable Run lifecycle.
 5. **Generic runtime:** separate Chat Run ownership from product-neutral Agent Runs, Agent Trees, Delegations, Results, Jobs, Checkpoints, and Trace.
 6. **Migration:** admit new Leader and Research Runs through Definitions while legacy non-terminal Runs drain through a read-only compatibility path.
 7. **Proof:** demonstrate deterministic configuration validation, recovery, fencing, idempotency, and unchanged Chat/Research behavior.
@@ -82,19 +82,19 @@ Sprint 10 is complete only when all of the following are true:
 16. Attempt Context Handles expire with Attempt authority and are never persisted or reused after recovery; a new Attempt receives a new handle.
 17. Tool execution remains at-least-once. Read-only and pure tools tolerate repetition; state-changing delegation is idempotent by stable `action_id` in PostgreSQL.
 18. Existing accepted Action Proposal and Action Result Checkpoints remain the durable logical invocation record; Sprint 10 adds no generic Tool Invocation ledger.
-19. `calculate`, `current_time`, `search_evidence`, and `web_search` are sequential `ordered_sync` tools. A generated delegation tool is `exclusive_task` and must be proposed alone.
+19. `calculate`, `current_time`, `search_evidence`, and `web_search` are sequential `ordered_sync` tools. A generated delegation tool is `exclusive_delegation` and must be proposed alone because an accepted call suspends the parent.
 20. Transient infrastructure failure creates no model-visible Action Result and returns a retryable Attempt disposition; Lease loss abandons the Attempt; invariant or authorization failure terminates safely.
 21. Only bounded contract-declared domain failures become model-visible Action Results. MCP `isError` is not allowed to choose Agent or product lifecycle state.
 22. A parent Definition lists exact child Definition references; the runtime generates each callable name deterministically as `delegate.<identity>.v<version>`.
 23. A delegation proposal cannot provide an arbitrary Definition identity. The Controller and Kernel revalidate the configured relationship and current product authority.
 24. Sprint 10 preserves depth one, one child in total, no child delegation, no fan-out, no join, no recursive loop, and no Agent-to-Agent free-form conversation.
 25. Delegation creation atomically records the relation, child Agent Run, child Job, parent waiting transition, and idempotent `action_id` binding.
-26. `task_id` equals `delegation_id`; PostgreSQL is the only durable Task truth; a separate MCP Task table, task list, or Task polling Worker is not introduced.
+26. `delegation_id` is the durable handle; PostgreSQL is the only lifecycle truth, and no MCP Task table, task list, or polling Worker is introduced.
 27. Child terminalization atomically records the outcome and requeues an eligible parent. Notification remains advisory, and normal Job polling recovers missed notification.
-28. A successful child stores one immutable, typed Agent Result. Delegation, Task projection, parent Checkpoint, and Trace carry its reference and integrity metadata rather than copying its payload.
+28. A successful child stores one immutable, typed Agent Result. Delegation, parent Checkpoint, and Trace carry its reference and integrity metadata rather than copying its payload.
 29. Child input is a bounded server-built context manifest and excludes full parent context, hidden reasoning, raw Provider payloads, and caller-supplied authority.
-30. The first implementation uses the official MCP Go SDK over an in-memory transport and targets the `io.modelcontextprotocol/tasks` extension contract associated with protocol version 2026-07-28; deprecated or private Task wire formats are prohibited.
-31. Configured delegation cannot ship until the selected official SDK version and Go toolchain pass Nano's locked-protocol and Tasks-extension conformance tests; the rest of the tool plane may land without pretending Tasks conformance.
+30. The first implementation uses the official MCP Go SDK over an in-memory transport. Generated delegation is a standard synchronous `tools/call` whose immediate server result is an internal scheduling receipt; Nano never labels that receipt as an MCP Task or exposes a private Task wire format.
+31. The Controller interprets an accepted `exclusive_delegation` call as a suspension boundary: it persists the logical Proposal with delegation creation, returns no scheduling receipt to the model, releases the parent Lease, and resumes only after the child reaches a durable terminal state.
 32. Product-neutral Agent Runs no longer require Chat Message or Member columns. A Chat Run owns the Chat input/output relationship and references one root Agent Run.
 33. One Agent Tree owns the root and child shared absolute deadline and logical budgets. Generic Delegations relate parent and child Runs without Role columns.
 34. A fresh Attempt reconstructs Provider-neutral context from pinned Definitions, authorized product input, and normalized Checkpoints without Provider sessions or in-memory conversation authority.
@@ -178,18 +178,18 @@ This is the Sprint 10 Definition shape. Root Definitions omit `delegation`; call
 
 ## 9. MCP And Delegation Semantics
 
-The first Nano Tools MCP Server runs in the Agent Worker process over the official SDK's in-memory transport. This is still a real protocol boundary: scoped discovery, invocation, result/error normalization, and Tasks extension behavior must pass through MCP rather than calling a parallel direct Action path.
+The first Nano Tools MCP Server runs in the Agent Worker process over the official SDK's in-memory transport. This is still a real protocol boundary: scoped discovery, invocation, and result/error normalization pass through MCP rather than calling a parallel direct Action path.
 
-Synchronous tools return in the same call. A generated child tool may return a Task projection. Delegation uses the targeted MCP Tasks extension model:
+Ordinary tools return their business result in the same call. A generated child tool instead completes the protocol call after one transaction has accepted the durable delegation:
 
-- per-request Tasks capability negotiation;
-- polymorphic `tools/call` Task result;
-- `tasks/get` for durable status and terminal result/error;
-- `tasks/cancel` for bounded Kernel cancellation;
-- protocol-compatible `tasks/update` handling, although Nano never emits `input_required` and therefore has no application input to consume;
-- no `tasks/list` or `tasks/result` method.
+- the Tool Server revalidates the pinned parent/child relationship, product authority, Lease, deadline, and budgets;
+- the transaction resolves or creates by stable `action_id`, creates the child Run and Job, records the parent Proposal, moves the parent Job to `waiting`, and clears its Lease;
+- the synchronous MCP result is an internal scheduling receipt consumed by the Controller, not a model-visible Action Result;
+- the child terminal transaction stores the immutable Agent Result or safe error and requeues an eligible parent;
+- the resumed parent resolves the Delegation from PostgreSQL and checkpoints the eventual Agent Result reference as the original Action Result;
+- cancellation continues to map to the bounded Delegation Kernel rather than an MCP-specific task store.
 
-When the child is terminal, PostgreSQL requeues the parent. The resumed parent resolves the Task once and checkpoints the immutable Agent Result reference as the original Action Result. It does not hold a Lease or run an MCP polling loop while waiting.
+The parent does not hold a Lease or run an MCP polling loop while waiting. MCP Tasks and A2A remain future interoperability adapters for remote generic clients or independently deployed Agents; neither is required inside Nano's single runtime and database authority boundary.
 
 ## 10. Storage And Migration
 
@@ -226,5 +226,5 @@ Migration is additive first. New-path writes use Definitions and generic runtime
 4. Route Research Web Search through MCP while retaining legacy checkpoint recovery.
 5. Generalize Chat Run and Agent Run storage through additive migration and compatibility projections.
 6. Add Agent Tree and immutable Agent Result storage, then remove Role fields from new Delegations.
-7. Add generated child tools and durable Task projection after the official SDK conformance gate passes.
+7. Add generated child tools and Nano-owned durable delegation suspension over standard `tools/call`.
 8. Activate the new release manifest, drain legacy Runs, verify recovery and regression evidence, then contract obsolete paths in a later safe migration if any historical reader still needs them.

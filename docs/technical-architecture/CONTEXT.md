@@ -113,12 +113,12 @@ The durable terminal handoff from one child Agent Run to its parent, with a boun
 _Avoid_: Assistant answer, kernel business decision, implicit fallback
 
 **Agent Result**:
-The single immutable, Contract-versioned canonical JSON payload produced by one successful child Agent Run, stored once with its SHA-256 and byte size. Delegation Outcome, MCP Task result, parent Action Result Checkpoint, and Trace carry only its stable reference and integrity metadata; authorized Context Builders or publication code resolve the payload when needed.
+The single immutable, Contract-versioned canonical JSON payload produced by one successful child Agent Run, stored once with its SHA-256 and byte size. Delegation Outcome, parent Action Result Checkpoint, and Trace carry only its stable reference and integrity metadata; authorized Context Builders or publication code resolve the payload when needed.
 _Avoid_: Copied child transcript, parent-owned draft, Tool Invocation ledger
 
-**Delegation Task Projection**:
-The MCP Tasks Extension view of one Agent Delegation, using `task_id = delegation_id` without a second Task table. `tasks/get` projects durable Delegation and child Run state and includes the terminal Result reference or safe error; `tasks/cancel` maps to bounded Kernel cancellation. Nano implements protocol-compatible `tasks/update` handling but never emits `input_required`, and it has no task enumeration or removed `tasks/result` method.
-_Avoid_: MCP Task store, Worker polling loop, 2025-11-25 Tasks API
+**Delegation Scheduling Receipt**:
+The Controller-internal result of a successful generated MCP `tools/call`, containing the durable Delegation identity and accepted state. It proves only that Nano atomically scheduled the child and suspended the parent; it is not an Agent Result, is not appended to model context, and is not represented as an MCP Task.
+_Avoid_: Child result, model-visible “started” output, private MCP Task wire format
 
 **Run Retry**:
 An explicit user request to answer the latest unanswered input Message again after its prior Chat Run was cancelled or failed. It creates a new Chat Run and root Agent Run, is unavailable after the Chat advances, and is distinct from automatic execution Attempts inside an existing Agent Run.
@@ -281,7 +281,7 @@ The immutable name, description, input/output schema, Contract identities, and S
 _Avoid_: Global mutable Tool schema, unversioned JSON object, Provider-only function definition
 
 **Tool Scheduling Class**:
-The code-registered execution constraint attached to an MCP Tool adapter: `ordered_sync` may share a bounded proposal batch and executes sequentially, while `exclusive_task` must be the only Action because it suspends the parent Agent Run. Agent Definitions may lower batch limits but cannot change a Tool's class.
+The code-registered execution constraint attached to an MCP Tool adapter: `ordered_sync` may share a bounded proposal batch and executes sequentially, while `exclusive_delegation` must be the only Action because it suspends the parent Agent Run. Agent Definitions may lower batch limits but cannot change a Tool's class.
 _Avoid_: Model-selected concurrency, configurable Tool semantics, implicit fan-out
 
 **Action Proposal**:

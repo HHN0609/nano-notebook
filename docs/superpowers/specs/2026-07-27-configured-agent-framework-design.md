@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-27
 
-**Status:** Approved; configured activation implemented, MCP Tasks delegation gated on official SDK support
+**Status:** Approved and in implementation; configured delegation uses standard MCP tools plus Nano-owned durable suspension
 
 **Scope:** Sprint 10 Agent infrastructure only; no new Member-facing feature or product Agent
 
@@ -311,9 +311,9 @@ The accepted Proposal/Result Checkpoint stream remains the logical ledger. Sprin
 Each tool adapter registers a class in code:
 
 - `ordered_sync`: may appear in a bounded batch and executes strictly in proposal order;
-- `exclusive_task`: must be the only proposal because it suspends the Agent Run.
+- `exclusive_delegation`: must be the only proposal because it suspends the Agent Run.
 
-`calculate`, `current_time`, `search_evidence`, and `web_search` are `ordered_sync`. Generated child tools are `exclusive_task`. Definitions may reduce batch limits but cannot alter a class. There is no parallel execution or hidden fan-out.
+`calculate`, `current_time`, `search_evidence`, and `web_search` are `ordered_sync`. Generated child tools are `exclusive_delegation`. Definitions may reduce batch limits but cannot alter a class. There is no parallel execution or hidden fan-out.
 
 ### 8.5 Decision Contracts
 
@@ -334,7 +334,7 @@ The Controller maps every outcome into one of four classes:
 
 MCP `isError` is a transport representation. A tool adapter or Server cannot choose Agent Run, Job, Chat Run, or publication status.
 
-## 9. Configured Delegation Through MCP Tasks
+## 9. Configured Delegation Through MCP Tools
 
 ### 9.1 Generated tool
 
@@ -361,31 +361,23 @@ After Controller validation, `tools/call` performs one transaction that:
 
 The model cannot cause two children by retrying the same logical Action.
 
-### 9.3 Task projection
+### 9.3 Scheduling receipt and suspension
 
-Nano targets the `io.modelcontextprotocol/tasks` extension described by final SEP-2663 for protocol version 2026-07-28:
+The generated capability uses the standard MCP Tool contract:
 
-- Tasks capability is negotiated per request;
-- `tools/call` can return a polymorphic Task result;
-- `task_id` is the Delegation ID;
-- `tasks/get` projects Delegation and child Run state and includes terminal result/error;
-- `tasks/cancel` maps to Kernel cancellation;
-- `tasks/update` is handled according to the extension, but Nano never emits `input_required`, so there are no application input responses to consume.
+- scoped `tools/list` exposes the generated name only to a parent Definition that pins the exact child;
+- `tools/call` receives bounded business input while the Host injects Attempt authority and stable `action_id` as private metadata;
+- the Server returns `complete` only for the scheduling operation after the durable transaction commits;
+- the returned scheduling receipt contains the Delegation ID and `waiting` state but is Controller-internal and is not appended as a model-visible Action Result;
+- the `exclusive_delegation` scheduling class tells the Controller to end the Attempt after acceptance.
 
-Nano does not implement the older experimental Task contract, `tasks/result`, `tasks/list`, or an `input_required` lifecycle. PostgreSQL is the only durable truth; there is no MCP Task table.
-
-The protocol sources are:
-
-- <https://modelcontextprotocol.io/extensions/tasks/overview>
-- <https://modelcontextprotocol.io/seps/2663-tasks-extension>
-
-As of the design date, official Go SDK v1.7.0 is still a prerelease targeting protocol version 2026-07-28, requires Go 1.25, and its published release notes do not establish complete SEP-2663 support. The implementation begins with a dependency spike: select an official SDK version and toolchain, then prove negotiation plus Task behavior before delegation is enabled. If first-class extension helpers are absent, a narrow adapter may use the SDK's official custom-method surface with exact SEP-2663 schemas; it may not invent or vary the wire contract. Production release should prefer stable v1.7 when available.
+PostgreSQL is the only durable lifecycle truth. Nano does not add an MCP Task table, a Task polling Worker, a private `resultType`, or an application-level polling loop. SEP-2663 remains a future adapter for generic remote MCP clients; A2A remains a future adapter for independently deployed Agent services.
 
 ### 9.4 Completion and resume
 
 Child success creates one immutable Agent Result and atomically terminalizes the child, Delegation, and child Job. Failure and cancellation record only safe error codes. An eligible parent is requeued in the same transaction and receives an advisory PostgreSQL notification.
 
-The parent holds no Lease while waiting and does not poll Tasks. On its next leased Attempt it calls `tasks/get` once, validates the terminal Result reference or safe error, and checkpoints that projection as the original Action Result. Existing Leader policy continues to fail the Chat path when Research fails; Sprint 10 does not add degradation behavior.
+The parent holds no Lease while waiting. On its next leased Attempt it resolves the terminal Delegation and Result from PostgreSQL, validates the Result reference or safe error, and checkpoints that reference as the original Action Result. Existing Leader policy continues to fail the Chat path when Research fails; Sprint 10 does not add degradation behavior.
 
 ## 10. Context and Result Boundaries
 
@@ -416,7 +408,7 @@ A successful child creates one immutable row with:
 - payload SHA-256 and byte size;
 - creation timestamp.
 
-The producer Run has at most one successful Result. Delegation, Task projection, parent Checkpoint, and Trace store only the reference, Contract identity, hash, and size. Authorized context or product code resolves the payload. Result-byte budget is charged once at creation.
+The producer Run has at most one successful Result. Delegation, parent Checkpoint, and Trace store only the reference, Contract identity, hash, and size. Authorized context or product code resolves the payload. Result-byte budget is charged once at creation.
 
 Research's normalized Discovery outcome becomes the first Result type. Existing Discovery Session and candidate records remain the product/domain projection needed by current Source Discovery behavior; the Agent Result is the typed child handoff and does not replace authorization or Source import rules.
 
@@ -550,11 +542,11 @@ The implementation should use small independently reviewable slices:
 4. ordinary Action adapters and Controller cutover;
 5. Research `web_search` MCP behavior plus legacy recovery adapter;
 6. additive Chat Run, Agent Tree, generic Agent Run, Delegation, and Agent Result migrations;
-7. generated child tools and official Tasks extension conformance;
+7. generated child tools and durable scheduling receipt conformance;
 8. Leader/Research new-path activation, drain evidence, and removal of obsolete writers;
 9. full regression, migration, race, and acceptance verification.
 
-The MCP Tasks SDK gate may delay slice 7. It must not cause a private wire implementation or conceal partial conformance. Slices that do not depend on Tasks may land independently if they leave production admission on a coherent supported path.
+Generated delegation must not claim protocol-level Task semantics. Its conformance gate proves standard MCP discovery/call behavior and the Nano-owned durable suspension boundary independently.
 
 ## 16. Acceptance Boundary
 
