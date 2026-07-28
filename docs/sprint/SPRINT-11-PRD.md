@@ -3,7 +3,7 @@
 ## Document Status
 
 - **Sprint:** Sprint 11
-- **Status:** Approved for implementation
+- **Status:** Accepted; evidence in `docs/sprint/SPRINT-11-ACCEPTANCE.md`
 - **Date:** 2026-07-28
 - **Theme:** Source-grounded Studio Outputs and four configured product Agents
 - **Delivery boundary:** Report, Flashcards, Mind Map, and Data Table only; no Quiz or generated media
