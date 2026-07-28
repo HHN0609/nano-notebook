@@ -26,6 +26,8 @@ type WorkspacePanelCopy = ChatPanelCopy & Omit<SourcePanelCopy, "title" | "addSo
   studioDelete: string;
   studioUnavailable: string;
   studioSource: string;
+  studioSourceSingular: string;
+  studioSourcePlural: string;
   studioPrevious: string;
   studioNext: string;
   studioFlip: string;
@@ -59,7 +61,8 @@ export function NotebookWorkspace({ notebookID, copy, canMaintainSources = true 
       recentLabel={copy.studioRecent} noOutputsLabel={copy.studioNoOutputs} noSourceLabel={copy.studioNoSource}
       queuedLabel={copy.studioQueued} generatingLabel={copy.studioGenerating} failedLabel={copy.studioFailed}
       deleteLabel={copy.studioDelete} unavailableLabel={copy.studioUnavailable} closeLabel={copy.closeLabel}
-      sourceLabel={copy.studioSource} previousLabel={copy.studioPrevious} nextLabel={copy.studioNext} flipLabel={copy.studioFlip}
+      sourceLabel={copy.studioSource} sourceSingularLabel={copy.studioSourceSingular} sourcePluralLabel={copy.studioSourcePlural}
+      previousLabel={copy.studioPrevious} nextLabel={copy.studioNext} flipLabel={copy.studioFlip}
       shuffleLabel={copy.studioShuffle} restartLabel={copy.studioRestart} zoomInLabel={copy.studioZoomIn}
       zoomOutLabel={copy.studioZoomOut} missingArtifactLabel={copy.studioMissingArtifact}
       controller={studioController} selectedSourceIDs={sourcesController.selectedSourceIDs} sources={sourcesController.sources}

@@ -56,6 +56,41 @@ func (s *Server) listStudioOutputs(w http.ResponseWriter, r *http.Request, userI
 	writeJSON(w, http.StatusOK, map[string]any{"outputs": outputs})
 }
 
+func (s *Server) streamStudioOutput(w http.ResponseWriter, r *http.Request, userID, outputID string) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	initial, err := s.studioOutputProjection(r.Context(), userID, outputID)
+	if errors.Is(err, studio.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.studio_output_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	wake, unsubscribe := s.runHub.subscribe(initial.RunID)
+	defer unsubscribe()
+	streamFullSnapshots(w, r, "studio-output", wake, func(ctx context.Context) (any, error) {
+		output, err := s.studioOutputProjection(ctx, userID, outputID)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"output": output}, nil
+	})
+}
+
+func (s *Server) studioOutputProjection(ctx context.Context, userID, outputID string) (studio.Output, error) {
+	var output studio.Output
+	err := s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		var loadErr error
+		output, loadErr = studio.NewStore(tx).Get(ctx, outputID)
+		return loadErr
+	})
+	return output, err
+}
+
 func (s *Server) createStudioOutput(w http.ResponseWriter, r *http.Request, userID, notebookID string) {
 	if !validCSRF(r) {
 		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
@@ -214,11 +249,17 @@ func (s *Server) studioOutputByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
 		return
 	}
-	outputID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/studio-outputs/"), "/")
-	if outputID == "" || strings.Contains(outputID, "/") {
+	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/studio-outputs/"), "/")
+	parts := strings.Split(remainder, "/")
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "events" {
+		s.streamStudioOutput(w, r, user.ID, parts[0])
+		return
+	}
+	if len(parts) != 1 || parts[0] == "" {
 		writeError(w, r, http.StatusNotFound, "not_found", "error.studio_output_not_found")
 		return
 	}
+	outputID := parts[0]
 	switch r.Method {
 	case http.MethodGet:
 		var output studio.Output

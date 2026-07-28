@@ -166,6 +166,12 @@ test("creates a Report from the selected ready Sources", async () => {
 
   await waitFor(() => expect(admittedBody).toEqual({ kind: "report", locale: "en", source_ids: ["src_ready"] }));
   expect(await within(studio).findByText("Generating…")).toBeInTheDocument();
+  expect(within(studio).getByText(/1 source/)).toBeInTheDocument();
+  await waitFor(() => expect(FakeEventSource.instances.some((item) => item.url === "/api/v1/studio-outputs/out_report/events")).toBe(true));
+  act(() => FakeEventSource.instances.find((item) => item.url === "/api/v1/studio-outputs/out_report/events")?.emit("studio-output", {
+    output: { id: "out_report", notebook_id: "nb_test", kind: "report", locale: "en", title: "Generated Report", run_id: "run_report", source_count: 1, status: "completed", artifact: { title: "Generated Report", summary: "Done.", sections: [{ id: "sec_1", heading: "Summary", markdown: "Grounded.", source_ids: ["src_ready"] }] }, created_at: "2026-07-28T08:00:00Z", updated_at: "2026-07-28T08:01:00Z" }
+  }));
+  expect(await within(studio).findByRole("button", { name: "Generated Report" })).toBeEnabled();
 });
 
 test("opens a durable Report from Studio Recent", async () => {

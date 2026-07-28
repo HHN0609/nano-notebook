@@ -23,6 +23,8 @@ export type StudioPanelCopy = StudioViewerCopy & {
   deleteLabel: string;
   unavailableLabel: string;
   closeLabel: string;
+  sourceSingularLabel: string;
+  sourcePluralLabel: string;
 };
 
 type StudioPanelProps = StudioPanelCopy & {
@@ -73,10 +75,11 @@ export function StudioPanelContent(props: StudioPanelProps) {
         const label = output.title || (output.artifact as { title?: string } | undefined)?.title || action?.label || output.kind;
         const pending = output.status === "queued" || output.status === "running";
         const status = pending ? props.generatingLabel : output.status === "failed" ? props.failedLabel : "";
+        const sourceCount = `${output.source_count} ${output.source_count === 1 ? props.sourceSingularLabel : props.sourcePluralLabel}`;
         return <div className="studio-output-row" data-status={output.status} key={output.id}>
           <Button aria-label={label} className="studio-output-open" variant="ghost" disabled={output.status !== "completed" || !output.artifact} onClick={() => setViewing(output)}>
             <span className="studio-output-icon" data-tone={action?.tone}><MaterialSymbol name={pending ? "progress_activity" : action?.icon ?? "description"} size={20} /></span>
-            <span className="studio-output-copy"><strong>{label}</strong><small>{status || new Date(output.created_at).toLocaleDateString()}</small></span>
+            <span className="studio-output-copy"><strong>{label}</strong>{status ? <small>{status}</small> : null}<small>{sourceCount} · {relativeTime(output.created_at, output.locale)}</small></span>
           </Button>
           {props.canMaintain ? <IconButton className="studio-output-delete" icon="delete" label={`${props.deleteLabel} ${label}`} symbolSize={18} onClick={() => void remove(output.id)} /> : null}
         </div>;
@@ -91,4 +94,15 @@ export function StudioPanelContent(props: StudioPanelProps) {
       </DialogContent> : null}
     </Dialog>
   </div>;
+}
+
+function relativeTime(value: string, locale: string) {
+  const elapsedSeconds = Math.round((new Date(value).getTime() - Date.now()) / 1000);
+  const formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+  if (Math.abs(elapsedSeconds) < 60) return formatter.format(elapsedSeconds, "second");
+  const elapsedMinutes = Math.round(elapsedSeconds / 60);
+  if (Math.abs(elapsedMinutes) < 60) return formatter.format(elapsedMinutes, "minute");
+  const elapsedHours = Math.round(elapsedMinutes / 60);
+  if (Math.abs(elapsedHours) < 24) return formatter.format(elapsedHours, "hour");
+  return formatter.format(Math.round(elapsedHours / 24), "day");
 }

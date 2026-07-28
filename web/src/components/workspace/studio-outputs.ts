@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { csrfToken, memberAPI } from "./source-upload";
 
 export type StudioOutputKind = "report" | "flashcards" | "mind_map" | "data_table";
@@ -58,7 +58,7 @@ export type StudioOutputsController = {
 export function useStudioOutputs(notebookID: string, unavailableLabel: string): StudioOutputsController {
   const queryClient = useQueryClient();
   const [isCreating, setIsCreating] = useState(false);
-  const queryKey = ["studio-outputs", notebookID] as const;
+  const queryKey = useMemo(() => ["studio-outputs", notebookID] as const, [notebookID]);
   const query = useQuery({
     queryKey,
     queryFn: async ({ signal }): Promise<StudioOutput[]> => {
@@ -72,6 +72,29 @@ export function useStudioOutputs(notebookID: string, unavailableLabel: string): 
       return outputs?.some((output) => output.status === "queued" || output.status === "running") ? 1500 : false;
     }
   });
+  useEffect(() => {
+    if (typeof EventSource === "undefined") return;
+    const streams = (query.data ?? [])
+      .filter((output) => output.status === "queued" || output.status === "running")
+      .map((output) => {
+        const events = new EventSource(`/api/v1/studio-outputs/${output.id}/events`);
+        const project = (event: Event) => {
+          try {
+            const next = (JSON.parse((event as MessageEvent<string>).data) as { output?: StudioOutput }).output;
+            if (!next || next.id !== output.id) return;
+            queryClient.setQueryData<StudioOutput[]>(queryKey, (current = []) => current.map((item) => item.id === next.id ? next : item));
+          } catch {
+            // Keep the durable polling fallback when a projection is malformed.
+          }
+        };
+        events.addEventListener("studio-output", project);
+        return { events, project };
+      });
+    return () => streams.forEach(({ events, project }) => {
+      events.removeEventListener("studio-output", project);
+      events.close();
+    });
+  }, [query.data, queryClient, queryKey]);
 
   return {
     outputs: query.data ?? [],

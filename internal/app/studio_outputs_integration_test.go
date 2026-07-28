@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
@@ -78,6 +80,96 @@ func TestStudioOutputAdmissionPinsConfiguredRootAndListsDurably(t *testing.T) {
 	if listed.Code != http.StatusOK || !containsJSONID(listed.Body.Bytes(), body.Output.ID) {
 		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
 	}
+}
+
+func TestStudioOutputViewerCanReadButCannotMutate(t *testing.T) {
+	api := newTestAPI(t)
+	owner, ownerCSRF := api.registerWithCSRF(t, "studio-authority-owner@example.com")
+	viewer, viewerCSRF := api.registerWithCSRF(t, "studio-authority-viewer@example.com")
+	intruder := api.register(t, "studio-authority-intruder@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "studio-authority")
+	viewerID := sourceTestUserID(t, api, "studio-authority-viewer@example.com")
+	if _, err := api.db.Pool().Exec(context.Background(), `insert into notebook_memberships(notebook_id,user_id,role) values($1,$2,'viewer')`, notebookID, viewerID); err != nil {
+		t.Fatal(err)
+	}
+	installReadyEvidenceSetFixture(t, api, notebookID, "src_studio_authority", "evr_studio_authority", "", "")
+	catalog := agentcatalog.MustLoadEmbedded()
+	api.server = app.NewServer(app.Config{CookieSecure: false, AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@2")}, api.db)
+	api.handler = api.server.Handler()
+	created := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks/"+notebookID+"/studio-outputs", map[string]any{
+		"kind": "data_table", "locale": "en", "source_ids": []string{"src_studio_authority"},
+	}, owner, ownerCSRF, ownerCSRF.Value, "studio-authority-table")
+	var body struct {
+		Output struct {
+			ID string `json:"id"`
+		} `json:"output"`
+	}
+	decodeBody(t, created, &body)
+
+	if listed := api.getWithCookie(t, "/api/v1/notebooks/"+notebookID+"/studio-outputs", viewer); listed.Code != http.StatusOK || !containsJSONID(listed.Body.Bytes(), body.Output.ID) {
+		t.Fatalf("viewer list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	if detail := api.getWithCookie(t, "/api/v1/studio-outputs/"+body.Output.ID, viewer); detail.Code != http.StatusOK {
+		t.Fatalf("viewer detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	forbiddenCreate := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks/"+notebookID+"/studio-outputs", map[string]any{
+		"kind": "report", "locale": "en", "source_ids": []string{"src_studio_authority"},
+	}, viewer, viewerCSRF, viewerCSRF.Value, "studio-viewer-forbidden")
+	if forbiddenCreate.Code != http.StatusForbidden {
+		t.Fatalf("viewer create status=%d body=%s", forbiddenCreate.Code, forbiddenCreate.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/studio-outputs/"+body.Output.ID, nil)
+	request.AddCookie(viewer)
+	request.AddCookie(viewerCSRF)
+	request.Header.Set("X-CSRF-Token", viewerCSRF.Value)
+	deleted := httptest.NewRecorder()
+	api.handler.ServeHTTP(deleted, request)
+	if deleted.Code != http.StatusForbidden {
+		t.Fatalf("viewer delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	if detail := api.getWithCookie(t, "/api/v1/studio-outputs/"+body.Output.ID, intruder); detail.Code != http.StatusNotFound {
+		t.Fatalf("intruder detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+}
+
+func TestStudioOutputSSEReconnectBeginsFromDurableState(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "studio-sse@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "studio-sse")
+	installReadyEvidenceSetFixture(t, api, notebookID, "src_studio_sse", "evr_studio_sse", "", "")
+	catalog := agentcatalog.MustLoadEmbedded()
+	api.server = app.NewServer(app.Config{CookieSecure: false, AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@2")}, api.db)
+	api.handler = api.server.Handler()
+	created := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks/"+notebookID+"/studio-outputs", map[string]any{
+		"kind": "mind_map", "locale": "en", "source_ids": []string{"src_studio_sse"},
+	}, owner, csrf, csrf.Value, "studio-sse-map")
+	var body struct {
+		Output struct {
+			ID    string `json:"id"`
+			RunID string `json:"run_id"`
+		} `json:"output"`
+	}
+	decodeBody(t, created, &body)
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer, done := startSSE(t, api, requestCtx, "/api/v1/studio-outputs/"+body.Output.ID+"/events", owner)
+	waitForSSEFlush(t, writer, done)
+	if !strings.HasPrefix(writer.header.Get("Content-Type"), "text/event-stream") ||
+		!strings.Contains(writer.body(), "event: studio-output") || !strings.Contains(writer.body(), `"id":"`+body.Output.ID+`"`) ||
+		!strings.Contains(writer.body(), `"status":"queued"`) {
+		t.Fatalf("headers=%v body=%s", writer.header, writer.body())
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `update agent_runs set status='running',started_at=now(),updated_at=now() where id=$1`, body.Output.RunID); err != nil {
+		t.Fatal(err)
+	}
+	api.server.NotifyRun(body.Output.RunID)
+	waitForSSEFlush(t, writer, done)
+	if !strings.Contains(writer.body(), `"status":"running"`) {
+		t.Fatalf("updated body=%s", writer.body())
+	}
+	cancel()
+	waitForSSEStop(t, done)
 }
 
 func TestStudioExecutorSearchesThenPublishesValidatedArtifact(t *testing.T) {
