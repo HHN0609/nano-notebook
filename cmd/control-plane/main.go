@@ -205,7 +205,7 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 	if err != nil {
 		return controlPlaneConfig{}, fmt.Errorf("parse NANO_SOURCE_S3_USE_TLS: %w", err)
 	}
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@1"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@2"))
 	if err != nil {
 		return controlPlaneConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}

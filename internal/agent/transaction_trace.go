@@ -26,7 +26,7 @@ func NewRunTraceRecorder(ctx context.Context, tx pgx.Tx, runID string) (*RunTrac
 	}
 	var descriptor collector.TraceDescriptor
 	if err := tx.QueryRow(ctx, `
-		select trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
+		select trace_id, run_id, coalesce(chat_id,''), notebook_id, root_span_id, agent_name,
 			schema_version, semantic_convention_version
 		from agent_trace_refs where run_id = $1`, runID).Scan(
 		&descriptor.TraceID, &descriptor.RunID, &descriptor.ChatID, &descriptor.NotebookID,
@@ -47,7 +47,7 @@ func NewOwnedRunTraceRecorder(ctx context.Context, tx pgx.Tx, runID string) (*Ru
 	}
 	var descriptor collector.TraceDescriptor
 	if err := tx.QueryRow(ctx, `
-		select trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
+		select trace_id, run_id, coalesce(chat_id,''), notebook_id, root_span_id, agent_name,
 			schema_version, semantic_convention_version
 		from nano_owned_run_trace_descriptor($1)`, runID).Scan(
 		&descriptor.TraceID, &descriptor.RunID, &descriptor.ChatID, &descriptor.NotebookID,

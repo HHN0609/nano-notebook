@@ -1186,6 +1186,61 @@ drop trigger if exists agent_run_results_immutable on agent_run_results;
 create trigger agent_run_results_immutable before update or delete on agent_run_results
 	for each row execute function nano_reject_agent_run_result_mutation();
 
+create table if not exists studio_outputs (
+	id text primary key check (char_length(id) between 3 and 255),
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	created_by_user_id text references identity_users(id) on delete set null,
+	kind text not null check (kind in ('report','flashcards','mind_map','data_table')),
+	locale text not null check (char_length(locale) between 2 and 16),
+	title text check (title is null or char_length(title) between 1 and 200),
+	root_agent_run_id text not null unique references agent_runs(id) on delete cascade,
+	result_id text unique references agent_run_results(id) on delete restrict,
+	selected_source_count integer not null check (selected_source_count between 1 and 50),
+	status text not null check (status in ('queued','running','completed','failed','cancelled')),
+	error_code text check (error_code is null or error_code ~ '^[a-z][a-z0-9_]{1,63}$'),
+	artifact jsonb check (artifact is null or jsonb_typeof(artifact)='object'),
+	idempotency_key text not null check (char_length(idempotency_key) between 1 and 255),
+	request_hash text not null check (request_hash ~ '^[0-9a-f]{64}$'),
+	created_at timestamptz not null default now(),
+	started_at timestamptz,
+	finished_at timestamptz,
+	updated_at timestamptz not null default now(),
+	unique (created_by_user_id,idempotency_key),
+	constraint studio_outputs_publication_shape check (
+		(status='completed' and artifact is not null and title is not null and result_id is not null and error_code is null)
+		or (status<>'completed' and artifact is null and result_id is null and title is null)
+	)
+);
+
+create index if not exists studio_outputs_notebook_recent_idx
+	on studio_outputs(notebook_id,created_at desc,id desc);
+
+create or replace function nano_sync_studio_output_projection()
+returns trigger
+language plpgsql
+as $$
+begin
+	if not exists(select 1 from studio_outputs where root_agent_run_id=new.id) then
+		return new;
+	elsif new.status='completed' then
+		if not exists(select 1 from studio_outputs where root_agent_run_id=new.id and artifact is not null and result_id is not null) then
+			raise exception 'Studio Output must publish artifact before completing Agent Run';
+		end if;
+		update studio_outputs set status='completed',error_code=null,started_at=new.started_at,
+			finished_at=new.finished_at,updated_at=new.updated_at where root_agent_run_id=new.id;
+	else
+		update studio_outputs set status=new.status,error_code=new.error_code,started_at=new.started_at,
+			finished_at=new.finished_at,updated_at=new.updated_at where root_agent_run_id=new.id;
+	end if;
+	return new;
+end
+$$;
+
+drop trigger if exists agent_runs_sync_studio_output on agent_runs;
+create trigger agent_runs_sync_studio_output
+	after update of status,error_code,started_at,finished_at,updated_at on agent_runs
+	for each row execute function nano_sync_studio_output_projection();
+
 create unique index if not exists agent_runs_one_research_child_idx
 	on agent_runs(parent_run_id) where agent_role='research';
 
@@ -1681,6 +1736,8 @@ create table if not exists agent_trace_refs (
 	created_at timestamptz not null default now()
 );
 
+alter table agent_trace_refs alter column chat_id drop not null;
+
 alter table agent_trace_refs
 	drop column if exists next_sequence cascade,
 	drop column if exists collector_cursor cascade,
@@ -2006,6 +2063,7 @@ alter table agent_runs enable row level security;
 alter table chat_runs enable row level security;
 alter table agent_trees enable row level security;
 alter table agent_run_results enable row level security;
+alter table studio_outputs enable row level security;
 alter table agent_run_routes enable row level security;
 alter table agent_run_delegations enable row level security;
 alter table agent_research_outcomes enable row level security;
@@ -2054,6 +2112,7 @@ grant select, insert, update, delete on
 	chat_messages,
 	agent_runs,
 	chat_runs,
+	studio_outputs,
 	agent_trees,
 	agent_run_evidence_set,
 	chat_citations,
@@ -2076,6 +2135,7 @@ grant select on
 	chat_messages,
 	agent_runs,
 	chat_runs,
+	studio_outputs,
 	agent_trees,
 	agent_run_evidence_set,
 	agent_run_grounding_plans,
@@ -2087,6 +2147,7 @@ to nano_worker;
 grant insert on agent_run_evidence_set to nano_worker;
 grant select, insert on agent_run_results to nano_worker;
 grant insert, update on chat_runs,agent_trees to nano_worker;
+grant select, insert, update on studio_outputs to nano_worker;
 grant select, insert, update, delete on
 	agent_run_grounding_plans,
 	agent_claim_support_records,
@@ -2754,9 +2815,10 @@ as $$
 		select 1
 		from public.agent_runs run
 		left join public.agent_trees tree on tree.id=run.tree_id
-		left join public.chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+		left join public.chat_runs chat_product on chat_product.root_agent_run_id=tree.root_agent_run_id
+		left join public.studio_outputs studio_product on studio_product.root_agent_run_id=tree.root_agent_run_id
 		where run.id=candidate_run_id
-		  and coalesce(run.user_id,product.user_id)=nullif(current_setting('app.principal_id', true), '')
+		  and coalesce(run.user_id,chat_product.user_id,studio_product.created_by_user_id)=nullif(current_setting('app.principal_id', true), '')
 	)
 $$;
 revoke all on function nano_run_owned(text) from public;
@@ -2790,18 +2852,38 @@ drop policy if exists chat_runs_worker on chat_runs;
 create policy chat_runs_worker on chat_runs
 	for all to nano_worker using (true) with check (true);
 
+drop policy if exists studio_outputs_app_read on studio_outputs;
+create policy studio_outputs_app_read on studio_outputs
+	for select to nano_app using (nano_has_notebook_capability(notebook_id,'source.read'));
+drop policy if exists studio_outputs_app_insert on studio_outputs;
+create policy studio_outputs_app_insert on studio_outputs
+	for insert to nano_app with check (
+		created_by_user_id=nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id,'source.maintain')
+	);
+drop policy if exists studio_outputs_app_delete on studio_outputs;
+create policy studio_outputs_app_delete on studio_outputs
+	for delete to nano_app using (nano_has_notebook_capability(notebook_id,'source.maintain'));
+drop policy if exists studio_outputs_worker on studio_outputs;
+create policy studio_outputs_worker on studio_outputs
+	for all to nano_worker using (true) with check (true);
+
 drop policy if exists agent_trees_private on agent_trees;
 create policy agent_trees_private on agent_trees
 	for all to nano_app
 	using (root_agent_run_id is null or exists (
-		select 1 from chat_runs product
-		where product.root_agent_run_id=agent_trees.root_agent_run_id
+		select 1 from chat_runs product where product.root_agent_run_id=agent_trees.root_agent_run_id
 		  and product.user_id=nullif(current_setting('app.principal_id', true), '')
+	) or exists (
+		select 1 from studio_outputs product where product.root_agent_run_id=agent_trees.root_agent_run_id
+		  and product.created_by_user_id=nullif(current_setting('app.principal_id', true), '')
 	))
 	with check (root_agent_run_id is null or exists (
-		select 1 from chat_runs product
-		where product.root_agent_run_id=agent_trees.root_agent_run_id
+		select 1 from chat_runs product where product.root_agent_run_id=agent_trees.root_agent_run_id
 		  and product.user_id=nullif(current_setting('app.principal_id', true), '')
+	) or exists (
+		select 1 from studio_outputs product where product.root_agent_run_id=agent_trees.root_agent_run_id
+		  and product.created_by_user_id=nullif(current_setting('app.principal_id', true), '')
 	));
 
 drop policy if exists agent_trees_worker on agent_trees;

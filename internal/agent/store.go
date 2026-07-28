@@ -937,11 +937,12 @@ func (s *Store) pinEvidenceSet(ctx context.Context, runID, userID string, source
 	}
 	var notebookID string
 	if err := s.db.QueryRow(ctx, `
-		select c.notebook_id
+		select coalesce(c.notebook_id,studio.notebook_id)
 		from agent_runs r
-		left join chat_runs product on product.root_agent_run_id=r.id
-		join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id)
-		where r.id=$1 and coalesce(r.user_id,product.user_id)=$2 and r.status='queued'
+		left join chat_runs chat_product on chat_product.root_agent_run_id=r.id
+		left join chat_chats c on c.id=coalesce(r.chat_id,chat_product.chat_id)
+		left join studio_outputs studio on studio.root_agent_run_id=r.id
+		where r.id=$1 and coalesce(r.user_id,chat_product.user_id,studio.created_by_user_id)=$2 and r.status='queued'
 	`, runID, userID).Scan(&notebookID); err != nil {
 		return ErrEvidenceSetInvalid
 	}
@@ -982,7 +983,9 @@ func (s *Store) pinEvidenceSet(ctx context.Context, runID, userID string, source
 	tag, err := s.db.Exec(ctx, `
 		update agent_runs set selected_source_count=$3, updated_at=now()
 		where id=$1 and status='queued' and (
-			user_id=$2 or exists(select 1 from chat_runs product where product.root_agent_run_id=agent_runs.id and product.user_id=$2)
+			user_id=$2
+			or exists(select 1 from chat_runs product where product.root_agent_run_id=agent_runs.id and product.user_id=$2)
+			or exists(select 1 from studio_outputs product where product.root_agent_run_id=agent_runs.id and product.created_by_user_id=$2)
 		)
 	`, runID, userID, len(sourceIDs))
 	if err != nil {

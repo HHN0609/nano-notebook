@@ -428,7 +428,7 @@ func CanonicalTraceDescriptor(trace TraceDescriptor) (TraceDescriptor, error) {
 	}
 	switch trace.WorkloadKind {
 	case WorkloadAgentRun:
-		if !validDescriptorText(trace.RunID, 128) || !validDescriptorText(trace.ChatID, 128) || trace.WorkloadID != trace.RunID {
+		if !validDescriptorText(trace.RunID, 128) || (trace.ChatID != "" && !validDescriptorText(trace.ChatID, 128)) || trace.WorkloadID != trace.RunID {
 			return TraceDescriptor{}, errors.New("Collector Agent-run Trace identity is inconsistent")
 		}
 	case WorkloadSourceProcessing:

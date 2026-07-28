@@ -72,7 +72,7 @@ func DeterministicSpanID(traceID agentobs.TraceID, semanticIdentity string) (age
 
 func NewTraceTransaction(descriptor collector.TraceDescriptor, sink TraceSink) (*TraceTransaction, error) {
 	if sink == nil || strings.TrimSpace(string(descriptor.TraceID)) == "" ||
-		strings.TrimSpace(descriptor.RunID) == "" || strings.TrimSpace(descriptor.ChatID) == "" ||
+		strings.TrimSpace(descriptor.RunID) == "" ||
 		strings.TrimSpace(descriptor.NotebookID) == "" || strings.TrimSpace(string(descriptor.RootSpanID)) == "" ||
 		strings.TrimSpace(descriptor.AgentName) == "" || descriptor.SchemaVersion < 1 ||
 		descriptor.SemanticConventionVersion < 1 {

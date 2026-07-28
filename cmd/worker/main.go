@@ -358,6 +358,11 @@ func main() {
 		os.Exit(1)
 	}
 	controller := agent.NewMCPController(runtime, modelClient, registry, mcpToolHost, chatRoot)
+	studioExecutor, err := agent.NewStudioDefinitionExecutor(db.Pool(), runtime, modelClient, registry, mcpToolHost, definitionCatalog)
+	if err != nil {
+		slog.Error("Studio Executor invalid", "error", err)
+		os.Exit(1)
+	}
 	remoteFetcher, err := fetcher.NewRemoteClient(
 		config.FetcherURL,
 		&http.Client{Timeout: 30 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)},
@@ -387,6 +392,7 @@ func main() {
 	configuredRegistry, err := agent.NewNanoExecutorRegistry(
 		definitionCatalog, promptCatalog,
 		agent.NewChatLeaderDefinitionExecutor(roleRuntime), agent.NewResearchDefinitionExecutor(roleRuntime),
+		studioExecutor,
 	)
 	if err != nil {
 		slog.Error("Agent Executor Registry invalid", "error", err)
@@ -604,7 +610,7 @@ func shutdownTraceExporter(ctx context.Context, exporter interface {
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@1"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@2"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}

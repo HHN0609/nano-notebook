@@ -29,11 +29,12 @@ func createTraceAnchorInTx(ctx context.Context, tx pgx.Tx, runID string, root ag
 		SemanticConventionVersion: root.SemanticConventionVersion,
 	}
 	if err := tx.QueryRow(ctx, `
-		select coalesce(r.chat_id,product.chat_id),c.notebook_id
+		select coalesce(r.chat_id,chat_product.chat_id,''),coalesce(c.notebook_id,studio_product.notebook_id)
 		from agent_runs r
 		left join agent_trees tree on tree.id=r.tree_id
-		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
-		join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id)
+		left join chat_runs chat_product on chat_product.root_agent_run_id=tree.root_agent_run_id
+		left join chat_chats c on c.id=coalesce(r.chat_id,chat_product.chat_id)
+		left join studio_outputs studio_product on studio_product.root_agent_run_id=tree.root_agent_run_id
 		where r.id = $1
 	`, runID).Scan(&descriptor.ChatID, &descriptor.NotebookID); err != nil {
 		return collector.TraceDescriptor{}, err
@@ -44,10 +45,17 @@ func createTraceAnchorInTx(ctx context.Context, tx pgx.Tx, runID string, root ag
 			schema_version, semantic_convention_version
 		)
 		values($1, $2, $3, $4, $5, $6, $7, $8)
-	`, descriptor.TraceID, descriptor.RunID, descriptor.ChatID, descriptor.NotebookID,
+	`, descriptor.TraceID, descriptor.RunID, nullableText(descriptor.ChatID), descriptor.NotebookID,
 		descriptor.RootSpanID, descriptor.AgentName, descriptor.SchemaVersion,
 		descriptor.SemanticConventionVersion); err != nil {
 		return collector.TraceDescriptor{}, err
 	}
 	return descriptor, nil
+}
+
+func nullableText(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }

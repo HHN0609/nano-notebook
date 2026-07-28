@@ -25,6 +25,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
+	"github.com/huangxinxinyu/nano-notebook/internal/studio"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -68,9 +69,16 @@ type Server struct {
 	adminTraces   collector.QueryClient
 	replaySealer  *replay.Sealer
 	chatAgent     *configuredChatAgent
+	studioAgents  map[studio.Kind]configuredStudioAgent
 }
 
 type configuredChatAgent struct {
+	Release    agentcatalog.Reference
+	Definition agentcatalog.Definition
+	Policy     agentcatalog.ModelPolicy
+}
+
+type configuredStudioAgent struct {
 	Release    agentcatalog.Reference
 	Definition agentcatalog.Definition
 	Policy     agentcatalog.ModelPolicy
@@ -97,6 +105,7 @@ func NewServer(cfg Config, db *DB) *Server {
 	cfg.AgentRun.ID = cfg.AgentConfiguration.ID
 	cfg.AgentRun.ExecutorVersion = leaderProfile.ExecutorVersion
 	var chatAgent *configuredChatAgent
+	studioAgents := make(map[studio.Kind]configuredStudioAgent)
 	if cfg.AgentRelease.Identity != "" {
 		release, ok := cfg.AgentCatalog.ResolveRelease(cfg.AgentRelease)
 		if !ok {
@@ -115,11 +124,29 @@ func NewServer(cfg Config, db *DB) *Server {
 			panic(fmt.Errorf("Agent Definition %s has unknown Model Policy %s", root, definition.ModelPolicy))
 		}
 		chatAgent = &configuredChatAgent{Release: cfg.AgentRelease, Definition: definition, Policy: policy}
+		for kind, purpose := range map[studio.Kind]string{
+			studio.KindReport: "studio_report", studio.KindFlashcards: "studio_flashcards",
+			studio.KindMindMap: "studio_mind_map", studio.KindDataTable: "studio_data_table",
+		} {
+			studioRoot, exists := release.Roots[purpose]
+			if !exists {
+				continue
+			}
+			studioDefinition, exists := cfg.AgentCatalog.ResolveDefinition(studioRoot)
+			if !exists {
+				panic(fmt.Errorf("Agent release %s has unknown Studio root %s", cfg.AgentRelease, studioRoot))
+			}
+			studioPolicy, exists := cfg.AgentCatalog.ResolveModelPolicy(studioDefinition.ModelPolicy)
+			if !exists {
+				panic(fmt.Errorf("Studio Agent Definition %s has unknown Model Policy %s", studioRoot, studioDefinition.ModelPolicy))
+			}
+			studioAgents[kind] = configuredStudioAgent{Release: cfg.AgentRelease, Definition: studioDefinition, Policy: studioPolicy}
+		}
 	}
 	s := &Server{
 		cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(),
 		runHub: newRunHub(), discoveryHub: newRunHub(), sourceHub: newRunHub(), adminTraces: cfg.AdminTraces, replaySealer: cfg.ReplaySealer,
-		chatAgent: chatAgent,
+		chatAgent: chatAgent, studioAgents: studioAgents,
 	}
 	s.routes()
 	return s
@@ -164,6 +191,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/citations/", s.citationByID)
 	s.mux.HandleFunc("/api/v1/source-upload-intents/", s.sourceUploadIntentByID)
 	s.mux.HandleFunc("/api/v1/source-discovery-sessions/", s.sourceDiscoverySessionByID)
+	s.mux.HandleFunc("/api/v1/studio-outputs/", s.studioOutputByID)
 	s.mux.HandleFunc("/api/v1/chats/", s.chatByID)
 	s.mux.HandleFunc("/api/v1/agent-runs/", s.agentRunByID)
 	s.mux.HandleFunc("/api/admin/traces", s.adminTraceList)
@@ -550,6 +578,10 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "chats" {
 		s.notebookChats(w, r, user.ID, parts[0])
+		return
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "studio-outputs" {
+		s.notebookStudioOutputs(w, r, user.ID, parts[0])
 		return
 	}
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "invitations" {
