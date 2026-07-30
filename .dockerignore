@@ -2,6 +2,10 @@
 .planning
 .superpowers
 .worktrees
-web
+web/node_modules
+web/src
+web/public
+web/playwright-report
+web/test-results
 tmp
 *.log
