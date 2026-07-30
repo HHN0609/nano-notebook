@@ -1,0 +1,107 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build web frontend
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            -f infra/control-plane/Dockerfile \
+            -t $ECR_REGISTRY/nano-notebook-control-plane:$IMAGE_TAG \
+            -t $ECR_REGISTRY/nano-notebook-control-plane:latest \
+            .
+          docker push $ECR_REGISTRY/nano-notebook-control-plane:$IMAGE_TAG
+          docker push $ECR_REGISTRY/nano-notebook-control-plane:latest
+
+          docker build \
+            -f infra/worker/Dockerfile \
+            -t $ECR_REGISTRY/nano-notebook-worker:$IMAGE_TAG \
+            -t $ECR_REGISTRY/nano-notebook-worker:latest \
+            .
+          docker push $ECR_REGISTRY/nano-notebook-worker:$IMAGE_TAG
+          docker push $ECR_REGISTRY/nano-notebook-worker:latest
+
+          docker build \
+            -f infra/fetcher/Dockerfile \
+            -t $ECR_REGISTRY/nano-notebook-fetcher:$IMAGE_TAG \
+            -t $ECR_REGISTRY/nano-notebook-fetcher:latest \
+            .
+          docker push $ECR_REGISTRY/nano-notebook-fetcher:$IMAGE_TAG
+          docker push $ECR_REGISTRY/nano-notebook-fetcher:latest
+
+          docker build \
+            -f infra/collector/Dockerfile \
+            -t $ECR_REGISTRY/nano-notebook-collector:$IMAGE_TAG \
+            -t $ECR_REGISTRY/nano-notebook-collector:latest \
+            .
+          docker push $ECR_REGISTRY/nano-notebook-collector:$IMAGE_TAG
+          docker push $ECR_REGISTRY/nano-notebook-collector:latest
+
+          docker build \
+            -f infra/document-renderer/Dockerfile \
+            -t $ECR_REGISTRY/nano-notebook-document-renderer:$IMAGE_TAG \
+            -t $ECR_REGISTRY/nano-notebook-document-renderer:latest \
+            .
+          docker push $ECR_REGISTRY/nano-notebook-document-renderer:$IMAGE_TAG
+          docker push $ECR_REGISTRY/nano-notebook-document-renderer:latest
+
+          docker build \
+            -f infra/nginx/Dockerfile \
+            -t $ECR_REGISTRY/nano-notebook-nginx:$IMAGE_TAG \
+            -t $ECR_REGISTRY/nano-notebook-nginx:latest \
+            .
+          docker push $ECR_REGISTRY/nano-notebook-nginx:$IMAGE_TAG
+          docker push $ECR_REGISTRY/nano-notebook-nginx:latest
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            cd /home/ubuntu/nano-notebook
+
+            git pull origin main
+
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
+              | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
+            export ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
+            export IMAGE_TAG=${{ github.sha }}
+
+            docker compose -f infra/compose/compose.prod.yaml pull
+            docker compose -f infra/compose/compose.prod.yaml down --timeout 30
+            docker compose -f infra/compose/compose.prod.yaml up -d
+
+            docker image prune -af --filter "until=24h"

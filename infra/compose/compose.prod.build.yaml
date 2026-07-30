@@ -1,0 +1,45 @@
+# Compose override for local production-like builds.
+#
+# Usage:
+#   docker compose -f infra/compose/compose.prod.yaml -f infra/compose/compose.prod.build.yaml build
+#   docker compose -f infra/compose/compose.prod.yaml -f infra/compose/compose.prod.build.yaml up -d
+#
+# This swaps ECR image references for local `build:` directives,
+# so you can test the full prod stack without pushing to a registry.
+
+services:
+  nginx:
+    image: ""  # clear inherited image value
+    build:
+      context: ../..
+      dockerfile: infra/nginx/Dockerfile
+
+  control-plane:
+    image: ""
+    build:
+      context: ../..
+      dockerfile: infra/control-plane/Dockerfile
+
+  worker:
+    image: ""
+    build:
+      context: ../..
+      dockerfile: infra/worker/Dockerfile
+
+  fetcher:
+    image: ""
+    build:
+      context: ../..
+      dockerfile: infra/fetcher/Dockerfile
+
+  collector:
+    image: ""
+    build:
+      context: ../..
+      dockerfile: infra/collector/Dockerfile
+
+  document-renderer:
+    image: ""
+    build:
+      context: ../..
+      dockerfile: infra/document-renderer/Dockerfile
