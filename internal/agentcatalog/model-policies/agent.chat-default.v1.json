@@ -1,7 +1,7 @@
 {
   "identity": "agent.chat-default",
   "version": 1,
-  "provider_model": "openai/qwen3.7-plus",
+  "provider_model": "aliyun/qwen3.7-plus",
   "temperature": 0,
   "max_output_tokens": 2048,
   "timeout_ms": 30000
