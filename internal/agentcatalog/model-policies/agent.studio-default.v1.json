@@ -1,7 +1,7 @@
 {
   "identity": "agent.studio-default",
   "version": 1,
-  "provider_model": "aliyun/qwen-plus",
+  "provider_model": "openai/qwen3.7-plus",
   "temperature": 0,
   "max_output_tokens": 4096,
   "timeout_ms": 45000
