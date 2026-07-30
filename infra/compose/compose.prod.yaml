@@ -19,6 +19,9 @@ services:
       NANO_FETCHER_URL: http://fetcher:8083
       NANO_DOCUMENT_RENDERER_URL: http://document-renderer:8084
       NANO_WEB_BASE_URL: http://localhost
+      NANO_COLLECTOR_URL: http://collector:8082
+      NANO_COLLECTOR_QUERY_TOKEN: nano-prod-collector-query-token
+      NANO_COLLECTOR_SERVICE_TOKEN: nano-prod-collector-token
       NANO_BIFROST_URL: http://bifrost:56666
       NANO_QDRANT_COLLECTION: nano-source-evidence-gemini-2-768-v1
       NANO_QDRANT_DENSE_DIMENSIONS: "768"
