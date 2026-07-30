@@ -10,6 +10,7 @@ FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/nano-worker /usr/local/bin/nano-worker
+COPY --from=build /src/evals/rag/pinned-config-v1.json /evals/rag/pinned-config-v1.json
 USER 65532:65532
 EXPOSE 8081
 ENTRYPOINT ["/usr/local/bin/nano-worker"]
