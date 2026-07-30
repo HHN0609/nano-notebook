@@ -45,7 +45,7 @@ services:
         required: true
     environment:
       NANO_WORKER_ADDR: ":8081"
-      NANO_WORKER_DATABASE_URL: postgres://nano:nano@postgres:5432/nano?sslmode=disable
+      NANO_DATABASE_URL: postgres://nano:nano@postgres:5432/nano?sslmode=disable
       NANO_CONTROL_PLANE_URL: http://control-plane:8080
       NANO_FETCHER_URL: http://fetcher:8083
       NANO_DOCUMENT_RENDERER_URL: http://document-renderer:8084
