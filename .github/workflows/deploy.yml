@@ -92,7 +92,7 @@ jobs:
             set -e
             cd /home/ubuntu/nano-notebook
 
-            git fetch origin main
+            git fetch origin
             git reset --hard origin/main
 
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
