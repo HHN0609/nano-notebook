@@ -92,7 +92,8 @@ jobs:
             set -e
             cd /home/ubuntu/nano-notebook
 
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
 
             aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
               | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
