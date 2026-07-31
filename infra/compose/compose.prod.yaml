@@ -26,7 +26,7 @@ services:
       NANO_QDRANT_COLLECTION: nano-source-evidence-gemini-2-768-v1
       NANO_QDRANT_DENSE_DIMENSIONS: "768"
       NANO_QDRANT_URL: http://qdrant:6333
-      NANO_SOURCE_S3_ENDPOINT: minio:9000
+      NANO_SOURCE_S3_ENDPOINT: ${NANO_PUBLIC_HOST}:9000
       NANO_SOURCE_S3_ACCESS_KEY_ID: nano
       NANO_SOURCE_S3_SECRET_ACCESS_KEY: nano-password
       NANO_SOURCE_S3_BUCKET: nano-sources
@@ -174,6 +174,8 @@ services:
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
     environment:
       MINIO_ROOT_USER: nano
       MINIO_ROOT_PASSWORD: nano-password
