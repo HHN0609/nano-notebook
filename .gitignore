@@ -9,3 +9,4 @@ playwright-report/
 infra/compose/.env
 infra/bifrost/config.json
 .superpowers
+.claude
