@@ -26,9 +26,18 @@ type PostgresRuntime struct {
 	traceSink    TraceSink
 	replayStager ReplayStager
 	grounder     *GroundingService
+	metrics      *TaskMetricsRecorder
 }
 
 type RuntimeOption func(*PostgresRuntime)
+
+// WithTaskMetrics attaches the Sprint 12 task-lifecycle metrics recorder
+// (docs/sprint/SPRINT-12-PRD.md section 4.3).
+func WithTaskMetrics(recorder *TaskMetricsRecorder) RuntimeOption {
+	return func(runtime *PostgresRuntime) {
+		runtime.metrics = recorder
+	}
+}
 
 func WithCommitFunc(commit func(context.Context, pgx.Tx) error) RuntimeOption {
 	return func(runtime *PostgresRuntime) {
@@ -424,8 +433,49 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 	if err := r.commit(ctx, tx); err != nil {
 		return err
 	}
+	r.recordTerminalMetrics(ctx, attempt.RunID, attempt.AttemptNo, "completed", "")
 	publishCommittedTrace(traceCtx, traceScope)
 	return nil
+}
+
+// recordTerminalMetrics emits the Sprint 12 task-lifecycle metrics for a
+// Run that just reached a terminal state, using a fresh short-lived lookup
+// (not the just-committed transaction, which is already closed) — mirrors
+// how postgres_runtime.go's own commit-then-notify calls already run after
+// the transaction that performed the write. A nil recorder is a no-op.
+func (r *PostgresRuntime) recordTerminalMetrics(ctx context.Context, runID string, attemptNo int, outcome, errorCode string) {
+	if r.metrics == nil || r.pool == nil {
+		return
+	}
+	var definitionIdentity *string
+	var definitionVersion *int
+	var admittedAt time.Time
+	lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := r.pool.QueryRow(lookupCtx, `select definition_identity,definition_version,created_at from agent_runs where id=$1`, runID).
+		Scan(&definitionIdentity, &definitionVersion, &admittedAt); err != nil {
+		return
+	}
+	identity := ""
+	if definitionIdentity != nil {
+		identity = *definitionIdentity
+	}
+	version := 0
+	if definitionVersion != nil {
+		version = *definitionVersion
+	}
+	taskKind, taskVariant := ClassifyTask(identity, version)
+	disposition := AttemptCompleted
+	resolvedOutcome := outcome
+	if outcome == "failed" {
+		disposition = AttemptTerminal
+		resolvedOutcome = TaskOutcomeForRun("failed", errorCode)
+	}
+	r.metrics.RecordAttempt(taskKind, taskVariant, string(disposition))
+	r.metrics.RecordTerminal(taskKind, taskVariant, resolvedOutcome, attemptNo, admittedAt)
+	if errorCode != "" {
+		r.metrics.RecordError(taskKind, ErrorLayerForCode(errorCode), errorCode)
+	}
 }
 
 func storeConfiguredFinalResult(ctx context.Context, tx pgx.Tx, runID, text string) error {
@@ -587,6 +637,7 @@ func (r *PostgresRuntime) Fail(ctx context.Context, attempt Attempt, errorCode s
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
+	r.recordTerminalMetrics(ctx, attempt.RunID, attempt.AttemptNo, "failed", errorCode)
 	publishCommittedTrace(traceCtx, traceScope)
 	return nil
 }

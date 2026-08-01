@@ -213,7 +213,7 @@ func TestStudioExecutorNormalizesNumericFlashcardIDsBeforePublishing(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	executor, err := agent.NewStudioDefinitionExecutor(api.db.Pool(), runtime, model, actions, host, catalog)
+	executor, err := agent.NewStudioDefinitionExecutor(api.db.Pool(), runtime, model, actions, host, catalog, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

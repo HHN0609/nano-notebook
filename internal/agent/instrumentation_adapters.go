@@ -28,6 +28,7 @@ type ModelTraceOptions struct {
 	Phase            string
 	Role             AgentRole
 	Prompt           PromptVersionRef
+	Metrics          *TaskMetricsRecorder
 }
 
 func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model DecisionModel, request models.ModelRequest, decisionOrdinal int, optionValues ...ModelTraceOptions) (models.ModelOutcome, error) {
@@ -78,6 +79,11 @@ func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model Dec
 	var decisionAttachmentID string
 	return instrumentation.Invoke(ctx, tracer, agentobs.SpanStart{IdentityKey: options.StartIdentity, Name: semconv.ModelCall, Attributes: startAttributes}, func(callContext context.Context) (models.ModelOutcome, error) {
 		outcome, err := model.Decide(callContext, request)
+		modelOutcome := "completed"
+		if err != nil {
+			modelOutcome = "failed"
+		}
+		options.Metrics.RecordModelCall(request.Model, string(outcome.Metadata.ResultKind), modelOutcome, outcome.Metadata.Latency)
 		if err == nil {
 			if metadataErr := outcome.Metadata.Validate(); metadataErr != nil {
 				return outcome, &models.ModelError{Kind: models.ErrorInvalidResponse, Err: metadataErr}

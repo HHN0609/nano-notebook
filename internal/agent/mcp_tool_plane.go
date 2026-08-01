@@ -193,6 +193,7 @@ type MCPToolHost struct {
 	authority MCPToolAuthority
 	mu        sync.RWMutex
 	contexts  map[string]attemptToolContext
+	metrics   *TaskMetricsRecorder
 }
 
 func NewMCPToolHost(catalog agentcatalog.Catalog, registry *MCPToolRegistry, authority MCPToolAuthority) (*MCPToolHost, error) {
@@ -200,6 +201,13 @@ func NewMCPToolHost(catalog agentcatalog.Catalog, registry *MCPToolRegistry, aut
 		return nil, errors.New("MCP Tool Host dependencies are incomplete")
 	}
 	return &MCPToolHost{catalog: catalog, registry: registry, authority: authority, contexts: make(map[string]attemptToolContext)}, nil
+}
+
+// WithMetrics attaches the Sprint 12 task-lifecycle metrics recorder and
+// returns the same Host, chainable onto NewMCPToolHost.
+func (h *MCPToolHost) WithMetrics(recorder *TaskMetricsRecorder) *MCPToolHost {
+	h.metrics = recorder
+	return h
 }
 
 type MCPAttemptSession struct {
@@ -400,10 +408,21 @@ func (a mcpSessionAction) Execute(ctx context.Context, request ActionRequest) (A
 	return a.session.CallTool(ctx, a.tool.Name, request.Input, request.ActionID)
 }
 
-func (s *MCPAttemptSession) CallTool(ctx context.Context, name string, input json.RawMessage, actionID string) (ActionResult, error) {
+func (s *MCPAttemptSession) CallTool(ctx context.Context, name string, input json.RawMessage, actionID string) (toolResult ActionResult, callErr error) {
 	if s == nil || s.host == nil || s.clientSession == nil {
 		return ActionResult{}, &ToolCallError{Kind: ToolErrorInvariant, Code: "attempt_session_closed"}
 	}
+	startedAt := time.Now()
+	defer func() {
+		if s.host.metrics == nil {
+			return
+		}
+		outcome := "completed"
+		if callErr != nil {
+			outcome = "failed"
+		}
+		s.host.metrics.RecordToolExecution(name, outcome, time.Since(startedAt))
+	}()
 	tool, allowed := s.byName[name]
 	if !allowed {
 		return ActionResult{}, &ToolCallError{Kind: ToolErrorAuthorization, Code: "tool_not_allowed"}

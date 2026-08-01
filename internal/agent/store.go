@@ -120,8 +120,19 @@ func (s *Store) ActiveByUser(ctx context.Context, userID string) (RunRef, bool, 
 // admission-pinned deadline has passed. Empty filters are used by the Worker;
 // request-principal callers pass both user and/or Run identity.
 func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int, error) {
+	return s.ExpireIfOverdueWithMetrics(ctx, userID, runID, nil)
+}
+
+// ExpireIfOverdueWithMetrics is ExpireIfOverdue plus Sprint 12 Task-terminal
+// metrics emission (docs/sprint/SPRINT-12-PRD.md criterion 20: deadline
+// exhaustion is an "expired" outcome, attributed to the system, not the
+// Member). Metrics are emitted once each overdue Run's transition SQL has
+// succeeded, before the caller's enclosing transaction commits — the same
+// small gap every write-then-emit call site in this Sprint accepts, since a
+// metrics counter cannot itself participate in a Postgres transaction.
+func (s *Store) ExpireIfOverdueWithMetrics(ctx context.Context, userID, runID string, metrics *TaskMetricsRecorder) (int, error) {
 	rows, err := s.db.Query(ctx, `
-		select r.id, j.id, j.attempt_no, j.status
+		select r.id, j.id, j.attempt_no, j.status, r.definition_identity, r.definition_version, r.created_at
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
 		left join agent_trees tree on tree.id=r.tree_id
@@ -139,15 +150,19 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 		return 0, err
 	}
 	type overdueRun struct {
-		runID     string
-		jobID     string
-		attemptNo int
-		jobStatus string
+		runID              string
+		jobID              string
+		attemptNo          int
+		jobStatus          string
+		definitionIdentity *string
+		definitionVersion  *int
+		admittedAt         time.Time
 	}
 	overdue := make([]overdueRun, 0)
 	for rows.Next() {
 		var item overdueRun
-		if err := rows.Scan(&item.runID, &item.jobID, &item.attemptNo, &item.jobStatus); err != nil {
+		if err := rows.Scan(&item.runID, &item.jobID, &item.attemptNo, &item.jobStatus,
+			&item.definitionIdentity, &item.definitionVersion, &item.admittedAt); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -209,6 +224,20 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 		}
 		if _, err := s.db.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, item.runID); err != nil {
 			return 0, err
+		}
+		if metrics != nil {
+			identity := ""
+			if item.definitionIdentity != nil {
+				identity = *item.definitionIdentity
+			}
+			version := 0
+			if item.definitionVersion != nil {
+				version = *item.definitionVersion
+			}
+			taskKind, taskVariant := ClassifyTask(identity, version)
+			metrics.RecordAttempt(taskKind, taskVariant, string(AttemptTerminal))
+			metrics.RecordTerminal(taskKind, taskVariant, "expired", terminalAttemptNo, item.admittedAt)
+			metrics.RecordError(taskKind, "lifecycle", "run_deadline_exceeded")
 		}
 	}
 	return len(overdue), nil
@@ -431,19 +460,31 @@ func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]Run
 }
 
 func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, error) {
+	return s.CancelWithMetrics(ctx, userID, runID, nil)
+}
+
+// CancelWithMetrics is Cancel plus Sprint 12 Task-terminal metrics emission
+// for the "cancelled" outcome (PRD criterion 19: excluded from the success
+// rate numerator and denominator by the recording rule, but still counted).
+func (s *Store) CancelWithMetrics(ctx context.Context, userID, runID string, metrics *TaskMetricsRecorder) (RunSnapshot, error) {
 	var run RunSnapshot
 	var jobID string
 	var attemptNo int
 	var jobStatus string
+	var definitionIdentity *string
+	var definitionVersion *int
+	var admittedAt time.Time
 	err := s.db.QueryRow(ctx, `
-		select r.id,coalesce(r.input_message_id,product.input_message_id),r.status,r.error_code,j.id,j.attempt_no,j.status
+		select r.id,coalesce(r.input_message_id,product.input_message_id),r.status,r.error_code,j.id,j.attempt_no,j.status,
+			r.definition_identity, r.definition_version, r.created_at
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
 		left join chat_runs product on product.root_agent_run_id=r.id
 		where r.id=$1 and coalesce(r.user_id,product.user_id)=$2
 		  and ((r.runtime_kind='legacy_role' and r.agent_role='leader') or r.runtime_kind='configured')
 		for update of r, j`, runID, userID).
-		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &jobID, &attemptNo, &jobStatus)
+		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &jobID, &attemptNo, &jobStatus,
+			&definitionIdentity, &definitionVersion, &admittedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunSnapshot{}, ErrRunNotFound
 	}
@@ -521,6 +562,19 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 	}
 	if _, err := s.db.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, runID); err != nil {
 		return RunSnapshot{}, err
+	}
+	if metrics != nil {
+		identity := ""
+		if definitionIdentity != nil {
+			identity = *definitionIdentity
+		}
+		version := 0
+		if definitionVersion != nil {
+			version = *definitionVersion
+		}
+		taskKind, taskVariant := ClassifyTask(identity, version)
+		metrics.RecordAttempt(taskKind, taskVariant, string(AttemptAbandoned))
+		metrics.RecordTerminal(taskKind, taskVariant, "cancelled", terminalAttemptNo, admittedAt)
 	}
 	run.Status = "cancelled"
 	run.ErrorCode = nil

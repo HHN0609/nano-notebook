@@ -60,6 +60,15 @@ type Controller struct {
 	registry      *ActionRegistry
 	mcpHost       *MCPToolHost
 	mcpDefinition agentcatalog.Reference
+	metrics       *TaskMetricsRecorder
+}
+
+// WithControllerMetrics attaches the Sprint 12 task-lifecycle metrics
+// recorder and returns the same Controller, chainable onto either
+// constructor below.
+func (c *Controller) WithControllerMetrics(recorder *TaskMetricsRecorder) *Controller {
+	c.metrics = recorder
+	return c
 }
 
 var _ ControllerRuntime = (*PostgresRuntime)(nil)
@@ -179,6 +188,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 				StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
 				DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: c.replayStager(),
 				Role: RoleLeader, Prompt: composerPromptTraceRef(execution.PromptVersion),
+				Metrics: c.metrics,
 			})
 		} else {
 			outcome, err = c.model.Decide(ctx, request)

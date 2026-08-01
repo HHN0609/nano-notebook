@@ -20,15 +20,19 @@ type Queue struct {
 	pool          *pgxpool.Pool
 	leaseDuration time.Duration
 	traceSink     agent.TraceSink
+	metrics       *agent.TaskMetricsRecorder
 }
 
 type ClaimedJob struct {
-	ID          string
-	RunID       string
-	AttemptNo   int
-	LeaseToken  string
-	MaxAttempts int
-	DeadlineAt  time.Time
+	ID                 string
+	RunID              string
+	AttemptNo          int
+	LeaseToken         string
+	MaxAttempts        int
+	DeadlineAt         time.Time
+	DefinitionIdentity string
+	DefinitionVersion  int
+	AdmittedAt         time.Time
 }
 
 func NewQueue(pool *pgxpool.Pool) *Queue {
@@ -37,6 +41,14 @@ func NewQueue(pool *pgxpool.Pool) *Queue {
 
 func NewQueueWithTraceSink(pool *pgxpool.Pool, sink agent.TraceSink) *Queue {
 	return &Queue{pool: pool, leaseDuration: DefaultLeaseDuration, traceSink: sink}
+}
+
+// WithMetrics attaches a Task metrics recorder and returns the same Queue,
+// so callers can chain it onto either constructor above without another
+// signature variant.
+func (q *Queue) WithMetrics(recorder *agent.TaskMetricsRecorder) *Queue {
+	q.metrics = recorder
+	return q
 }
 
 func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
@@ -65,10 +77,14 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 
 		var job ClaimedJob
 		var status string
+		var availableAt time.Time
+		var definitionIdentity *string
+		var definitionVersion *int
 		err = tx.QueryRow(ctx, `
 			select j.id, j.run_id, j.status, j.attempt_no, coalesce(j.lease_token::text,''),
 				coalesce(profile.max_attempts,(definition.limits->>'attempts')::integer),
-				coalesce(r.deadline_at,tree.absolute_deadline)
+				coalesce(r.deadline_at,tree.absolute_deadline),
+				j.available_at, r.definition_identity, r.definition_version, r.created_at
 			from agent_jobs j
 			join agent_runs r on r.id = j.run_id
 			left join agent_role_profiles profile on profile.configuration_set_id=r.agent_config_id and profile.role=r.agent_role
@@ -78,7 +94,8 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 				or (j.status = 'running' and r.status = 'running' and j.lease_expires_at <= now())
 			order by j.available_at, j.created_at, j.id
 			for update of r, j skip locked
-			limit 1`).Scan(&job.ID, &job.RunID, &status, &job.AttemptNo, &job.LeaseToken, &job.MaxAttempts, &job.DeadlineAt)
+			limit 1`).Scan(&job.ID, &job.RunID, &status, &job.AttemptNo, &job.LeaseToken, &job.MaxAttempts, &job.DeadlineAt,
+			&availableAt, &definitionIdentity, &definitionVersion, &job.AdmittedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			if err := tx.Commit(ctx); err != nil {
 				return ClaimedJob{}, false, err
@@ -91,6 +108,13 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		if err != nil {
 			return ClaimedJob{}, false, err
 		}
+		if definitionIdentity != nil {
+			job.DefinitionIdentity = *definitionIdentity
+		}
+		if definitionVersion != nil {
+			job.DefinitionVersion = *definitionVersion
+		}
+		taskKind, taskVariant := agent.ClassifyTask(job.DefinitionIdentity, job.DefinitionVersion)
 
 		if status == "running" && job.AttemptNo >= job.MaxAttempts {
 			if err := exhaustRecovery(traceCtx, tx, job); err != nil {
@@ -102,8 +126,12 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 			if traceScope != nil {
 				_ = traceScope.PublishAfterCommit(traceCtx)
 			}
+			q.metrics.RecordAttempt(taskKind, taskVariant, string(agent.AttemptTerminal))
+			q.metrics.RecordTerminal(taskKind, taskVariant, "expired", job.AttemptNo, job.AdmittedAt)
+			q.metrics.RecordError(taskKind, "lifecycle", "recovery_exhausted")
 			continue
 		}
+		q.metrics.RecordQueueWait(taskKind, taskVariant, time.Since(availableAt))
 
 		previousAttemptNo := job.AttemptNo
 		job.AttemptNo++
@@ -246,6 +274,7 @@ func (q *Queue) ResolveAttempt(ctx context.Context, job ClaimedJob, requested ag
 	`, job.ID, job.RunID).Scan(&status, &deadline, &maxAttempts, &currentLease, &storedErrorCode); err != nil {
 		return agent.AttemptResolution{}, err
 	}
+	taskKind, taskVariant := agent.ClassifyTask(job.DefinitionIdentity, job.DefinitionVersion)
 	if status != "running" || currentLease == nil || *currentLease != job.LeaseToken {
 		actual, ok := terminalJobDisposition(status, storedErrorCode)
 		if !ok {
@@ -296,6 +325,7 @@ func (q *Queue) ResolveAttempt(ctx context.Context, job ClaimedJob, requested ag
 				return agent.AttemptResolution{}, err
 			}
 			_ = traceScope.PublishAfterCommit(traceCtx)
+			q.metrics.RecordAttempt(taskKind, taskVariant, string(agent.AttemptRetryable))
 			return actual, nil
 		}
 	}
@@ -312,6 +342,9 @@ func (q *Queue) ResolveAttempt(ctx context.Context, job ClaimedJob, requested ag
 		return agent.AttemptResolution{}, err
 	}
 	_ = traceScope.PublishAfterCommit(traceCtx)
+	q.metrics.RecordAttempt(taskKind, taskVariant, string(agent.AttemptTerminal))
+	q.metrics.RecordTerminal(taskKind, taskVariant, agent.TaskOutcomeForRun("failed", actual.ErrorCode), job.AttemptNo, job.AdmittedAt)
+	q.metrics.RecordError(taskKind, agent.ErrorLayerForCode(actual.ErrorCode), actual.ErrorCode)
 	return actual, nil
 }
 

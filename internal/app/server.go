@@ -23,6 +23,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/notebook"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/studio"
@@ -55,6 +56,7 @@ type Config struct {
 	SourceUploads      SourceUploadStore
 	SourceFetcher      fetcher.SnapshotFetcher
 	SourceSnapshots    SourceSnapshotStore
+	Metrics            *metrics.Catalog
 }
 
 type Server struct {
@@ -70,6 +72,8 @@ type Server struct {
 	replaySealer  *replay.Sealer
 	chatAgent     *configuredChatAgent
 	studioAgents  map[studio.Kind]configuredStudioAgent
+	metrics       *metrics.Catalog
+	taskMetrics   *agent.TaskMetricsRecorder
 }
 
 type configuredChatAgent struct {
@@ -145,15 +149,22 @@ func NewServer(cfg Config, db *DB) *Server {
 	}
 	s := &Server{
 		cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(),
-		runHub: newRunHub(), discoveryHub: newRunHub(), sourceHub: newRunHub(), adminTraces: cfg.AdminTraces, replaySealer: cfg.ReplaySealer,
+		runHub: newRunHubWithMetrics(cfg.Metrics), discoveryHub: newRunHubWithMetrics(cfg.Metrics), sourceHub: newRunHubWithMetrics(cfg.Metrics),
+		adminTraces: cfg.AdminTraces, replaySealer: cfg.ReplaySealer,
 		chatAgent: chatAgent, studioAgents: studioAgents,
+		metrics: cfg.Metrics, taskMetrics: agent.NewTaskMetricsRecorder(cfg.Metrics),
 	}
 	s.routes()
 	return s
 }
 
 func (s *Server) Handler() http.Handler {
-	return requestLogger(s.withTraceDelivery(s.mux))
+	// withHTTPMetrics must wrap s.mux directly: net/http.ServeMux sets
+	// r.Pattern as a side effect of routing the exact *http.Request it
+	// receives, and withTraceDelivery below calls r.WithContext, which
+	// returns a shallow copy — wrapping outside that copy would always see
+	// an empty Pattern.
+	return requestLogger(s.withTraceDelivery(s.withHTTPMetrics(s.mux)))
 }
 
 func (s *Server) withTraceDelivery(next http.Handler) http.Handler {
@@ -1050,7 +1061,7 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, userID, runID
 	var run agent.RunSnapshot
 	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		var err error
-		run, err = agent.NewStore(tx).Cancel(r.Context(), userID, runID)
+		run, err = agent.NewStore(tx).CancelWithMetrics(r.Context(), userID, runID, s.taskMetrics)
 		return err
 	})
 	if errors.Is(err, agent.ErrRunNotFound) {
@@ -1163,6 +1174,9 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, userID, runID
 	}
 	wake, unsubscribe := s.runHub.subscribe(runID)
 	defer unsubscribe()
+	sse := newSSEMetricsScope(s.metrics, "run")
+	defer func() { sse.finish("server_shutdown") }()
+	connectedAt := time.Now()
 	projection, err := s.runProjection(r.Context(), userID, runID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
@@ -1172,10 +1186,14 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, userID, runID
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	if err := writeRunEvent(w, projection); err != nil {
+		sse.finish("error")
 		return
 	}
+	sse.eventSent("run")
+	sse.recordFirstProgress(s.taskMetrics, "other", connectedAt)
 	flusher.Flush()
 	if terminalRun(projection.Run.Status) {
+		sse.finish("terminal")
 		return
 	}
 	heartbeat := time.NewTicker(15 * time.Second)
@@ -1183,33 +1201,44 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, userID, runID
 	for {
 		select {
 		case <-r.Context().Done():
+			sse.finish("client_disconnect")
 			return
 		case <-heartbeat.C:
 			projection, err := s.runProjection(r.Context(), userID, runID)
 			if err != nil {
+				sse.finish("error")
 				return
 			}
 			if terminalRun(projection.Run.Status) {
 				if err := writeRunEvent(w, projection); err != nil {
+					sse.finish("error")
 					return
 				}
+				sse.eventSent("run")
 				flusher.Flush()
+				sse.finish("terminal")
 				return
 			}
 			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+				sse.finish("error")
 				return
 			}
+			sse.eventSent("heartbeat")
 			flusher.Flush()
 		case <-wake:
 			projection, err := s.runProjection(r.Context(), userID, runID)
 			if err != nil {
+				sse.finish("error")
 				return
 			}
 			if err := writeRunEvent(w, projection); err != nil {
+				sse.finish("error")
 				return
 			}
+			sse.eventSent("run")
 			flusher.Flush()
 			if terminalRun(projection.Run.Status) {
+				sse.finish("terminal")
 				return
 			}
 		}
@@ -1220,7 +1249,7 @@ func (s *Server) runProjection(ctx context.Context, userID, runID string) (agent
 	var projection agent.RunProjection
 	err := s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
 		store := agent.NewStore(tx)
-		if _, err := store.ExpireIfOverdue(ctx, userID, runID); err != nil {
+		if _, err := store.ExpireIfOverdueWithMetrics(ctx, userID, runID, s.taskMetrics); err != nil {
 			return err
 		}
 		var err error
@@ -1319,7 +1348,7 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 			return nil
 		}
 		agentStore := agent.NewStore(tx)
-		if _, err := agentStore.ExpireIfOverdue(r.Context(), userID, ""); err != nil {
+		if _, err := agentStore.ExpireIfOverdueWithMetrics(r.Context(), userID, "", s.taskMetrics); err != nil {
 			return err
 		}
 		if _, active, err := agentStore.ActiveByUser(r.Context(), userID); err != nil {

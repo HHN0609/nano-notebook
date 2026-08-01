@@ -8,6 +8,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -31,6 +32,15 @@ type Service struct {
 	heartbeatInterval time.Duration
 	leaseDuration     time.Duration
 	maxConcurrency    int
+	metrics           *metrics.Catalog
+}
+
+// WithMetrics attaches the leak-detection gauges nano_worker_inflight_attempts
+// and nano_worker_heartbeat_goroutines (PRD criterion 55) and returns the
+// same Service, chainable onto either constructor above.
+func (s *Service) WithMetrics(catalog *metrics.Catalog) *Service {
+	s.metrics = catalog
+	return s
 }
 
 func NewService(pool *pgxpool.Pool, queue JobQueue, executor Executor, scanInterval, runTimeout time.Duration) *Service {
@@ -81,6 +91,9 @@ func (s *Service) ProcessAvailable(ctx context.Context) (int, error) {
 			}
 			processed++
 			inFlight++
+			if s.metrics != nil {
+				s.metrics.WorkerInflightAttempts.Inc()
+			}
 			go func() {
 				results <- result{job: job, err: s.executeClaim(ctx, job)}
 			}()
@@ -90,6 +103,9 @@ func (s *Service) ProcessAvailable(ctx context.Context) (int, error) {
 		}
 		completed := <-results
 		inFlight--
+		if s.metrics != nil {
+			s.metrics.WorkerInflightAttempts.Dec()
+		}
 		if completed.err != nil {
 			processErr = errors.Join(processErr, completed.err)
 			slog.Error("agent run execution failed", "run_id", completed.job.RunID, "job_id", completed.job.ID, "error", completed.err)
@@ -104,8 +120,14 @@ func (s *Service) executeClaim(ctx context.Context, job jobs.ClaimedJob) error {
 	stopHeartbeat := make(chan struct{})
 	heartbeatDone := make(chan struct{})
 	heartbeatFailure := make(chan error, 1)
+	if s.metrics != nil {
+		s.metrics.WorkerHeartbeatGoroutines.Inc()
+	}
 	go func() {
 		defer close(heartbeatDone)
+		if s.metrics != nil {
+			defer s.metrics.WorkerHeartbeatGoroutines.Dec()
+		}
 		ticker := time.NewTicker(s.heartbeatInterval)
 		defer ticker.Stop()
 		for {

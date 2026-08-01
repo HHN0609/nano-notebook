@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/chat"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
 	"github.com/jackc/pgx/v5"
@@ -36,7 +37,7 @@ func (s *Server) streamSourceDiscovery(w http.ResponseWriter, r *http.Request, u
 		}
 		return
 	}
-	streamFullSnapshots(w, r, "discovery", wake, func(ctx context.Context) (any, error) {
+	streamFullSnapshots(w, r, s.metrics, "source_discovery", "discovery", wake, func(ctx context.Context) (any, error) {
 		session, err := s.sourceDiscoveryProjection(ctx, userID, sessionID)
 		if err != nil {
 			return nil, err
@@ -71,7 +72,7 @@ func (s *Server) streamNotebookSources(w http.ResponseWriter, r *http.Request, u
 		}
 		return
 	}
-	streamFullSnapshots(w, r, "sources", wake, func(ctx context.Context) (any, error) {
+	streamFullSnapshots(w, r, s.metrics, "notebook_sources", "sources", wake, func(ctx context.Context) (any, error) {
 		return s.notebookSourcesProjection(ctx, userID, notebookID, chatID)
 	})
 }
@@ -103,7 +104,7 @@ func (s *Server) notebookSourcesProjection(ctx context.Context, userID, notebook
 	return projection, err
 }
 
-func streamFullSnapshots(w http.ResponseWriter, r *http.Request, eventName string, wake <-chan struct{}, load func(context.Context) (any, error)) {
+func streamFullSnapshots(w http.ResponseWriter, r *http.Request, catalog *metrics.Catalog, streamLabel, eventName string, wake <-chan struct{}, load func(context.Context) (any, error)) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, r, http.StatusInternalServerError, "stream_unsupported", "error.internal")
@@ -114,29 +115,38 @@ func streamFullSnapshots(w http.ResponseWriter, r *http.Request, eventName strin
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
+	sse := newSSEMetricsScope(catalog, streamLabel)
+	defer func() { sse.finish("server_shutdown") }()
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	if err := writeProjectionEvent(w, eventName, projection); err != nil {
+		sse.finish("error")
 		return
 	}
+	sse.eventSent(eventName)
 	flusher.Flush()
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
+			sse.finish("client_disconnect")
 			return
 		case <-heartbeat.C:
 			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+				sse.finish("error")
 				return
 			}
+			sse.eventSent("heartbeat")
 			flusher.Flush()
 		case <-wake:
 			projection, err := load(r.Context())
 			if err != nil || writeProjectionEvent(w, eventName, projection) != nil {
+				sse.finish("error")
 				return
 			}
+			sse.eventSent(eventName)
 			flusher.Flush()
 		}
 	}

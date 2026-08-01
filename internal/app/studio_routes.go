@@ -72,7 +72,7 @@ func (s *Server) streamStudioOutput(w http.ResponseWriter, r *http.Request, user
 	}
 	wake, unsubscribe := s.runHub.subscribe(initial.RunID)
 	defer unsubscribe()
-	streamFullSnapshots(w, r, "studio-output", wake, func(ctx context.Context) (any, error) {
+	streamFullSnapshots(w, r, s.metrics, "studio_output", "studio-output", wake, func(ctx context.Context) (any, error) {
 		output, err := s.studioOutputProjection(ctx, userID, outputID)
 		if err != nil {
 			return nil, err

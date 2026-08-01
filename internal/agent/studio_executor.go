@@ -29,6 +29,7 @@ func NewStudioDefinitionExecutor(
 	registry *ActionRegistry,
 	host *MCPToolHost,
 	catalog agentcatalog.Catalog,
+	metricsRecorder *TaskMetricsRecorder,
 ) (*StudioDefinitionExecutor, error) {
 	if pool == nil || base == nil || model == nil || registry == nil || host == nil {
 		return nil, errors.New("Studio Executor dependencies are incomplete")
@@ -41,7 +42,7 @@ func NewStudioDefinitionExecutor(
 		if !ok || definition.Executor != "studio_structured_output" {
 			return nil, fmt.Errorf("Studio Definition %s is unavailable", parsed)
 		}
-		executor.controllers[parsed] = NewMCPController(runtime, model, registry, host, parsed)
+		executor.controllers[parsed] = NewMCPController(runtime, model, registry, host, parsed).WithControllerMetrics(metricsRecorder)
 	}
 	return executor, nil
 }

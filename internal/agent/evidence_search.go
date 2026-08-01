@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
@@ -30,6 +31,14 @@ type EvidenceSearchService struct {
 	pool    *pgxpool.Pool
 	vectors evidenceVectorSearcher
 	models  evidenceModelCapabilities
+	metrics *TaskMetricsRecorder
+}
+
+// WithMetrics attaches the Sprint 12 task-lifecycle metrics recorder and
+// returns the same Service, chainable onto NewEvidenceSearchService.
+func (s *EvidenceSearchService) WithMetrics(recorder *TaskMetricsRecorder) *EvidenceSearchService {
+	s.metrics = recorder
+	return s
 }
 
 type pinnedEvidence struct {
@@ -113,11 +122,50 @@ func (s *EvidenceSearchService) SearchEvidence(ctx context.Context, attempt Atte
 			return outcome.CandidateIDs, err
 		},
 	}
-	return pipeline.Search(ctx, retrieval.SearchRequest{
+	searchStartedAt := time.Now()
+	result, searchErr := pipeline.Search(ctx, retrieval.SearchRequest{
 		Query: query, Scope: retrieval.Scope{NotebookID: scope.NotebookID, SourceIDs: sourceIDs, RevisionIDs: revisionIDs},
 		DenseLimit: scope.Version.Config.DenseCandidates, SparseLimit: scope.Version.Config.SparseCandidates,
 		RerankLimit: rerankLimit, MinimumSurvivors: 1, RRFK: scope.Version.Config.RRFK,
 	})
+	s.recordSearchMetrics(result, searchErr, searchStartedAt)
+	return result, searchErr
+}
+
+// recordSearchMetrics emits nano_retrieval_search_seconds, nano_retrieval_stage_seconds,
+// and nano_retrieval_degraded_total from the SearchDiagnostics that
+// retrieval.Pipeline.Search already computed (internal/retrieval/pipeline.go),
+// without adding any new timing code inside internal/retrieval itself
+// (PRD criteria 38-39, 71).
+func (s *EvidenceSearchService) recordSearchMetrics(result retrieval.SearchResult, searchErr error, startedAt time.Time) {
+	if s.metrics == nil {
+		return
+	}
+	outcome := "completed"
+	if searchErr != nil {
+		outcome = "failed"
+	}
+	s.metrics.RecordRetrievalSearch(outcome, time.Since(startedAt))
+	if searchErr != nil {
+		return
+	}
+	stages := map[string]retrieval.SearchStageDiagnostics{
+		"dense": result.Diagnostics.Dense, "bm25": result.Diagnostics.BM25, "fuse": result.Diagnostics.Fused,
+		"evidence_load": result.Diagnostics.EvidenceLoad, "rerank": result.Diagnostics.Rerank,
+	}
+	for stage, diagnostics := range stages {
+		if diagnostics.DurationNanoseconds == 0 && !diagnostics.Completed {
+			continue
+		}
+		stageOutcome := "completed"
+		if !diagnostics.Completed {
+			stageOutcome = "failed"
+		}
+		s.metrics.RecordRetrievalStage(stage, stageOutcome, time.Duration(diagnostics.DurationNanoseconds))
+	}
+	for _, degradation := range result.Degradations {
+		s.metrics.RecordRetrievalDegraded(degradation)
+	}
 }
 
 func (s *EvidenceSearchService) loadPinnedScope(ctx context.Context, attempt Attempt) (pinnedSearchScope, error) {

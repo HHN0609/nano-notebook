@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/jackc/pgx/v5"
@@ -31,10 +32,18 @@ type Lease struct {
 type Queue struct {
 	pool          *pgxpool.Pool
 	leaseDuration time.Duration
+	metrics       *agent.TaskMetricsRecorder
 }
 
 func NewQueue(pool *pgxpool.Pool, leaseDuration time.Duration) *Queue {
 	return &Queue{pool: pool, leaseDuration: leaseDuration}
+}
+
+// WithMetrics attaches the Sprint 12 task-lifecycle metrics recorder and
+// returns the same Queue, chainable onto NewQueue.
+func (q *Queue) WithMetrics(recorder *agent.TaskMetricsRecorder) *Queue {
+	q.metrics = recorder
+	return q
 }
 
 func (q *Queue) Claim(ctx context.Context) (Lease, bool, error) {
@@ -346,18 +355,21 @@ func (q *Queue) finish(ctx context.Context, jobID, leaseToken string, succeeded 
 	var sourceID, notebookID, inputKind, originalObjectKey string
 	var discoveryUserID *string
 	var current source.State
+	var attemptNo int
+	var admittedAt time.Time
 	err = tx.QueryRow(ctx, `
 		select s.id, s.state, s.notebook_id, s.input_kind, s.original_object_key,
 			(select session.user_id
 			 from source_discovery_candidates candidate
 			 join source_discovery_sessions session on session.id=candidate.session_id
 			 where candidate.source_id=s.id
-			 order by candidate.updated_at desc,candidate.id limit 1)
+			 order by candidate.updated_at desc,candidate.id limit 1),
+			j.attempt_no, j.created_at
 		from source_processing_jobs j
 		join source_sources s on s.id=j.source_id
 		where j.id=$1 and j.status='running' and j.lease_token=$2::uuid and j.lease_expires_at > now()
 		for update of j, s
-	`, jobID, leaseToken).Scan(&sourceID, &current, &notebookID, &inputKind, &originalObjectKey, &discoveryUserID)
+	`, jobID, leaseToken).Scan(&sourceID, &current, &notebookID, &inputKind, &originalObjectKey, &discoveryUserID, &attemptNo, &admittedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrLeaseLost
 	}
@@ -393,7 +405,26 @@ func (q *Queue) finish(ctx context.Context, jobID, leaseToken string, succeeded 
 	if err := realtime.NotifyNotebookSources(ctx, tx, notebookID); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	outcome := "failed"
+	if succeeded {
+		outcome = "completed"
+	}
+	q.metrics.RecordAttempt("source_processing", inputKind, disposition(outcome))
+	q.metrics.RecordTerminal("source_processing", inputKind, outcome, attemptNo, admittedAt)
+	if !succeeded && errorCode != "" {
+		q.metrics.RecordError("source_processing", "lifecycle", errorCode)
+	}
+	return nil
+}
+
+func disposition(outcome string) string {
+	if outcome == "completed" {
+		return "completed"
+	}
+	return "terminal"
 }
 
 func purgeDiscoveredURLSource(ctx context.Context, tx pgx.Tx, sourceID, notebookID, userID, originalObjectKey string) error {

@@ -23,6 +23,24 @@ type MemoryStore struct {
 	purgeCommands map[string]PurgeCommand
 }
 
+// RecordCount reports the total number of Records held in memory across
+// every Trace, the leak surface behind nano_collector_memory_store_records
+// (docs/sprint/SPRINT-12-PRD.md criterion 56). PostgresStore is the
+// production Collector store; this exists for the in-memory fallback used
+// by tests and embedded harnesses.
+func (s *MemoryStore) RecordCount() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	total := 0
+	for _, trace := range s.traces {
+		total += len(trace.records)
+	}
+	return total
+}
+
 type memoryTrace struct {
 	descriptor  TraceDescriptor
 	records     []SequencedRecord
