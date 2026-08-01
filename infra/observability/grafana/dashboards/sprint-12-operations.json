@@ -1,0 +1,158 @@
+{
+  "title": "Nano Operations (Sprint 12)",
+  "uid": "nano-sprint-12-operations",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "timezone": "utc",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "tags": ["nano", "sprint-12"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Task success rate (7d target 97%)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "sum(nano:task_success_ratio1h{task_kind=\"agent_run\"})", "legendFormat": "1h" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.95 },
+              { "color": "green", "value": 0.97 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Error budget burn rate (5m / 1h / 6h)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 10, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "sum(nano:task_error_budget_burn_rate5m{task_kind=\"agent_run\"})", "legendFormat": "5m" },
+        { "expr": "sum(nano:task_error_budget_burn_rate1h{task_kind=\"agent_run\"})", "legendFormat": "1h" },
+        { "expr": "sum(nano:task_error_budget_burn_rate6h{task_kind=\"agent_run\"})", "legendFormat": "6h" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 3,
+      "title": "Task terminal outcomes (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "sum by (outcome) (rate(nano_task_terminal_total[5m]))", "legendFormat": "{{outcome}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 4,
+      "title": "Staged latency p95 (queue wait / model / tool / retrieval / end-to-end)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "max(nano:task_queue_wait_seconds:p95_30m)", "legendFormat": "queue wait" },
+        { "expr": "max(nano:model_call_seconds:p95_30m)", "legendFormat": "model call" },
+        { "expr": "max(nano:tool_execution_seconds:p95_30m)", "legendFormat": "tool execution" },
+        { "expr": "nano:retrieval_search_seconds:p95_30m", "legendFormat": "retrieval search" },
+        { "expr": "max(nano:task_end_to_end_seconds:p95_30m{task_kind=\"agent_run\"})", "legendFormat": "end-to-end" },
+        { "expr": "max(nano:chat_first_progress_seconds:p95_30m)", "legendFormat": "first progress" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 5,
+      "title": "Unattributed Task time (30m)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "nano:task_unattributed_seconds30m", "legendFormat": "unattributed" },
+        { "expr": "sum(rate(nano_task_end_to_end_seconds_sum[30m]))", "legendFormat": "total end-to-end" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 6,
+      "title": "Error rate by layer",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "sum by (layer) (rate(nano_error_total[5m]))", "legendFormat": "{{layer}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 7,
+      "title": "Error codes (top 10, 1h)",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "topk(10, sum by (error_code) (increase(nano_error_total[1h])))", "format": "table", "instant": true }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Runtime leak gauges (steady state = 0)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "nano_runhub_subscribers", "legendFormat": "run-hub subscribers {{instance}}" },
+        { "expr": "nano_worker_inflight_attempts", "legendFormat": "worker inflight {{instance}}" },
+        { "expr": "nano_worker_heartbeat_goroutines", "legendFormat": "worker heartbeat goroutines {{instance}}" },
+        { "expr": "nano_http_inflight_requests", "legendFormat": "http inflight {{instance}}" },
+        { "expr": "sum(nano_sse_connections_active) by (stream)", "legendFormat": "sse active {{stream}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 9,
+      "title": "Go post-GC live heap and goroutines",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "go_gc_heap_live_bytes", "legendFormat": "live heap {{instance}}" },
+        { "expr": "go_goroutines", "legendFormat": "goroutines {{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 10,
+      "title": "DB pool connections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "nano_db_pool_connections", "legendFormat": "{{pool}}/{{state}} {{instance}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 11,
+      "title": "HTTP requests by route (rate)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "topk(10, sum by (route, code) (rate(nano_http_requests_total[5m])))", "legendFormat": "{{route}} [{{code}}]" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    }
+  ]
+}

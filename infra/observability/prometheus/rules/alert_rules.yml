@@ -1,0 +1,145 @@
+groups:
+  - name: nano_availability
+    rules:
+      # Multi-window multi-burn-rate error-budget alert (PRD criterion 65):
+      # a fast window catches a severe short outage quickly without paging
+      # on noise, a slow window confirms the burn is real and not a blip.
+      - alert: NanoTaskSuccessFastBurn
+        expr: nano:task_error_budget_burn_rate5m > 14.4 and nano:task_error_budget_burn_rate1h > 14.4
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Task success rate is burning its 7d error budget >14x too fast (5m+1h windows)"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanotasksuccessfastburn"
+
+      - alert: NanoTaskSuccessSlowBurn
+        expr: nano:task_error_budget_burn_rate30m > 6 and nano:task_error_budget_burn_rate6h > 6
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Task success rate is burning its 7d error budget >6x too fast (30m+6h windows)"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanotasksuccessslowburn"
+
+      - alert: NanoRetrievalDegradedSuccessRateHigh
+        expr: sum(rate(nano_agent_run_degraded_total[15m])) > 0 and nano:task_success_ratio5m{task_kind="agent_run"} > 0.97
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Runs are completing successfully while retrieval is degraded — success rate alone is hiding a real problem (PRD criterion 27)"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanoretrievaldegradedsuccessratehigh"
+
+  - name: nano_latency
+    rules:
+      - alert: NanoChatEndToEndLatencyHigh
+        expr: nano:task_end_to_end_seconds:p95_30m{task_kind="agent_run"} > 45
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Chat end-to-end p95 exceeds the provisional 45s SLO"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanochatendtoendlatencyhigh"
+
+      - alert: NanoChatEndToEndLatencyCritical
+        expr: nano:task_end_to_end_seconds:p99_30m{task_kind="agent_run"} > 120
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "Chat end-to-end p99 exceeds the provisional 120s SLO"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanochatendtoendlatencycritical"
+
+      - alert: NanoFirstProgressLatencyHigh
+        expr: nano:chat_first_progress_seconds:p95_30m > 3
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "First-progress p95 exceeds the provisional 3s SLO"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanofirstprogresslatencyhigh"
+
+      - alert: NanoRetrievalSearchLatencyHigh
+        expr: nano:retrieval_search_seconds:p95_30m > 0.8
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Retrieval search p95 exceeds the provisional 800ms SLO"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanoretrievalsearchlatencyhigh"
+
+      - alert: NanoQueueWaitLatencyHigh
+        expr: nano:task_queue_wait_seconds:p95_30m > 6
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Queue wait p95 exceeds the provisional 6s SLO — check Worker capacity before assuming a code regression (PRD criterion 32: ~2.5s is the polling floor)"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanoqueuewaitlatencyhigh"
+
+      - alert: NanoUnattributedTaskTimeGrowing
+        expr: nano:task_unattributed_seconds30m > 0 and (nano:task_unattributed_seconds30m / sum(rate(nano_task_end_to_end_seconds_sum[30m]))) > 0.3
+        for: 30m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Over 30% of end-to-end Task time is unattributed to any measured stage — a stage is missing instrumentation (PRD criterion 42)"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanounattributedtasktimegrowing"
+
+  - name: nano_errors
+    rules:
+      - alert: NanoMetricsLabelRejected
+        expr: increase(nano_metrics_label_rejected_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A metric is receiving label values outside its allowlist — instrumentation defect, not normal operation (PRD criterion 13)"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanometricslabelrejected"
+
+  - name: nano_leaks
+    rules:
+      # Live heap keyed alert (PRD criteria 53, 67): requires sustained
+      # growth over a 6h window AND the process having been up for at least
+      # that long, so a restart can never look like a leak.
+      - alert: NanoLiveHeapGrowing
+        expr: |
+          (go_gc_heap_live_bytes / (go_gc_heap_live_bytes offset 6h)) > 1.5
+          and (time() - process_start_time_seconds) > 21600
+        for: 30m
+        labels:
+          severity: page
+        annotations:
+          summary: "Post-GC live heap grew >50% over 6h on a process that has been up that whole time — likely leak, not GC/allocator noise"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanoliveheapgrowing"
+
+      # PRD criterion 68: goroutine leaks usually precede the heap signal
+      # and are cheaper to diagnose, so this fires independently and
+      # earlier.
+      - alert: NanoGoroutineCountGrowing
+        expr: (go_goroutines / (go_goroutines offset 1h)) > 1.5
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Goroutine count grew >50% over 1h — check nano_runhub_subscribers, nano_worker_inflight_attempts, and nano_worker_heartbeat_goroutines first"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanogoroutinecountgrowing"
+
+      - alert: NanoRunHubSteadyStateViolated
+        expr: nano_runhub_subscribers > 0 and nano_http_inflight_requests == 0 and rate(nano_sse_events_sent_total[10m]) == 0
+        for: 20m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Run-hub subscribers are non-zero with no in-flight requests and no recent SSE activity — unsubscribe is being missed (PRD criterion 54, 59)"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanorunhubsteadystateviolated"
+
+      - alert: NanoDBPoolNearExhaustion
+        expr: nano_db_pool_connections{state="acquired"} / nano_db_pool_connections{state="max"} > 0.9
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "A database pool is above 90% acquired for 10m — imminent request failures"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanodbpoolnearexhaustion"

@@ -1,0 +1,133 @@
+# promtool test rules fixture (PRD criterion 70): at least one true-positive
+# and one false-positive case per leak alert, run with:
+#   promtool test rules infra/observability/prometheus/rules/rules_test.yml
+rule_files:
+  - recording_rules.yml
+  - alert_rules.yml
+
+evaluation_interval: 30s
+
+tests:
+  # --- Task success rate: true positive (fast burn) ---
+  - interval: 30s
+    input_series:
+      - series: 'nano_task_terminal_total{task_kind="agent_run",task_variant="chat.leader@1",outcome="completed"}'
+        values: "0+0x10 0+1x120"
+      - series: 'nano_task_terminal_total{task_kind="agent_run",task_variant="chat.leader@1",outcome="failed"}'
+        values: "0+0x10 0+4x120"
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: NanoTaskSuccessFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              task_kind: agent_run
+              task_variant: chat.leader@1
+            exp_annotations:
+              summary: "Task success rate is burning its 7d error budget >14x too fast (5m+1h windows)"
+              runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanotasksuccessfastburn"
+
+  # --- Task success rate: false positive (healthy 99% success) ---
+  - interval: 30s
+    input_series:
+      - series: 'nano_task_terminal_total{task_kind="agent_run",task_variant="chat.leader@1",outcome="completed"}'
+        values: "0+99x120"
+      - series: 'nano_task_terminal_total{task_kind="agent_run",task_variant="chat.leader@1",outcome="failed"}'
+        values: "0+1x120"
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: NanoTaskSuccessFastBurn
+        exp_alerts: []
+
+  # --- Live heap leak: true positive (sustained 2x growth over 6h, long-lived process) ---
+  - interval: 5m
+    input_series:
+      - series: 'go_gc_heap_live_bytes{}'
+        values: "100000000+2000000x84"
+      - series: 'process_start_time_seconds{}'
+        values: "0x84"
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: NanoLiveHeapGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "Post-GC live heap grew >50% over 6h on a process that has been up that whole time — likely leak, not GC/allocator noise"
+              runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanoliveheapgrowing"
+
+  # --- Live heap leak: false positive (stable heap, ordinary GC noise) ---
+  - interval: 5m
+    input_series:
+      - series: 'go_gc_heap_live_bytes{}'
+        values: "100000000+0x84"
+      - series: 'process_start_time_seconds{}'
+        values: "0x84"
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: NanoLiveHeapGrowing
+        exp_alerts: []
+
+  # --- Live heap leak: false positive (growth is real but process just restarted) ---
+  - interval: 5m
+    input_series:
+      - series: 'go_gc_heap_live_bytes{}'
+        values: "100000000+2000000x84"
+      - series: 'process_start_time_seconds{}'
+        values: "23400x84"
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: NanoLiveHeapGrowing
+        exp_alerts: []
+
+  # --- Goroutine growth: true positive ---
+  - interval: 1m
+    input_series:
+      - series: 'go_goroutines{}'
+        values: "50+2x90"
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NanoGoroutineCountGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "Goroutine count grew >50% over 1h — check nano_runhub_subscribers, nano_worker_inflight_attempts, and nano_worker_heartbeat_goroutines first"
+              runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanogoroutinecountgrowing"
+
+  # --- Goroutine growth: false positive (stable count) ---
+  - interval: 1m
+    input_series:
+      - series: 'go_goroutines{}'
+        values: "50+0x90"
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: NanoGoroutineCountGrowing
+        exp_alerts: []
+
+  # --- Label allowlist rejection: true positive ---
+  - interval: 1m
+    input_series:
+      - series: 'nano_metrics_label_rejected_total{metric="nano_error_total",label="error_code"}'
+        values: "0 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17"
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: NanoMetricsLabelRejected
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+              metric: nano_error_total
+              label: error_code
+            exp_annotations:
+              summary: "A metric is receiving label values outside its allowlist — instrumentation defect, not normal operation (PRD criterion 13)"
+              runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanometricslabelrejected"
+
+  # --- Label allowlist rejection: false positive (never rejected) ---
+  - interval: 1m
+    input_series:
+      - series: 'nano_metrics_label_rejected_total{metric="nano_error_total",label="error_code"}'
+        values: "0x20"
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: NanoMetricsLabelRejected
+        exp_alerts: []

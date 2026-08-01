@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: nano-sprint-12
+    orgId: 1
+    folder: "Nano Operations"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

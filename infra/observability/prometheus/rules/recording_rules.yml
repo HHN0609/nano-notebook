@@ -1,0 +1,84 @@
+groups:
+  - name: nano_task_success
+    interval: 30s
+    rules:
+      # PRD criterion 21: task success rate is defined once, here; every
+      # dashboard and alert consumes this rule rather than restating the
+      # expression. cancelled is excluded from numerator and denominator
+      # (criterion 19); expired counts as a failure (criterion 20).
+      - record: nano:task_success_ratio5m
+        expr: |
+          sum by (task_kind, task_variant) (rate(nano_task_terminal_total{outcome="completed"}[5m]))
+          /
+          sum by (task_kind, task_variant) (rate(nano_task_terminal_total{outcome=~"completed|failed|expired"}[5m]))
+      - record: nano:task_success_ratio30m
+        expr: |
+          sum by (task_kind, task_variant) (rate(nano_task_terminal_total{outcome="completed"}[30m]))
+          /
+          sum by (task_kind, task_variant) (rate(nano_task_terminal_total{outcome=~"completed|failed|expired"}[30m]))
+      - record: nano:task_success_ratio1h
+        expr: |
+          sum by (task_kind, task_variant) (rate(nano_task_terminal_total{outcome="completed"}[1h]))
+          /
+          sum by (task_kind, task_variant) (rate(nano_task_terminal_total{outcome=~"completed|failed|expired"}[1h]))
+      - record: nano:task_success_ratio6h
+        expr: |
+          sum by (task_kind, task_variant) (rate(nano_task_terminal_total{outcome="completed"}[6h]))
+          /
+          sum by (task_kind, task_variant) (rate(nano_task_terminal_total{outcome=~"completed|failed|expired"}[6h]))
+      - record: nano:task_success_ratio7d
+        expr: |
+          sum by (task_kind, task_variant) (rate(nano_task_terminal_total{outcome="completed"}[7d]))
+          /
+          sum by (task_kind, task_variant) (rate(nano_task_terminal_total{outcome=~"completed|failed|expired"}[7d]))
+      # Error-budget burn rate against the provisional 97% target
+      # (docs/sprint/SPRINT-12-PRD.md section 4.7 criterion 64): budget is
+      # 1 - 0.97 = 0.03; burn rate 1.0 means consuming budget exactly as
+      # fast as the 7d target allows.
+      - record: nano:task_error_budget_burn_rate5m
+        expr: (1 - nano:task_success_ratio5m) / 0.03
+      - record: nano:task_error_budget_burn_rate30m
+        expr: (1 - nano:task_success_ratio30m) / 0.03
+      - record: nano:task_error_budget_burn_rate1h
+        expr: (1 - nano:task_success_ratio1h) / 0.03
+      - record: nano:task_error_budget_burn_rate6h
+        expr: (1 - nano:task_success_ratio6h) / 0.03
+
+  - name: nano_latency
+    interval: 30s
+    rules:
+      - record: nano:task_end_to_end_seconds:p50_30m
+        expr: histogram_quantile(0.50, sum by (le, task_kind, task_variant) (rate(nano_task_end_to_end_seconds_bucket[30m])))
+      - record: nano:task_end_to_end_seconds:p95_30m
+        expr: histogram_quantile(0.95, sum by (le, task_kind, task_variant) (rate(nano_task_end_to_end_seconds_bucket[30m])))
+      - record: nano:task_end_to_end_seconds:p99_30m
+        expr: histogram_quantile(0.99, sum by (le, task_kind, task_variant) (rate(nano_task_end_to_end_seconds_bucket[30m])))
+      - record: nano:chat_first_progress_seconds:p95_30m
+        expr: histogram_quantile(0.95, sum by (le, task_variant) (rate(nano_chat_first_progress_seconds_bucket[30m])))
+      - record: nano:task_queue_wait_seconds:p95_30m
+        expr: histogram_quantile(0.95, sum by (le, task_kind, task_variant) (rate(nano_task_queue_wait_seconds_bucket[30m])))
+      - record: nano:retrieval_search_seconds:p95_30m
+        expr: histogram_quantile(0.95, sum by (le) (rate(nano_retrieval_search_seconds_bucket[30m])))
+      - record: nano:tool_execution_seconds:p95_30m
+        expr: histogram_quantile(0.95, sum by (le, tool) (rate(nano_tool_execution_seconds_bucket[30m])))
+      - record: nano:model_call_seconds:p95_30m
+        expr: histogram_quantile(0.95, sum by (le, model) (rate(nano_model_call_seconds_bucket[30m])))
+      # PRD criterion 42: unattributed time. A growing gap means a stage is
+      # missing instrumentation, not that work is free.
+      - record: nano:task_stage_sum_seconds30m
+        expr: |
+          sum(rate(nano_task_queue_wait_seconds_sum[30m]))
+          + sum(rate(nano_model_call_seconds_sum[30m]))
+          + sum(rate(nano_tool_execution_seconds_sum[30m]))
+          + sum(rate(nano_retrieval_search_seconds_sum[30m]))
+      - record: nano:task_unattributed_seconds30m
+        expr: sum(rate(nano_task_end_to_end_seconds_sum[30m])) - nano:task_stage_sum_seconds30m
+
+  - name: nano_errors
+    interval: 30s
+    rules:
+      - record: nano:error_ratio_by_layer5m
+        expr: |
+          sum by (task_kind, layer) (rate(nano_error_total[5m]))
+          /
+          ignoring(layer) group_left sum by (task_kind) (rate(nano_error_total[5m]))
