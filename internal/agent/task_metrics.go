@@ -16,19 +16,20 @@ import (
 // (TraceScope.PublishAfterCommit). A nil recorder is a safe no-op so tests
 // and call sites that don't care about metrics need not construct one.
 type TaskMetricsRecorder struct {
-	catalog       *metrics.Catalog
-	taskKind      *metrics.Allowlist
-	agentVariant  *metrics.Allowlist
-	studioVariant *metrics.Allowlist
-	outcome       *metrics.Allowlist
-	disposition   *metrics.Allowlist
-	degradation   *metrics.Allowlist
-	errorLayer    *metrics.Allowlist
-	errorCode     *metrics.Allowlist
-	modelName     *metrics.Allowlist
-	resultKind    *metrics.Allowlist
-	tool          *metrics.Allowlist
-	retrievalOK   *metrics.Allowlist
+	catalog              *metrics.Catalog
+	taskKind             *metrics.Allowlist
+	agentVariant         *metrics.Allowlist
+	studioVariant        *metrics.Allowlist
+	sourceProcessVariant *metrics.Allowlist
+	outcome              *metrics.Allowlist
+	disposition          *metrics.Allowlist
+	degradation          *metrics.Allowlist
+	errorLayer           *metrics.Allowlist
+	errorCode            *metrics.Allowlist
+	modelName            *metrics.Allowlist
+	resultKind           *metrics.Allowlist
+	tool                 *metrics.Allowlist
+	retrievalOK          *metrics.Allowlist
 }
 
 // NewTaskMetricsRecorder builds a recorder bound to catalog. modelNames is
@@ -42,19 +43,20 @@ func NewTaskMetricsRecorder(catalog *metrics.Catalog, modelNames ...string) *Tas
 		return nil
 	}
 	return &TaskMetricsRecorder{
-		catalog:       catalog,
-		taskKind:      metrics.NewAllowlist("nano_task_terminal_total", "task_kind", metrics.TaskKindValues, catalog.LabelRejected),
-		agentVariant:  metrics.NewAllowlist("nano_task_terminal_total", "task_variant", metrics.AgentRunVariantValues, catalog.LabelRejected),
-		studioVariant: metrics.NewAllowlist("nano_task_terminal_total", "task_variant", metrics.StudioOutputVariantValues, catalog.LabelRejected),
-		outcome:       metrics.NewAllowlist("nano_task_terminal_total", "outcome", metrics.OutcomeValues, catalog.LabelRejected),
-		disposition:   metrics.NewAllowlist("nano_agent_attempt_total", "disposition", metrics.AttemptDispositionValues, catalog.LabelRejected),
-		degradation:   metrics.NewAllowlist("nano_agent_run_degraded_total", "degradation", metrics.RetrievalDegradationValues, catalog.LabelRejected),
-		errorLayer:    metrics.NewAllowlist("nano_error_total", "layer", metrics.ErrorLayerValues, catalog.LabelRejected),
-		errorCode:     metrics.NewAllowlist("nano_error_total", "error_code", metrics.ErrorCodeValues, catalog.LabelRejected),
-		modelName:     metrics.NewAllowlist("nano_model_call_seconds", "model", modelNames, catalog.LabelRejected),
-		resultKind:    metrics.NewAllowlist("nano_model_call_seconds", "result_kind", modelResultKindValues, catalog.LabelRejected),
-		tool:          metrics.NewAllowlist("nano_tool_execution_seconds", "tool", toolNameValues, catalog.LabelRejected),
-		retrievalOK:   metrics.NewAllowlist("nano_retrieval_search_seconds", "outcome", []string{"completed", "failed"}, catalog.LabelRejected),
+		catalog:              catalog,
+		taskKind:             metrics.NewAllowlist("nano_task_terminal_total", "task_kind", metrics.TaskKindValues, catalog.LabelRejected),
+		agentVariant:         metrics.NewAllowlist("nano_task_terminal_total", "task_variant", metrics.AgentRunVariantValues, catalog.LabelRejected),
+		studioVariant:        metrics.NewAllowlist("nano_task_terminal_total", "task_variant", metrics.StudioOutputVariantValues, catalog.LabelRejected),
+		sourceProcessVariant: metrics.NewAllowlist("nano_task_terminal_total", "task_variant", metrics.SourceProcessingVariantValues, catalog.LabelRejected),
+		outcome:              metrics.NewAllowlist("nano_task_terminal_total", "outcome", metrics.OutcomeValues, catalog.LabelRejected),
+		disposition:          metrics.NewAllowlist("nano_agent_attempt_total", "disposition", metrics.AttemptDispositionValues, catalog.LabelRejected),
+		degradation:          metrics.NewAllowlist("nano_agent_run_degraded_total", "degradation", metrics.RetrievalDegradationValues, catalog.LabelRejected),
+		errorLayer:           metrics.NewAllowlist("nano_error_total", "layer", metrics.ErrorLayerValues, catalog.LabelRejected),
+		errorCode:            metrics.NewAllowlist("nano_error_total", "error_code", metrics.ErrorCodeValues, catalog.LabelRejected),
+		modelName:            metrics.NewAllowlist("nano_model_call_seconds", "model", modelNames, catalog.LabelRejected),
+		resultKind:           metrics.NewAllowlist("nano_model_call_seconds", "result_kind", modelResultKindValues, catalog.LabelRejected),
+		tool:                 metrics.NewAllowlist("nano_tool_execution_seconds", "tool", toolNameValues, catalog.LabelRejected),
+		retrievalOK:          metrics.NewAllowlist("nano_retrieval_search_seconds", "outcome", []string{"completed", "failed"}, catalog.LabelRejected),
 	}
 }
 
@@ -112,10 +114,14 @@ func TaskOutcomeForRun(status, errorCode string) string {
 }
 
 func (r *TaskMetricsRecorder) variantAllowlist(taskKind string) *metrics.Allowlist {
-	if taskKind == "studio_output" {
+	switch taskKind {
+	case "studio_output":
 		return r.studioVariant
+	case "source_processing":
+		return r.sourceProcessVariant
+	default:
+		return r.agentVariant
 	}
-	return r.agentVariant
 }
 
 // RecordAttempt increments nano_agent_attempt_total for every Attempt

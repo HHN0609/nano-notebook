@@ -20,12 +20,17 @@ var AgentRunVariantValues = []string{
 // (PRD criterion 23; docs/sprint/SPRINT-11-PRD.md criterion 12).
 var StudioOutputVariantValues = []string{"report", "flashcards", "mind_map", "data_table"}
 
-// SourceProcessingVariantValues mirrors internal/source.Format
-// (internal/source/store.go), the closed set of ingestible Source kinds.
-var SourceProcessingVariantValues = []string{
-	"txt", "markdown", "pdf", "docx", "pptx",
-	"mp3", "wav", "m4a", "png", "jpeg", "webp", "html", "youtube",
-}
+// SourceProcessingVariantValues mirrors source_sources.input_kind's check
+// constraint (internal/app/db.go: `input_kind in ('file', 'url')`) — the
+// field internal/sourcejobs/queue.go actually queries for task_variant.
+// A prior version of this list mirrored internal/source.Format (the file
+// extension/media format) instead, which is a different, much finer-grained
+// column; that mismatch meant every source_processing metric fell back to
+// "other". Caught by a live end-to-end simulation, not by a fixture test —
+// SourceProcessingVariantValues has no test asserting it against the real
+// schema, so a future migration widening input_kind's domain will silently
+// re-trigger this same bucket-to-"other" failure mode.
+var SourceProcessingVariantValues = []string{"file", "url"}
 
 // OutcomeValues is the closed Task terminal outcome set (PRD criterion 18).
 var OutcomeValues = []string{"completed", "failed", "cancelled", "expired"}

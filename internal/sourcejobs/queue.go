@@ -233,15 +233,17 @@ func (q *Queue) CompleteEvidence(ctx context.Context, jobID, leaseToken, revisio
 	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
 		return err
 	}
-	var sourceID, notebookID string
+	var sourceID, notebookID, inputKind string
 	var current source.State
+	var attemptNo int
+	var admittedAt time.Time
 	err = tx.QueryRow(ctx, `
-		select s.id, s.state, s.notebook_id
+		select s.id, s.state, s.notebook_id, s.input_kind, j.attempt_no, j.created_at
 		from source_processing_jobs j
 		join source_sources s on s.id=j.source_id
 		where j.id=$1 and j.status='running' and j.lease_token=$2::uuid and j.lease_expires_at > now()
 		for update of j, s
-	`, jobID, leaseToken).Scan(&sourceID, &current, &notebookID)
+	`, jobID, leaseToken).Scan(&sourceID, &current, &notebookID, &inputKind, &attemptNo, &admittedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrLeaseLost
 	}
@@ -329,7 +331,12 @@ func (q *Queue) CompleteEvidence(ctx context.Context, jobID, leaseToken, revisio
 	if err := realtime.NotifyNotebookSources(ctx, tx, notebookID); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	q.metrics.RecordAttempt("source_processing", inputKind, "completed")
+	q.metrics.RecordTerminal("source_processing", inputKind, "completed", attemptNo, admittedAt)
+	return nil
 }
 
 func (q *Queue) Fail(ctx context.Context, jobID, leaseToken, errorCode string) error {
