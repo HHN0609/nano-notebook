@@ -8,5 +8,5 @@ go mod download
 if [ -d web ]; then
   npm --prefix web install
 fi
-docker compose -f infra/compose/compose.yaml pull postgres observability-postgres minio qdrant bifrost jaeger
+docker compose -f infra/compose/compose.yaml pull postgres observability-postgres minio qdrant bifrost jaeger prometheus grafana
 docker compose -f infra/compose/compose.yaml build document-renderer
