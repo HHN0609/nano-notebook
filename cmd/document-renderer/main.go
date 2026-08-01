@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 )
 
 type rendererConfig struct {
@@ -77,6 +78,14 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"live","service":"document-renderer"}`))
 	})
+	metricsRegistry := metrics.NewRegistry()
+	metrics.NewCatalog(metricsRegistry)
+	metricsServer := metrics.NewAdminServer(rendererEnv("NANO_DOCUMENT_RENDERER_METRICS_ADDR", "0.0.0.0:9095"), metricsRegistry)
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("document renderer metrics listener failed", "error", err)
+		}
+	}()
 	server := &http.Server{
 		Addr: config.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout: config.MaxRuntime + 10*time.Second, IdleTimeout: 30 * time.Second,
@@ -93,6 +102,9 @@ func main() {
 		if err := server.Shutdown(shutdownContext); err != nil {
 			slog.Error("document renderer shutdown failed", "error", err)
 			os.Exit(1)
+		}
+		if err := metricsServer.Shutdown(shutdownContext); err != nil {
+			slog.Warn("document renderer metrics listener shutdown incomplete", "error", err)
 		}
 		err := <-serverDone
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {

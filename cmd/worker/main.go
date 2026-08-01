@@ -28,6 +28,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/mailoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
 	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
@@ -216,6 +217,24 @@ func main() {
 	}()
 	telemetry.StartupSpan(ctx, "nano-worker")
 
+	metricsRegistry := metrics.NewRegistry()
+	metricsCatalog := metrics.NewCatalog(metricsRegistry)
+	taskMetrics := agent.NewTaskMetricsRecorder(metricsCatalog, config.LeaderModel, config.ResearchModel, config.SourceVisionModel, config.SourceTranscriptionModel)
+	metricsAddr := env("NANO_WORKER_METRICS_ADDR", "0.0.0.0:9092")
+	metricsServer := metrics.NewAdminServer(metricsAddr, metricsRegistry)
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("worker metrics listener failed", "error", err)
+		}
+	}()
+	go metrics.ObservePoolStats(ctx, metricsCatalog, "worker", 15*time.Second, func() metrics.PoolStat {
+		stat := db.Pool().Stat()
+		return metrics.PoolStat{
+			AcquiredConns: stat.AcquiredConns(), IdleConns: stat.IdleConns(),
+			TotalConns: stat.TotalConns(), MaxConns: stat.MaxConns(),
+		}
+	})
+
 	modelClient := models.NewBifrostClient(env("NANO_BIFROST_URL", "http://127.0.0.1:56666"), &http.Client{}, 2048)
 	traceBridge, err := otelbridge.New(otel.Tracer("nano-agent-observability"))
 	if err != nil {
@@ -322,8 +341,8 @@ func main() {
 	grounder := agent.NewGroundingService(db.Pool())
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
 		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge),
-		agent.WithReplayStager(replayStager), agent.WithGroundingService(grounder))
-	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient)
+		agent.WithReplayStager(replayStager), agent.WithGroundingService(grounder), agent.WithTaskMetrics(taskMetrics))
+	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient).WithMetrics(taskMetrics)
 	calculateTool := agent.NewCalculateAction()
 	currentTimeTool := agent.NewCurrentTimeAction(nil)
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
@@ -357,8 +376,9 @@ func main() {
 		slog.Error("worker MCP Tool Host invalid", "error", err)
 		os.Exit(1)
 	}
-	controller := agent.NewMCPController(runtime, modelClient, registry, mcpToolHost, chatRoot)
-	studioExecutor, err := agent.NewStudioDefinitionExecutor(db.Pool(), runtime, modelClient, registry, mcpToolHost, definitionCatalog)
+	mcpToolHost.WithMetrics(taskMetrics)
+	controller := agent.NewMCPController(runtime, modelClient, registry, mcpToolHost, chatRoot).WithControllerMetrics(taskMetrics)
+	studioExecutor, err := agent.NewStudioDefinitionExecutor(db.Pool(), runtime, modelClient, registry, mcpToolHost, definitionCatalog, taskMetrics)
 	if err != nil {
 		slog.Error("Studio Executor invalid", "error", err)
 		os.Exit(1)
@@ -418,7 +438,8 @@ func main() {
 	)
 	mailDone := make(chan error, 1)
 	go func() { mailDone <- mailSender.Run(ctx, config.MailPollInterval) }()
-	workerService := agentworker.NewServiceWithConcurrency(db.Pool(), jobs.NewQueueWithTraceSink(db.Pool(), traceExporter), executionHost, 5*time.Second, 210*time.Second, config.AgentInteractiveConcurrency)
+	jobQueue := jobs.NewQueueWithTraceSink(db.Pool(), traceExporter).WithMetrics(taskMetrics)
+	workerService := agentworker.NewServiceWithConcurrency(db.Pool(), jobQueue, executionHost, 5*time.Second, 210*time.Second, config.AgentInteractiveConcurrency).WithMetrics(metricsCatalog)
 	workerDone := make(chan error, 1)
 	go func() {
 		err := workerService.Run(ctx)
@@ -433,7 +454,7 @@ func main() {
 	sourcePurgeDone := make(chan error, 1)
 	sourcePurgeProcessor := sourcepurge.NewProcessorWithProjectionPurger(db.Pool(), sourceObjects, qdrant, config.SourcePurgeLease)
 	go func() { sourcePurgeDone <- sourcePurgeProcessor.Run(ctx, config.SourcePurgePoll) }()
-	sourceQueue := sourcejobs.NewQueue(db.Pool(), config.SourceProcessingLease)
+	sourceQueue := sourcejobs.NewQueue(db.Pool(), config.SourceProcessingLease).WithMetrics(taskMetrics)
 	documentRenderer, err := documentrender.NewHTTPAdapter(documentrender.HTTPConfig{
 		Endpoint: config.DocumentRendererURL, ServiceToken: config.DocumentRendererServiceToken,
 		HTTPClient: &http.Client{Timeout: config.DocumentRenderTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
@@ -495,6 +516,9 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("worker shutdown failed", "error", err)
 		os.Exit(1)
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("worker metrics listener shutdown incomplete", "error", err)
 	}
 	select {
 	case err := <-mailDone:

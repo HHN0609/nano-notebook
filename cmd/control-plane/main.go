@@ -21,6 +21,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
 	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
@@ -112,6 +113,23 @@ func main() {
 	}()
 	telemetry.StartupSpan(ctx, "nano-control-plane")
 
+	metricsRegistry := metrics.NewRegistry()
+	metricsCatalog := metrics.NewCatalog(metricsRegistry)
+	metricsAddr := env("NANO_CONTROL_PLANE_METRICS_ADDR", "0.0.0.0:9091")
+	metricsServer := metrics.NewAdminServer(metricsAddr, metricsRegistry)
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("control-plane metrics listener failed", "error", err)
+		}
+	}()
+	go metrics.ObservePoolStats(ctx, metricsCatalog, "control_plane", 15*time.Second, func() metrics.PoolStat {
+		stat := db.Pool().Stat()
+		return metrics.PoolStat{
+			AcquiredConns: stat.AcquiredConns(), IdleConns: stat.IdleConns(),
+			TotalConns: stat.TotalConns(), MaxConns: stat.MaxConns(),
+		}
+	})
+
 	queryClient, err := collector.NewHTTPQueryClient(collector.HTTPQueryClientConfig{
 		Endpoint: config.CollectorURL, ServiceToken: config.CollectorQueryToken,
 	})
@@ -154,6 +172,7 @@ func main() {
 		AdminTraces: queryClient, ReplaySealer: replaySealer, TraceSink: traceExporter,
 		SourceUploads: sourceStore,
 		SourceFetcher: remoteFetcher, SourceSnapshots: sourceStore,
+		Metrics: metricsCatalog,
 	}, db)
 	runListener := realtime.NewRunListener(db.Pool(), server.NotifyRun)
 	go func() {
@@ -189,6 +208,9 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("control-plane shutdown failed", "error", err)
 		os.Exit(1)
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("control-plane metrics listener shutdown incomplete", "error", err)
 	}
 	if err := traceExporter.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("Agent Trace memory flush incomplete; bounded unsent records were dropped on process exit", "error", err)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -168,7 +170,35 @@ func run(ctx context.Context, config collectorConfig) error {
 	}()
 	telemetry.StartupSpan(ctx, "nano-collector")
 
+	metricsRegistry := metrics.NewRegistry()
+	metricsCatalog := metrics.NewCatalog(metricsRegistry)
+	metricsAddr := env("NANO_COLLECTOR_METRICS_ADDR", "0.0.0.0:9093")
+	metricsServer := metrics.NewAdminServer(metricsAddr, metricsRegistry)
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Collector metrics listener failed", "error", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = metricsServer.Shutdown(shutdownCtx)
+	}()
+	go metrics.ObservePoolStats(ctx, metricsCatalog, "collector_ingest", 15*time.Second, poolStatFunc(pool))
+	go metrics.ObservePoolStats(ctx, metricsCatalog, "collector_projection", 15*time.Second, poolStatFunc(projectionPool))
+	go metrics.ObservePoolStats(ctx, metricsCatalog, "collector_query", 15*time.Second, poolStatFunc(queryPool))
+
 	return runCollectorService(ctx, config, pool, projectionPool, queryPool)
+}
+
+func poolStatFunc(pool *pgxpool.Pool) func() metrics.PoolStat {
+	return func() metrics.PoolStat {
+		stat := pool.Stat()
+		return metrics.PoolStat{
+			AcquiredConns: stat.AcquiredConns(), IdleConns: stat.IdleConns(),
+			TotalConns: stat.TotalConns(), MaxConns: stat.MaxConns(),
+		}
+	}
 }
 
 func openCollectorPool(ctx context.Context, databaseURL string, maxConns, minConns int32) (*pgxpool.Pool, error) {

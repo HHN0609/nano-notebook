@@ -14,6 +14,7 @@ import (
 	"time"
 
 	sourcefetcher "github.com/huangxinxinyu/nano-notebook/internal/fetcher"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 )
 
 type fetcherConfig struct {
@@ -49,6 +50,14 @@ func main() {
 		MaxRedirects: config.MaxRedirects, MaxCompressedBytes: config.MaxCompressedBytes,
 		MaxExpandedBytes: config.MaxExpandedBytes, Timeout: config.Timeout,
 	})
+	metricsRegistry := metrics.NewRegistry()
+	metrics.NewCatalog(metricsRegistry)
+	metricsServer := metrics.NewAdminServer(fetcherEnv("NANO_FETCHER_METRICS_ADDR", "0.0.0.0:9094"), metricsRegistry)
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Source Fetcher metrics listener failed", "error", err)
+		}
+	}()
 	server := &http.Server{
 		Addr: config.Addr, Handler: sourcefetcher.NewHTTPHandler(core),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: config.Timeout + 5*time.Second,
@@ -67,6 +76,9 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("Source Fetcher shutdown failed", "error", err)
 		os.Exit(1)
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("Source Fetcher metrics listener shutdown incomplete", "error", err)
 	}
 }
 
