@@ -23,7 +23,10 @@ func TestPublicationAndDeadlineExpiryHonorTheFirstTerminalCommit(t *testing.T) {
 		if err := runtime.PublishFinal(ctx, attemptFromClaim(claimed), draft); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := api.db.Pool().Exec(ctx, `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, runID); err != nil {
+		if _, err := api.db.Pool().Exec(ctx, `
+			update agent_trees set absolute_deadline = now() - interval '1 second'
+			where id = (select tree_id from agent_runs where id = $1)
+		`, runID); err != nil {
 			t.Fatal(err)
 		}
 		if expired := expireRunInTransaction(t, api, runID); expired != 0 {
@@ -42,7 +45,10 @@ func TestPublicationAndDeadlineExpiryHonorTheFirstTerminalCommit(t *testing.T) {
 		}
 		runtime := agent.NewPostgresRuntime(api.db.Pool(), "", func() string { return "msg_after_expiry" })
 		draft := appendFinalDraft(t, runtime, attemptFromClaim(claimed), "Expiry must fence this accepted draft.")
-		if _, err := api.db.Pool().Exec(ctx, `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, runID); err != nil {
+		if _, err := api.db.Pool().Exec(ctx, `
+			update agent_trees set absolute_deadline = now() - interval '1 second'
+			where id = (select tree_id from agent_runs where id = $1)
+		`, runID); err != nil {
 			t.Fatal(err)
 		}
 		if expired := expireRunInTransaction(t, api, runID); expired != 1 {

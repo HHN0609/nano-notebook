@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -43,56 +42,6 @@ func TestMergeResearchCandidatesInterleavesQueriesAndPrefersDomainDiversity(t *t
 func (m *leaderDecisionModel) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
 	m.requests = append(m.requests, request)
 	return m.outcome, m.err
-}
-
-func TestModelLeaderRouterRequiresTypedClosedDecision(t *testing.T) {
-	input := json.RawMessage(`{"route":"delegate_research","reason_code":"explicit_source_discovery"}`)
-	model := &leaderDecisionModel{outcome: actionOutcome("select_leader_route", input)}
-	temperature := 0.0
-	policy := models.ModelInvocationPolicy{Temperature: &temperature, MaxOutputTokens: 777, Timeout: 3 * time.Second}
-	got, err := NewModelLeaderRouter(model).DecideRoute(context.Background(), LeaderRouteRequest{Model: "route-model", UserMessage: "find sources", InvocationPolicy: policy})
-	if err != nil || got.Route != LeaderDelegateResearch || got.ReasonCode != LeaderReasonExplicitSourceDiscovery {
-		t.Fatalf("got=%+v err=%v", got, err)
-	}
-	if len(model.requests) != 1 || model.requests[0].RequiredActionName != "select_leader_route" || len(model.requests[0].ActionDefinitions) != 1 {
-		t.Fatalf("request=%+v", model.requests)
-	}
-	if model.requests[0].InvocationPolicy.MaxOutputTokens != 777 || model.requests[0].InvocationPolicy.Temperature == nil ||
-		*model.requests[0].InvocationPolicy.Temperature != 0 || model.requests[0].InvocationPolicy.Timeout != 3*time.Second {
-		t.Fatalf("invocation policy=%+v", model.requests[0].InvocationPolicy)
-	}
-}
-
-func TestModelLeaderRouterBoundsRecentPairsAsReferenceOnly(t *testing.T) {
-	model := &leaderDecisionModel{outcome: actionOutcome("select_leader_route", json.RawMessage(`{"route":"continue_chat","reason_code":"ordinary_conversation"}`))}
-	pairs := []LeaderConversationPair{
-		{User: "old-1", Assistant: "answer-1"}, {User: "old-2", Assistant: "answer-2"},
-		{User: "old-3", Assistant: "answer-3"}, {User: "old-4", Assistant: "answer-4"},
-	}
-	if _, err := NewModelLeaderRouter(model).DecideRoute(context.Background(), LeaderRouteRequest{Model: "route-model", UserMessage: "current-authority", RecentPairs: pairs}); err != nil {
-		t.Fatal(err)
-	}
-	content := model.requests[0].Messages[1].Content
-	if strings.Contains(content, "old-1") || !strings.Contains(content, "old-2") || !strings.Contains(content, "old-4") || !strings.Contains(content, "CURRENT MESSAGE (authoritative):\ncurrent-authority") {
-		t.Fatalf("router context=%q", content)
-	}
-}
-
-func TestModelLeaderRouterFailsClosedOnInvalidMissingMixedOrInconsistentContract(t *testing.T) {
-	tests := []models.ModelOutcome{
-		{ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: "delegate_research"}}},
-		actionOutcome("other", json.RawMessage(`{"route":"delegate_research","reason_code":"explicit_source_discovery"}`)),
-		actionOutcome("select_leader_route", json.RawMessage(`{"route":"delegate_research","reason_code":"ordinary_conversation"}`)),
-		actionOutcome("select_leader_route", json.RawMessage(`{"route":"continue_chat","reason_code":"unknown"}`)),
-		actionOutcome("select_leader_route", json.RawMessage(`{"route":"continue_chat","reason_code":"ordinary_conversation"} trailing`)),
-		{ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: "continue_chat"}, Proposal: actionOutcome("select_leader_route", json.RawMessage(`{"route":"continue_chat","reason_code":"ordinary_conversation"}`)).Proposal}},
-	}
-	for _, outcome := range tests {
-		model := &leaderDecisionModel{outcome: outcome}
-		if _, err := NewModelLeaderRouter(model).DecideRoute(context.Background(), LeaderRouteRequest{Model: "route-model", UserMessage: "help"}); !errors.Is(err, ErrInvalidLeaderRoute) {
-			t.Fatalf("outcome=%+v err=%v", outcome, err)
-		}
-	}
 }
 
 func TestModelResearchPlannerRequiresOneTypedBoundedQueryBatch(t *testing.T) {

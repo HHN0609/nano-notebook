@@ -308,8 +308,11 @@ func TestGroundedControllerBuildsQueryContextFromBoundedCompletedPairs(t *testin
 	var chatID, userID string
 	var currentCreatedAt string
 	if err := api.db.Pool().QueryRow(ctx, `
-		select r.chat_id,r.user_id,to_char(m.created_at,'YYYY-MM-DD HH24:MI:SS.USOF')
-		from agent_runs r join chat_messages m on m.id=r.input_message_id where r.id=$1
+		select product.chat_id,product.user_id,to_char(m.created_at,'YYYY-MM-DD HH24:MI:SS.USOF')
+		from agent_runs r
+		join chat_runs product on product.root_agent_run_id=r.id
+		join chat_messages m on m.id=product.input_message_id
+		where r.id=$1
 	`, attempt.RunID).Scan(&chatID, &userID, &currentCreatedAt); err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +457,11 @@ func TestPublicationAtomicallyCopiesSourceReferencesAndRejectsSourceDeletionRace
 					t.Fatalf("reference kind=%q", referenceKind)
 				}
 				var chatID string
-				if err := api.db.Pool().QueryRow(context.Background(), `select chat_id from agent_runs where id=$1`, attempt.RunID).Scan(&chatID); err != nil {
+				if err := api.db.Pool().QueryRow(context.Background(), `
+					select product.chat_id
+					from agent_runs r join chat_runs product on product.root_agent_run_id=r.id
+					where r.id=$1
+				`, attempt.RunID).Scan(&chatID); err != nil {
 					t.Fatal(err)
 				}
 				snapshot := api.getWithCookie(t, "/api/v1/chats/"+chatID, sessionCookie)
@@ -468,7 +475,11 @@ func TestPublicationAtomicallyCopiesSourceReferencesAndRejectsSourceDeletionRace
 					t.Fatalf("Citation resolution=%d %s", resolved.Code, resolved.Body.String())
 				}
 				var userID string
-				if err := api.db.Pool().QueryRow(context.Background(), `select user_id from agent_runs where id=$1`, attempt.RunID).Scan(&userID); err != nil {
+				if err := api.db.Pool().QueryRow(context.Background(), `
+					select product.user_id
+					from agent_runs r join chat_runs product on product.root_agent_run_id=r.id
+					where r.id=$1
+				`, attempt.RunID).Scan(&userID); err != nil {
 					t.Fatal(err)
 				}
 				replacementEmail := "citation-replacement-owner@example.com"

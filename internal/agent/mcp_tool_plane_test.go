@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 )
@@ -279,6 +280,50 @@ func TestMCPToolPlaneClassifiesRetryableWebSearchFailure(t *testing.T) {
 	if !isToolErrorKind(err, ToolErrorInfrastructure) || !errors.Is(err, websearch.ErrRateLimited) {
 		t.Fatalf("err=%v", err)
 	}
+}
+
+func TestMCPToolPlaneRecordsFilteredToolReason(t *testing.T) {
+	catalog, _ := agentcatalog.LoadEmbedded()
+	registry, err := NewMCPToolRegistry(
+		MCPToolRegistration{Action: testMCPAction("calculate"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("current_time"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: NewSearchEvidenceAction(nil), Scheduling: agentcatalog.ToolOrderedSync},
+		testDelegationMCPRegistration(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := NewMCPToolHost(catalog, registry, &mcpToolAuthority{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := host.OpenAttempt(context.Background(), AttemptToolScope{
+		Definition: agentcatalog.MustParseReference("chat.leader@1"),
+		Attempt:    Attempt{RunID: "run", JobID: "job", AttemptNo: 1, LeaseToken: "lease"}, RemainingActions: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	tracer, exporter, ctx := instrumentationTestTracer(t)
+	definitions, err := session.ActionDefinitions(ctx, ActionPolicy{RemainingActions: 1, Execution: &Execution{}}, tracer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range definitions {
+		if definition.Name == "search_evidence" {
+			t.Fatalf("filtered search_evidence leaked: %+v", definitions)
+		}
+	}
+	for _, record := range exporter.Records() {
+		if record.Kind == agentobs.RecordEvent && record.Name == TraceEventToolFiltered {
+			if reason := traceRecordAttribute(record, TraceKeyToolReasonCode); reason != "no_sources_selected" {
+				t.Fatalf("filtered reason=%q", reason)
+			}
+			return
+		}
+	}
+	t.Fatal("MCP filtered tool trace event was not recorded")
 }
 
 func testMCPAction(name string) *mcpToolAction {

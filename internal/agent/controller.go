@@ -82,11 +82,11 @@ func NewMCPController(runtime ControllerRuntime, model DecisionModel, registry *
 	return &Controller{runtime: runtime, model: model, registry: registry, mcpHost: host, mcpDefinition: definition}
 }
 
-func (c *Controller) actionDefinitions(ctx context.Context, session *MCPAttemptSession, policy ActionPolicy) ([]models.ActionDefinition, error) {
+func (c *Controller) actionDefinitions(ctx context.Context, session *MCPAttemptSession, policy ActionPolicy, tracer *agentobs.Tracer) ([]models.ActionDefinition, error) {
 	if session == nil {
-		return c.registry.Definitions(policy), nil
+		return c.registry.Definitions(ctx, policy, tracer), nil
 	}
-	return session.ActionDefinitions(ctx, policy)
+	return session.ActionDefinitions(ctx, policy, tracer)
 }
 
 func (c *Controller) validateProposal(session *MCPAttemptSession, proposals []models.ActionProposal) error {
@@ -132,6 +132,9 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			return c.runtime.PublishFinal(ctx, attempt, *prefix.Final)
 		}
 		if proposal, action, ok := firstIncompleteAction(prefix); ok {
+			if c.isExclusiveDelegation(toolSession, action.Name) && execution.ExistingChildCount == 0 {
+				return c.executeDelegationAction(ctx, tracer, toolSession, attempt, execution, action)
+			}
 			if err := c.executeAction(ctx, tracer, toolSession, attempt, execution, prefix, proposal, action); err != nil {
 				return err
 			}
@@ -142,7 +145,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		actionCapable := !forceFinalDecision && len(prefix.Proposals) < execution.ActionDecisionLimit && remainingActions > 0
 		definitions := []models.ActionDefinition(nil)
 		if actionCapable {
-			definitions, err = c.actionDefinitions(ctx, toolSession, ActionPolicy{RemainingActions: remainingActions, Execution: &execution})
+			definitions, err = c.actionDefinitions(ctx, toolSession, ActionPolicy{RemainingActions: remainingActions, Execution: &execution}, tracer)
 			if err != nil {
 				return c.handleRuntimeError(ctx, attempt, err)
 			}
@@ -372,6 +375,73 @@ func actionDefinitionByName(definitions []models.ActionDefinition, name string) 
 		}
 	}
 	return models.ActionDefinition{}, false
+}
+
+func (c *Controller) isExclusiveDelegation(session *MCPAttemptSession, name string) bool {
+	if session == nil {
+		return false
+	}
+	tool, ok := session.byName[name]
+	return ok && tool.Scheduling == agentcatalog.ToolExclusiveDelegation
+}
+
+func (c *Controller) executeDelegationAction(
+	ctx context.Context,
+	tracer *agentobs.Tracer,
+	toolSession *MCPAttemptSession,
+	attempt Attempt,
+	execution Execution,
+	action AcceptedAction,
+) error {
+	if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
+		return c.handleRuntimeError(ctx, attempt, err)
+	}
+	if toolSession == nil {
+		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), errors.New("delegation requires the MCP Tool Plane"))
+	}
+	executor, ok := toolSession.actionAdapter(action.Name)
+	if !ok {
+		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), fmt.Errorf("accepted unknown MCP Tool %q", action.Name))
+	}
+	request := ActionRequest{ActionID: action.ActionID, Input: action.Input, DefaultTimeZone: execution.TimeZone, Attempt: attempt}
+	var result ActionResult
+	var err error
+	if tracer != nil {
+		startIdentity := TraceActionStartIdentity(attempt.RunID, attempt.AttemptNo, action.ActionID)
+		options := ActionTraceOptions{
+			StartIdentity: startIdentity, InputIdentity: startIdentity + "/replay/input",
+			ResultIdentity: startIdentity + "/replay/result", ReplayStager: c.replayStager(),
+		}
+		if retryRuntime, ok := c.runtime.(ActionRetryTraceRuntime); ok {
+			prior, found, priorErr := retryRuntime.PreviousActionSpan(ctx, attempt, action.ActionID)
+			if priorErr != nil {
+				return c.handleRuntimeError(ctx, attempt, priorErr)
+			}
+			if found {
+				options.RetryTarget = &prior
+				options.LinkIdentity = options.StartIdentity + "/retries"
+			}
+		}
+		result, err = InvokeAgentAction(ctx, tracer, executor, action.ActionID, request, options)
+	} else {
+		result, err = executor.Execute(ctx, request)
+	}
+	if err != nil {
+		if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
+			return result
+		}
+		if errors.Is(err, ErrLeaseLost) {
+			return c.handleRuntimeError(ctx, attempt, err)
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
+	}
+	if err := result.Validate(); err != nil {
+		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
+	}
+	return nil
 }
 
 func (c *Controller) executeAction(

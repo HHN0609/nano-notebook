@@ -122,6 +122,7 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 	}}
 	spanIndex := make(map[agentobs.SpanID]int)
 	modelNames := make(map[string]struct{})
+	var orphanedTerminals []SequencedRecord
 	for index, envelope := range stored.Records {
 		sequence := index + 1
 		if envelope.Sequence != sequence || envelope.Record.TraceID != stored.Trace.TraceID {
@@ -166,39 +167,12 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 				}
 			}
 		case agentobs.RecordSpanEnded:
-			position, found := spanIndex[envelope.Record.SpanID]
-			if !found {
-				return TraceProjection{}, errors.New("Collector projection Span terminal has no start")
-			}
-			span := &projection.Spans[position]
-			endSequence := sequence
-			ended := observed
-			duration := ended - span.StartedAtUnixNano
-			if duration < 0 {
-				return TraceProjection{}, errors.New("Collector projection Span duration is negative")
-			}
-			span.EndSequence, span.EndedAtUnixNano, span.DurationNanoseconds = &endSequence, &ended, &duration
-			span.Status = envelope.Record.Status
-			span.EndAttributes = cloneAttributes(envelope.Record.Attributes)
-			references, err := projectionReplayReferences(sequence, envelope.Record.Attributes)
-			if err != nil {
-				return TraceProjection{}, fmt.Errorf("project Collector Replay references for record %d: %w", sequence, err)
-			}
-			span.Replay = append(span.Replay, references...)
-			if span.Name == semconv.ModelCall {
-				span.Model = projectModelAnalysis(*span)
-				for _, model := range []string{span.Model.RequestedModel, span.Model.SelectedModel} {
-					if model != "" {
-						modelNames[model] = struct{}{}
-					}
+			if err := applyProjectedSpanTerminal(&projection, spanIndex, sequence, envelope, modelNames); err != nil {
+				if errors.Is(err, ErrProjectionPending) {
+					orphanedTerminals = append(orphanedTerminals, envelope)
+					continue
 				}
-			}
-			if span.SpanID == stored.Trace.RootSpanID {
-				projection.Summary.Active = false
-				projection.Summary.Status = span.Status
-				projection.Summary.EndedAtUnixNano = &ended
-				rootDuration := ended - span.StartedAtUnixNano
-				projection.Summary.DurationNanoseconds = &rootDuration
+				return TraceProjection{}, err
 			}
 		case agentobs.RecordEvent:
 			projection.Events = append(projection.Events, EventProjection{
@@ -215,12 +189,56 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 			})
 		}
 	}
+	for _, envelope := range orphanedTerminals {
+		sequence := envelope.Sequence
+		if err := applyProjectedSpanTerminal(&projection, spanIndex, sequence, envelope, modelNames); err != nil {
+			return TraceProjection{}, err
+		}
+	}
 	for model := range modelNames {
 		projection.Summary.Models = append(projection.Summary.Models, model)
 	}
 	sort.Strings(projection.Summary.Models)
 	projectSummaryAnalysis(&projection)
 	return projection, nil
+}
+
+func applyProjectedSpanTerminal(projection *TraceProjection, spanIndex map[agentobs.SpanID]int, sequence int, envelope SequencedRecord, modelNames map[string]struct{}) error {
+	position, found := spanIndex[envelope.Record.SpanID]
+	if !found {
+		return ErrProjectionPending
+	}
+	span := &projection.Spans[position]
+	endSequence := sequence
+	ended := envelope.Record.OccurredAt.UnixNano()
+	duration := ended - span.StartedAtUnixNano
+	if duration < 0 {
+		return errors.New("Collector projection Span duration is negative")
+	}
+	span.EndSequence, span.EndedAtUnixNano, span.DurationNanoseconds = &endSequence, &ended, &duration
+	span.Status = envelope.Record.Status
+	span.EndAttributes = cloneAttributes(envelope.Record.Attributes)
+	references, err := projectionReplayReferences(sequence, envelope.Record.Attributes)
+	if err != nil {
+		return fmt.Errorf("project Collector Replay references for record %d: %w", sequence, err)
+	}
+	span.Replay = append(span.Replay, references...)
+	if span.Name == semconv.ModelCall {
+		span.Model = projectModelAnalysis(*span)
+		for _, model := range []string{span.Model.RequestedModel, span.Model.SelectedModel} {
+			if model != "" {
+				modelNames[model] = struct{}{}
+			}
+		}
+	}
+	if span.SpanID == projection.Summary.RootSpanID {
+		projection.Summary.Active = false
+		projection.Summary.Status = span.Status
+		projection.Summary.EndedAtUnixNano = &ended
+		rootDuration := ended - span.StartedAtUnixNano
+		projection.Summary.DurationNanoseconds = &rootDuration
+	}
+	return nil
 }
 
 func projectionReplayReferences(sequence int, attributes []agentobs.Attribute) ([]ReplayReferenceProjection, error) {

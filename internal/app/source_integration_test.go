@@ -301,7 +301,7 @@ func TestCreateSourceUploadIntentReturnsDirectUploadPolicyWithoutCreatingSource(
 	owner, csrf := api.registerWithCSRF(t, "source-upload-api@example.com")
 	notebookID := createSourceTestNotebook(t, api, owner, "source-upload-api")
 	uploads := &recordingSourceUploads{}
-	api.server = app.NewServer(app.Config{CookieSecure: false, SourceUploads: uploads}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceUploads: uploads}), api.db)
 	api.handler = api.server.Handler()
 
 	response := api.postJSONWithCookieAndCSRF(t,
@@ -344,7 +344,7 @@ func TestCreateSourceUploadIntentAcceptsEverySupportedFileFormatIndependently(t 
 	owner, csrf := api.registerWithCSRF(t, "source-formats-api@example.com")
 	notebookID := createSourceTestNotebook(t, api, owner, "source-formats-api")
 	uploads := &recordingSourceUploads{}
-	api.server = app.NewServer(app.Config{CookieSecure: false, SourceUploads: uploads}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceUploads: uploads}), api.db)
 	api.handler = api.server.Handler()
 	cases := []struct {
 		title, format, mediaType string
@@ -453,9 +453,9 @@ func TestCreateURLSourceIsIdempotentAndRepeatedURLReusesNotebookSource(t *testin
 		Payload: payload, ContentSHA256: hex.EncodeToString(digest[:]),
 	}}
 	objects := objectstore.NewMemoryStore()
-	api.server = app.NewServer(app.Config{
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{
 		CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objects,
-	}, api.db)
+	}), api.db)
 	api.handler = api.server.Handler()
 
 	create := func(key string) *httptest.ResponseRecorder {
@@ -518,7 +518,7 @@ func TestCreateYouTubeURLSourcePersistsCaptionSnapshotFormat(t *testing.T) {
 		FinalURL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", MediaType: "application/vnd.nano.youtube-captions+json",
 		Payload: payload, ContentSHA256: hex.EncodeToString(digest[:]),
 	}}
-	api.server = app.NewServer(app.Config{CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objectstore.NewMemoryStore()}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objectstore.NewMemoryStore()}), api.db)
 	api.handler = api.server.Handler()
 	response := api.postJSONWithCookieAndCSRF(t,
 		"/api/v1/notebooks/"+notebookID+"/sources/urls",
@@ -576,7 +576,7 @@ func TestFinalizeSourceUploadValidatesObjectAndAtomicallyQueuesProcessing(t *tes
 	owner, csrf := api.registerWithCSRF(t, "source-finalize-api@example.com")
 	notebookID := createSourceTestNotebook(t, api, owner, "source-finalize-api")
 	uploads := &recordingSourceUploads{}
-	api.server = app.NewServer(app.Config{CookieSecure: false, SourceUploads: uploads}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceUploads: uploads}), api.db)
 	api.handler = api.server.Handler()
 
 	created := api.postJSONWithCookieAndCSRF(t,
@@ -660,7 +660,7 @@ func TestFinalizeSourceUploadRejectsMismatchedObjectWithoutAuthorityRows(t *test
 	owner, csrf := api.registerWithCSRF(t, "source-finalize-mismatch@example.com")
 	notebookID := createSourceTestNotebook(t, api, owner, "source-finalize-mismatch")
 	uploads := &recordingSourceUploads{validationErr: fmt.Errorf("checksum differs: %w", objectstore.ErrUploadMismatch)}
-	api.server = app.NewServer(app.Config{CookieSecure: false, SourceUploads: uploads}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceUploads: uploads}), api.db)
 	api.handler = api.server.Handler()
 
 	created := api.postJSONWithCookieAndCSRF(t,

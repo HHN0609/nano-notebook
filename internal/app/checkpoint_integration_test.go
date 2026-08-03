@@ -68,12 +68,14 @@ func TestCheckpointAppendIsIdempotentAndRejectsIdentityConflict(t *testing.T) {
 }
 
 func TestRuntimeLoadProjectsPinnedSprint3Configuration(t *testing.T) {
-	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "runtime-pinned-config@example.com")
-	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c069")
+	api, _, _, chatID := newChatFixture(t, "runtime-pinned-config@example.com")
+	runID := admitLegacyRunForTest(t, api, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c069", "run_runtime_pinned_config", "job_runtime_pinned_config")
 	ctx := context.Background()
 	if _, err := api.db.Pool().Exec(ctx, `
 		update agent_runs
-		set time_zone = 'Asia/Tokyo', deadline_at = now() + interval '5 minutes',
+		set time_zone = 'Asia/Tokyo',
+			parent_context_manifest = coalesce(parent_context_manifest,'{}'::jsonb) || '{"time_zone":"Asia/Tokyo"}'::jsonb,
+			deadline_at = now() + interval '5 minutes',
 			action_decision_limit = 2, final_decision_limit = 1,
 			action_limit = 5, action_batch_limit = 2,
 			action_result_byte_limit = 8192, action_results_byte_limit = 24576
@@ -171,7 +173,7 @@ func TestDecisionContextReconstructsCompletedCheckpointBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	definitions := registry.Definitions(agent.ActionPolicy{RemainingActions: 6})
+	definitions := registry.Definitions(context.Background(), agent.ActionPolicy{RemainingActions: 6})
 
 	request, err := runtime.BuildDecisionRequest(ctx, execution, prefix, definitions)
 	if err != nil {
@@ -454,7 +456,10 @@ func TestCheckpointReconciliationPreservesDeadlineExpiryReason(t *testing.T) {
 		if err := tx.Rollback(ctx); err != nil {
 			return err
 		}
-		if _, err := api.db.Pool().Exec(ctx, `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, runID); err != nil {
+		if _, err := api.db.Pool().Exec(ctx, `
+			update agent_trees set absolute_deadline = now() - interval '1 second'
+			where id = (select tree_id from agent_runs where id = $1)
+		`, runID); err != nil {
 			return err
 		}
 		return errors.New("simulated write failure at deadline")
@@ -502,7 +507,10 @@ func TestCheckpointAppendFencesExpiredRunDeadline(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim = %+v ok=%t err=%v", claimed, ok, err)
 	}
-	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, runID); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_trees set absolute_deadline = now() - interval '1 second'
+		where id = (select tree_id from agent_runs where id = $1)
+	`, runID); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := agent.NewFinalDraftCheckpoint(1, models.FinalDraft{Text: "Must not commit."})

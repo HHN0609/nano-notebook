@@ -31,7 +31,6 @@ type AttemptExecutor interface {
 type LeaderExecutor struct {
 	pool               *pgxpool.Pool
 	normal             AttemptExecutor
-	router             LeaderRouter
 	planner            ResearchPlanner
 	provider           websearch.Provider
 	researchToolHost   *MCPToolHost
@@ -67,8 +66,8 @@ func WithResearchResultContract(contract agentcatalog.ContractVersion) LeaderExe
 	return func(executor *LeaderExecutor) { executor.researchResult = contract }
 }
 
-func NewLeaderExecutor(pool *pgxpool.Pool, normal AttemptExecutor, router LeaderRouter, planner ResearchPlanner, provider websearch.Provider, options ...LeaderExecutorOption) *LeaderExecutor {
-	executor := &LeaderExecutor{pool: pool, normal: normal, router: router, planner: planner, provider: provider, traceSink: DiscardTraceSink{}}
+func NewLeaderExecutor(pool *pgxpool.Pool, normal AttemptExecutor, planner ResearchPlanner, provider websearch.Provider, options ...LeaderExecutorOption) *LeaderExecutor {
+	executor := &LeaderExecutor{pool: pool, normal: normal, planner: planner, provider: provider, traceSink: DiscardTraceSink{}}
 	for _, option := range options {
 		option(executor)
 	}
@@ -93,8 +92,6 @@ type leaderRunContext struct {
 	Status             string
 	DeadlineAt         time.Time
 	ExistingChildCount int
-	RecentPairs        []LeaderConversationPair
-	ExistingRoute      *LeaderRoute
 	DelegationState    *string
 }
 
@@ -111,7 +108,7 @@ func (e *LeaderExecutor) executeExpectedDefinition(ctx context.Context, attempt 
 }
 
 func (e *LeaderExecutor) executeExpected(ctx context.Context, attempt Attempt, expectedRuntimeKind, expectedIdentity string) error {
-	if e == nil || e.pool == nil || e.normal == nil || e.router == nil || e.planner == nil || e.provider == nil {
+	if e == nil || e.pool == nil || e.normal == nil || e.planner == nil || e.provider == nil {
 		return errors.New("Leader Executor dependencies are incomplete")
 	}
 	scope, err := NewTraceScope(e.traceSink, WithTraceScopeReplayStager(e.replayStager))
@@ -144,52 +141,10 @@ func (e *LeaderExecutor) execute(ctx context.Context, attempt Attempt, expectedR
 	if !run.isChatLeader() {
 		return ErrInvalidLeaderRoute
 	}
-	if run.ExistingRoute == nil {
-		request := LeaderRouteRequest{Model: run.Model, UserMessage: run.Message, RecentPairs: run.RecentPairs, InvocationPolicy: run.ModelInvocation}
-		var decision LeaderRouteDecision
-		if traced, ok := e.router.(TracedLeaderRouter); ok {
-			traceContext, tracer, traceErr := e.modelTraceContext(ctx, attempt)
-			if traceErr != nil {
-				return traceErr
-			}
-			modelIdentity := TraceLeaderRouteModelStartIdentity(attempt.RunID, attempt.AttemptNo)
-			decision, err = traced.DecideRouteTraced(traceContext, tracer, request, ModelTraceOptions{
-				StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
-				DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: e.replayStager,
-				Phase: ModelPhaseLeaderRouting, Role: RoleLeader, Prompt: promptTraceRef("agent.leader-router", 1),
-			})
-		} else {
-			decision, err = e.router.DecideRoute(ctx, request)
-		}
-		if err != nil {
-			return err
-		}
-		providerAvailable := true
-		if availability, ok := e.provider.(interface{ ResearchAvailable() bool }); ok {
-			providerAvailable = availability.ResearchAvailable()
-		}
-		policy := EvaluateDelegationPolicy(decision, DelegationPolicyContext{
-			MemberRole: run.MemberRole, NotebookAuthorized: run.MemberRole != "", RootActive: run.Status == "running",
-			DeadlineValid: time.Now().Before(run.DeadlineAt), ProviderAvailable: providerAvailable,
-			RelationshipRegistered: run.RuntimeKind == "legacy_role" ||
-				(run.RuntimeKind == "configured" && e.researchToolHost != nil && e.researchDefinition.Identity != ""),
-			ExistingChildCount: run.ExistingChildCount,
-		})
-		if policy.EffectiveRoute == LeaderContinueChat {
-			if err := e.persistRoute(ctx, attempt, policy); err != nil {
-				return err
-			}
-			return e.normal.Execute(ctx, attempt)
-		}
-		return e.delegate(ctx, attempt, run, policy)
+	if run.RuntimeKind == "legacy_role" && run.DelegationState != nil {
+		return e.resumeDelegated(ctx, attempt, run)
 	}
-	if *run.ExistingRoute == LeaderContinueChat {
-		return e.normal.Execute(ctx, attempt)
-	}
-	if run.RuntimeKind == "configured" && run.DelegationState == nil {
-		return e.delegateConfigured(ctx, attempt, run, false, LeaderRoutePolicy{})
-	}
-	return e.resumeDelegated(ctx, attempt, run)
+	return e.normal.Execute(ctx, attempt)
 }
 
 func (r leaderRunContext) executionIdentity() string {
@@ -211,7 +166,7 @@ func (r leaderRunContext) isChatLeader() bool {
 
 func (e *LeaderExecutor) loadRun(ctx context.Context, runID string) (leaderRunContext, error) {
 	var run leaderRunContext
-	var route, delegationState *string
+	var delegationState *string
 	var temperature *float64
 	var maxOutputTokens, timeoutMS *int
 	tx, err := e.workerTx(ctx)
@@ -229,7 +184,7 @@ func (e *LeaderExecutor) loadRun(ctx context.Context, runID string) (leaderRunCo
 			coalesce(member.role,''),r.status,coalesce(r.deadline_at,tree.absolute_deadline),
 			policy.temperature,policy.max_output_tokens,policy.timeout_ms,
 			(select count(*) from agent_run_delegations child_link where child_link.parent_run_id=tree.root_agent_run_id),
-			route.effective_route,delegation.state
+			delegation.state
 		from agent_runs r
 		left join agent_trees tree on tree.id=r.tree_id
 		left join agent_model_policy_versions policy
@@ -240,14 +195,13 @@ func (e *LeaderExecutor) loadRun(ctx context.Context, runID string) (leaderRunCo
 		join chat_messages m on m.id=coalesce(r.input_message_id,product.input_message_id)
 		left join notebook_memberships member on member.notebook_id=c.notebook_id and member.user_id=coalesce(r.user_id,product.user_id)
 		left join agent_run_delegations relationship on relationship.child_run_id=r.id
-		left join agent_run_routes route on route.run_id=tree.root_agent_run_id
 		left join agent_run_delegations delegation on delegation.parent_run_id=tree.root_agent_run_id
 		where r.id=$1
 	`, runID).Scan(&run.RuntimeKind, &run.Role, &run.ExecutorIdentity,
 		&run.Definition.Identity, &run.Definition.Version, &run.DefinitionSHA256,
 		&run.UserID, &run.ChatID, &run.NotebookID, &run.Message, &run.Model,
 		&run.PromptVersion, &run.TimeZone, &run.MemberRole, &run.Status, &run.DeadlineAt,
-		&temperature, &maxOutputTokens, &timeoutMS, &run.ExistingChildCount, &route, &delegationState)
+		&temperature, &maxOutputTokens, &timeoutMS, &run.ExistingChildCount, &delegationState)
 	if err != nil {
 		return leaderRunContext{}, err
 	}
@@ -259,190 +213,11 @@ func (e *LeaderExecutor) loadRun(ctx context.Context, runID string) (leaderRunCo
 			Temperature: temperature, MaxOutputTokens: *maxOutputTokens, Timeout: time.Duration(*timeoutMS) * time.Millisecond,
 		}
 	}
-	if route != nil {
-		parsed := LeaderRoute(*route)
-		run.ExistingRoute = &parsed
-	}
 	run.DelegationState = delegationState
-	if run.isChatLeader() {
-		rows, err := tx.Query(ctx, `
-			select input.content,output.content
-			from chat_runs prior
-			join chat_messages input on input.id=prior.input_message_id and input.role='user'
-			join chat_messages output on output.id=prior.output_message_id and output.role='assistant'
-			join chat_runs current on current.root_agent_run_id=$1
-			where prior.chat_id=current.chat_id and prior.status='completed'
-			  and (input.created_at,input.id)<(
-				select created_at,id from chat_messages where id=current.input_message_id
-			  )
-			order by input.created_at desc,input.id desc limit 3
-		`, runID)
-		if err != nil {
-			return leaderRunContext{}, err
-		}
-		newest := make([]LeaderConversationPair, 0, 3)
-		for rows.Next() {
-			var pair LeaderConversationPair
-			if err := rows.Scan(&pair.User, &pair.Assistant); err != nil {
-				rows.Close()
-				return leaderRunContext{}, err
-			}
-			newest = append(newest, pair)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return leaderRunContext{}, err
-		}
-		rows.Close()
-		for index := len(newest) - 1; index >= 0; index-- {
-			run.RecentPairs = append(run.RecentPairs, newest[index])
-		}
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return leaderRunContext{}, err
 	}
 	return run, nil
-}
-
-func (e *LeaderExecutor) persistRoute(ctx context.Context, attempt Attempt, policy LeaderRoutePolicy) error {
-	tx, err := e.workerTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	tag, err := tx.Exec(ctx, `
-		insert into agent_run_routes(run_id,route,requested_route,effective_route,intent_reason_code,policy_reason_code)
-		select r.id,$3,$4,$3,$5,$6 from agent_runs r join agent_jobs j on j.run_id=r.id
-		where r.id=$1 and (
-			(r.runtime_kind='legacy_role' and r.agent_role='leader')
-			or (r.runtime_kind='configured' and r.executor_identity='chat_leader')
-		) and r.status='running'
-		  and j.id=$2 and j.status='running' and j.lease_token=$7::uuid and j.lease_expires_at>now()
-		on conflict(run_id) do nothing
-	`, attempt.RunID, attempt.JobID, policy.EffectiveRoute, policy.RequestedRoute, policy.IntentReason, policy.PolicyReason, attempt.LeaseToken)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 1 {
-		if err := chargeConfiguredTreeInTx(ctx, tx, attempt.RunID, treeBudgetCharge{ModelCalls: 1}); err != nil {
-			return err
-		}
-	}
-	if err := RecordLeaderRouteInTx(ctx, tx, attempt.RunID, policy); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func (e *LeaderExecutor) delegate(ctx context.Context, attempt Attempt, run leaderRunContext, policy LeaderRoutePolicy) error {
-	if run.RuntimeKind == "configured" {
-		return e.delegateConfigured(ctx, attempt, run, true, policy)
-	}
-	tx, err := e.workerTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	var valid bool
-	if err := tx.QueryRow(ctx, `
-		select exists(
-			select 1 from agent_runs r join agent_jobs j on j.run_id=r.id
-			where r.id=$1 and r.agent_role='leader' and r.status='running'
-			  and j.id=$2 and j.status='running' and j.lease_token=$3::uuid and j.lease_expires_at>now()
-		)
-	`, attempt.RunID, attempt.JobID, attempt.LeaseToken).Scan(&valid); err != nil || !valid {
-		if err != nil {
-			return err
-		}
-		return ErrLeaseLost
-	}
-	childRunID := "run_" + uuid.NewString()
-	childJobID := "job_" + uuid.NewString()
-	sessionID := "dss_" + uuid.NewString()
-	if _, err := tx.Exec(ctx, `
-		insert into agent_run_routes(run_id,route,requested_route,effective_route,intent_reason_code,policy_reason_code)
-		values($1,$2,$3,$2,$4,$5)
-	`, attempt.RunID, policy.EffectiveRoute, policy.RequestedRoute, policy.IntentReason, policy.PolicyReason); err != nil {
-		return err
-	}
-	if err := RecordLeaderRouteInTx(ctx, tx, attempt.RunID, policy); err != nil {
-		return err
-	}
-	if err := (DelegationKernel{}).CreateInTx(ctx, tx, CreateDelegationCommand{
-		ParentAttempt: attempt, ChildRunID: childRunID, ChildJobID: childJobID,
-		ChildRole: RoleResearch, ChildPromptVersion: "agent.research-planner@1",
-	}); err != nil {
-		return err
-	}
-	if _, err := sourcediscovery.NewStore(tx).EnsureResearchSession(ctx, sourcediscovery.ResearchSessionCommand{
-		ID: sessionID, NotebookID: run.NotebookID, UserID: run.UserID, OriginChatID: run.ChatID,
-		ResearchRunID: childRunID, Query: truncateLeaderRunes(run.Message, 500),
-	}); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `
-		update agent_runs set discovery_session_id=$3,updated_at=now()
-		where id in ($1,$2) and discovery_session_id is null
-	`, attempt.RunID, childRunID, sessionID); err != nil {
-		return err
-	}
-	var childModel, childPromptVersion string
-	if err := tx.QueryRow(ctx, `select model,prompt_version from agent_runs where id=$1`, childRunID).Scan(&childModel, &childPromptVersion); err != nil {
-		return err
-	}
-	if err := StartRunTraceInTx(ctx, tx, childRunID, childModel, childPromptVersion, nil); err != nil {
-		return err
-	}
-	if err := RecordDelegationCreatedInTx(ctx, tx, attempt.RunID, childRunID); err != nil {
-		return err
-	}
-	if err := RecordAttemptWaitingInTx(ctx, tx, attempt.RunID, attempt.JobID, attempt.AttemptNo); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs',$1)`, attempt.RunID); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func (e *LeaderExecutor) delegateConfigured(ctx context.Context, attempt Attempt, run leaderRunContext, persistRoute bool, policy LeaderRoutePolicy) error {
-	if e == nil || e.researchToolHost == nil || e.researchDefinition.Identity == "" || run.Definition.Identity == "" || len(run.DefinitionSHA256) != 64 {
-		return errors.New("configured Delegation Tool Plane is unavailable")
-	}
-	if persistRoute {
-		if err := e.persistRoute(ctx, attempt, policy); err != nil {
-			return err
-		}
-	}
-	session, err := e.researchToolHost.OpenAttempt(ctx, AttemptToolScope{
-		Definition: run.Definition, Attempt: attempt, DefaultTimeZone: run.TimeZone,
-		RemainingActions: 1, Deadline: run.DeadlineAt,
-	})
-	if err != nil {
-		return err
-	}
-	defer session.Close()
-	toolName, err := agentcatalog.DelegationToolName(e.researchDefinition)
-	if err != nil {
-		return err
-	}
-	input, err := json.Marshal(map[string]string{"request": run.Message})
-	if err != nil {
-		return err
-	}
-	result, err := session.CallTool(ctx, toolName, input, "decision:1/action:0")
-	if err != nil {
-		return err
-	}
-	var receipt struct {
-		DelegationID string `json:"delegation_id"`
-		State        string `json:"state"`
-	}
-	if result.Status != ActionSucceeded || json.Unmarshal(result.Output, &receipt) != nil ||
-		receipt.DelegationID == "" || receipt.State != string(DelegationWaiting) {
-		return errors.New("configured Delegation scheduling receipt is invalid")
-	}
-	return nil
 }
 
 func (e *LeaderExecutor) executeResearch(ctx context.Context, attempt Attempt, run leaderRunContext) error {
@@ -947,11 +722,6 @@ func (e *LeaderExecutor) failResearch(ctx context.Context, attempt Attempt, erro
 }
 
 func (e *LeaderExecutor) resumeDelegated(ctx context.Context, attempt Attempt, run leaderRunContext) error {
-	if run.RuntimeKind == "configured" && run.DelegationState != nil && *run.DelegationState == string(DelegationSucceeded) {
-		if err := e.appendConfiguredDelegationResult(ctx, attempt); err != nil {
-			return err
-		}
-	}
 	tx, err := e.workerTx(ctx)
 	if err != nil {
 		return err
@@ -1011,44 +781,6 @@ func (e *LeaderExecutor) resumeDelegated(ctx context.Context, attempt Attempt, r
 		return err
 	}
 	return tx.Commit(ctx)
-}
-
-func (e *LeaderExecutor) appendConfiguredDelegationResult(ctx context.Context, attempt Attempt) error {
-	var result AgentResult
-	var payload []byte
-	if err := e.pool.QueryRow(ctx, `
-		select result.id,result.producer_run_id,result.contract_identity,result.contract_version,
-			result.contract_sha256,result.payload,result.payload_sha256,result.payload_bytes
-		from agent_run_delegations delegation
-		join agent_run_results result on result.id=delegation.result_id
-		where delegation.parent_run_id=$1 and delegation.state='succeeded'
-	`, attempt.RunID).Scan(
-		&result.ID, &result.ProducerRunID, &result.Contract.Identity, &result.Contract.Version,
-		&result.ContractSHA256, &payload, &result.PayloadSHA256, &result.PayloadBytes,
-	); err != nil {
-		return err
-	}
-	output, err := json.Marshal(struct {
-		ResultID       string `json:"result_id"`
-		Contract       string `json:"contract"`
-		ContractSHA256 string `json:"contract_sha256"`
-		PayloadSHA256  string `json:"payload_sha256"`
-		PayloadBytes   int    `json:"payload_bytes"`
-	}{
-		ResultID: result.ID, Contract: result.Contract.String(), ContractSHA256: result.ContractSHA256,
-		PayloadSHA256: result.PayloadSHA256, PayloadBytes: result.PayloadBytes,
-	})
-	if err != nil {
-		return err
-	}
-	checkpoint, err := NewActionResultCheckpoint(1, 0, "decision:1/action:0", ActionResult{Status: ActionSucceeded, Output: output})
-	if err != nil {
-		return err
-	}
-	runtime := NewPostgresRuntime(e.pool, BareSystemPrompt, nil,
-		WithTraceSink(e.traceSink), WithReplayStager(e.replayStager))
-	_, err = runtime.AppendCheckpoint(ctx, attempt, checkpoint)
-	return err
 }
 
 func (e *LeaderExecutor) failLeaderInTx(ctx context.Context, tx pgx.Tx, attempt Attempt, errorCode string) error {

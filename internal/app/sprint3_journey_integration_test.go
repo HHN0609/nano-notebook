@@ -141,9 +141,13 @@ func TestSprint3FourLocationJourneyStaysWithinPinnedBudgetsAndReloadsOneAnswer(t
 	var attemptNo, actionDecisionLimit, finalDecisionLimit, actionLimit, actionBatchLimit int
 	if err := api.db.Pool().QueryRow(ctx, `
 		select r.status, j.status, r.output_message_id, m.content, j.attempt_no,
-			r.action_decision_limit, r.final_decision_limit, r.action_limit, r.action_batch_limit
+			coalesce(r.action_decision_limit,greatest(0,(definition.limits->>'model_calls')::integer-1)),
+			coalesce(r.final_decision_limit,1),
+			coalesce(r.action_limit,(definition.limits->>'actions')::integer),
+			coalesce(r.action_batch_limit,(definition.limits->>'action_batch')::integer)
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
+		join agent_definition_versions definition on definition.definition_identity=r.definition_identity and definition.definition_version=r.definition_version
 		join chat_messages m on m.id = r.output_message_id
 		where r.id = $1`, admittedBody.RunID).Scan(
 		&runStatus, &jobStatus, &outputID, &answer, &attemptNo,

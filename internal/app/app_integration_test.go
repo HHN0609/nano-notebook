@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 )
 
@@ -527,7 +528,7 @@ func TestMigrationsReapplyAndInstallRLSBoundary(t *testing.T) {
 }
 
 func TestMigrationsInstallSprint3RunConfiguration(t *testing.T) {
-	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "migration-sprint3-config@example.com")
+	api, _, _, chatID := newChatFixture(t, "migration-sprint3-config@example.com")
 	ctx := context.Background()
 
 	wantColumns := []string{
@@ -571,7 +572,7 @@ func TestMigrationsInstallSprint3RunConfiguration(t *testing.T) {
 	}
 
 	admittedAfter := time.Now().UTC()
-	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c036")
+	runID := admitLegacyRunForTest(t, api, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c036", "run_migration_sprint3_config", "job_migration_sprint3_config")
 	var timeZone string
 	var deadlineAt time.Time
 	var actionDecisionLimit, finalDecisionLimit, actionLimit, actionBatchLimit int
@@ -594,9 +595,9 @@ func TestMigrationsInstallSprint3RunConfiguration(t *testing.T) {
 }
 
 func TestMigrationsUpgradePopulatedSprint2BRunConfiguration(t *testing.T) {
-	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "migration-sprint2b@example.com")
+	api, _, _, chatID := newChatFixture(t, "migration-sprint2b@example.com")
 	ctx := context.Background()
-	terminalRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c046")
+	terminalRunID := admitLegacyRunForTest(t, api, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c046", "run_migration_terminal", "job_migration_terminal")
 	if _, err := api.db.Pool().Exec(ctx, `
 		update agent_runs set status = 'failed', error_code = 'model_unavailable', finished_at = now(), updated_at = now()
 		where id = $1`, terminalRunID); err != nil {
@@ -607,7 +608,7 @@ func TestMigrationsUpgradePopulatedSprint2BRunConfiguration(t *testing.T) {
 		where run_id = $1`, terminalRunID); err != nil {
 		t.Fatal(err)
 	}
-	activeRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c047")
+	activeRunID := admitLegacyRunForTest(t, api, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c047", "run_migration_active", "job_migration_active")
 	if _, err := api.db.Pool().Exec(ctx, `
 		alter table agent_runs drop column time_zone;
 		alter table agent_runs drop column deadline_at;
@@ -928,7 +929,14 @@ func newTestAPI(t *testing.T) *testAPI {
 	if err := app.RegisterAgentConfiguration(ctx, db, promptSet, configuration); err != nil {
 		t.Fatal(err)
 	}
-	server := app.NewServer(app.Config{CookieSecure: false, AgentRun: runConfig, AgentConfiguration: configuration}, db)
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := app.NewServer(app.Config{
+		CookieSecure: false, AgentRun: runConfig, AgentConfiguration: configuration,
+		AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@1"),
+	}, db)
 	return &testAPI{handler: server.Handler(), server: server, db: db, csrfBySession: map[string]*http.Cookie{}}
 }
 

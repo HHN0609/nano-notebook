@@ -40,7 +40,7 @@ func TestAgentConfigurationRegistersIdempotentlyAndRejectsIdentityMutation(t *te
 }
 
 func TestWorkerReadinessAcceptsOnlyCurrentAndImmediatelyPreviousCompatibleSet(t *testing.T) {
-	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configuration-window@example.com")
+	api, _, _, chatID := newChatFixture(t, "configuration-window@example.com")
 	ctx := context.Background()
 	makeConfiguration := func(id string) agent.AgentConfigurationSet {
 		run := agent.DefaultRunConfig(id)
@@ -56,7 +56,7 @@ func TestWorkerReadinessAcceptsOnlyCurrentAndImmediatelyPreviousCompatibleSet(t 
 	unsupported := makeConfiguration("configuration-window-v0")
 	previous := makeConfiguration("configuration-window-v1")
 	current := makeConfiguration("configuration-window-v2")
-	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c093")
+	runID := admitLegacyRunForTest(t, api, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c093", "run_configuration_window", "job_configuration_window")
 	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set agent_config_id=$2,executor_version=$3 where id=$1`, runID, previous.ID, previous.Profiles[agent.RoleLeader].ExecutorVersion); err != nil {
 		t.Fatal(err)
 	}

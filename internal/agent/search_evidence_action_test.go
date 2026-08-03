@@ -139,10 +139,20 @@ func TestSearchEvidenceDefinitionIsAvailableOnlyForRunsWithPinnedSources(t *test
 	}
 	empty := Execution{SelectedSourceCount: 0}
 	selected := Execution{SelectedSourceCount: 2}
-	if got := registry.Definitions(ActionPolicy{RemainingActions: 1, Execution: &empty}); len(got) != 0 {
+	if got := registry.Definitions(context.Background(), ActionPolicy{RemainingActions: 1, Execution: &empty}); len(got) != 0 {
 		t.Fatalf("empty Run definitions=%+v", got)
 	}
-	if got := registry.Definitions(ActionPolicy{RemainingActions: 1, Execution: &selected}); len(got) != 1 || got[0].Name != "search_evidence" {
+	if got := registry.Definitions(context.Background(), ActionPolicy{RemainingActions: 1, Execution: &selected}); len(got) != 1 || got[0].Name != "search_evidence" {
 		t.Fatalf("selected Run definitions=%+v", got)
+	}
+}
+
+func TestSearchEvidenceAvailableReturnsTypedReason(t *testing.T) {
+	action := NewSearchEvidenceAction(&evidenceSearchStub{}).(ActionAvailability)
+	if ok, reason := action.Available(Execution{}); ok || reason != "no_sources_selected" {
+		t.Fatalf("empty ok=%t reason=%q", ok, reason)
+	}
+	if ok, reason := action.Available(Execution{SelectedSourceCount: 1}); !ok || reason != "" {
+		t.Fatalf("selected ok=%t reason=%q", ok, reason)
 	}
 }

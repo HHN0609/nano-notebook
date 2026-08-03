@@ -21,14 +21,42 @@ type configuredDelegationAction struct {
 	child      agentcatalog.Definition
 	definition models.ActionDefinition
 	validator  *jsonschema.Resolved
+	provider   ResearchProviderAvailability
+	traceSink  TraceSink
+}
+
+type ResearchProviderAvailability interface {
+	ResearchAvailable() bool
+}
+
+type alwaysAvailableResearchProvider struct{}
+
+func (alwaysAvailableResearchProvider) ResearchAvailable() bool { return true }
+
+func ResearchAvailabilityFrom(provider any) ResearchProviderAvailability {
+	if provider == nil {
+		return alwaysAvailableResearchProvider{}
+	}
+	if availability, ok := provider.(ResearchProviderAvailability); ok {
+		return availability
+	}
+	return alwaysAvailableResearchProvider{}
 }
 
 // NewConfiguredDelegationToolRegistrations derives every callable child tool
 // from the immutable catalog. Parent scoping remains an MCP Host concern, so a
 // model can never supply or discover an arbitrary child identity.
-func NewConfiguredDelegationToolRegistrations(catalog agentcatalog.Catalog, pool *pgxpool.Pool) ([]MCPToolRegistration, error) {
+func NewConfiguredDelegationToolRegistrations(catalog agentcatalog.Catalog, pool *pgxpool.Pool, provider ResearchProviderAvailability, traceSinks ...TraceSink) ([]MCPToolRegistration, error) {
 	if pool == nil {
 		return nil, errors.New("configured Delegation Tool store is nil")
+	}
+	availability := ResearchProviderAvailability(alwaysAvailableResearchProvider{})
+	if provider != nil {
+		availability = provider
+	}
+	traceSink := TraceSink(nil)
+	if len(traceSinks) > 0 {
+		traceSink = traceSinks[0]
 	}
 	children := make(map[agentcatalog.Reference]bool)
 	for _, parent := range catalog.Definitions() {
@@ -63,6 +91,7 @@ func NewConfiguredDelegationToolRegistrations(catalog agentcatalog.Catalog, pool
 		registrations = append(registrations, MCPToolRegistration{
 			Action: &configuredDelegationAction{
 				pool: pool, catalog: catalog, child: definition, validator: validator,
+				provider: availability, traceSink: traceSink,
 				definition: models.ActionDefinition{
 					Name: name, Description: strings.TrimSpace(definition.Delegation.Description),
 					InputSchema: append(json.RawMessage(nil), contract.Schema...),
@@ -83,10 +112,41 @@ func (a *configuredDelegationAction) Definition() models.ActionDefinition {
 	return definition
 }
 
-// Configured delegation is selected by the owning Executor's reviewed control
-// flow. The scheduling receipt must never be offered as an ordinary composer
-// result that a model could consume and continue past.
-func (*configuredDelegationAction) Available(Execution) bool { return false }
+func (a *configuredDelegationAction) Available(execution Execution) (bool, string) {
+	if execution.MemberRole != "owner" && execution.MemberRole != "editor" {
+		return false, string(LeaderPolicyMembershipDenied)
+	}
+	if a.provider != nil && !a.provider.ResearchAvailable() {
+		return false, string(LeaderPolicyProviderUnavailable)
+	}
+	if !a.relationshipRegistered(execution) {
+		return false, string(LeaderPolicyRelationshipUnregistered)
+	}
+	if execution.ExistingChildCount != 0 {
+		return false, string(LeaderPolicyChildLimit)
+	}
+	return true, ""
+}
+
+func (a *configuredDelegationAction) relationshipRegistered(execution Execution) bool {
+	if a == nil || a.child.Identity == "" || execution.AgentConfigID == "" {
+		return false
+	}
+	parent, err := agentcatalog.ParseReference(execution.AgentConfigID)
+	if err != nil {
+		return false
+	}
+	definition, ok := a.catalog.ResolveDefinition(parent)
+	if !ok {
+		return false
+	}
+	for _, child := range definition.Children {
+		if child == a.child.Reference() {
+			return true
+		}
+	}
+	return false
+}
 
 func (a *configuredDelegationAction) ValidateInput(payload json.RawMessage) error {
 	if a == nil || a.validator == nil {
@@ -125,6 +185,21 @@ func (a *configuredDelegationAction) Execute(ctx context.Context, request Action
 }
 
 func (a *configuredDelegationAction) schedule(ctx context.Context, request ActionRequest) (string, error) {
+	traceCtx := ctx
+	var traceScope *TraceScope
+	if _, ok := TraceScopeFromContext(ctx); !ok {
+		sink := TraceSink(DiscardTraceSink{})
+		if a.traceSink != nil {
+			sink = a.traceSink
+		}
+		scope, err := NewTraceScope(sink)
+		if err != nil {
+			return "", err
+		}
+		traceCtx = ContextWithTraceScope(ctx, scope)
+		traceScope = scope
+		defer traceScope.Rollback()
+	}
 	runtime := &PostgresRuntime{pool: a.pool}
 	tx, err := runtime.workerTx(ctx)
 	if err != nil {
@@ -219,7 +294,7 @@ func (a *configuredDelegationAction) schedule(ctx context.Context, request Actio
 	if _, err := tx.Exec(ctx, `insert into agent_jobs(id,kind,run_id,status) values($1,'agent_run',$2,'queued')`, childJobID, childRunID); err != nil {
 		return "", err
 	}
-	if err := StartRunTraceInTx(ctx, tx, childRunID, childPolicy.ProviderModel, childReference.String(), nil); err != nil {
+	if err := StartRunTraceInTx(traceCtx, tx, childRunID, childPolicy.ProviderModel, childReference.String(), nil); err != nil {
 		return "", err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -229,25 +304,6 @@ func (a *configuredDelegationAction) schedule(ctx context.Context, request Actio
 		return "", err
 	}
 
-	proposal, err := NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{{
-		Name: a.definition.Name, Input: append(json.RawMessage(nil), request.Input...),
-	}}})
-	if err != nil {
-		return "", err
-	}
-	checkpoint := Checkpoint{SequenceNo: 1, PendingCheckpoint: proposal}
-	if err := tx.QueryRow(ctx, `
-		insert into agent_run_checkpoints(
-			run_id,sequence_no,identity_key,kind,decision_no,payload_version,payload,payload_sha256
-		) values($1,1,$2,$3,$4,$5,$6::jsonb,$7)
-		returning created_at
-	`, request.Attempt.RunID, proposal.IdentityKey, string(proposal.Kind), proposal.DecisionNo,
-		proposal.PayloadVersion, []byte(proposal.Payload), proposal.PayloadSHA256).Scan(&checkpoint.CreatedAt); err != nil {
-		return "", err
-	}
-	if err := RecordCheckpointAcceptedInTx(ctx, tx, request.Attempt, checkpoint); err != nil {
-		return "", err
-	}
 	waitingTag, err := tx.Exec(ctx, `
 		update agent_jobs set status='waiting',lease_token=null,lease_expires_at=null,updated_at=now()
 		where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid
@@ -258,10 +314,10 @@ func (a *configuredDelegationAction) schedule(ctx context.Context, request Actio
 	if waitingTag.RowsAffected() != 1 {
 		return "", ErrLeaseLost
 	}
-	if err := RecordDelegationCreatedInTx(ctx, tx, request.Attempt.RunID, childRunID); err != nil {
+	if err := RecordDelegationCreatedInTx(traceCtx, tx, request.Attempt.RunID, childRunID); err != nil {
 		return "", err
 	}
-	if err := RecordAttemptWaitingInTx(ctx, tx, request.Attempt.RunID, request.Attempt.JobID, request.Attempt.AttemptNo); err != nil {
+	if err := RecordAttemptWaitingInTx(traceCtx, tx, request.Attempt.RunID, request.Attempt.JobID, request.Attempt.AttemptNo); err != nil {
 		return "", err
 	}
 	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_jobs',$1)`, childJobID); err != nil {
@@ -270,5 +326,11 @@ func (a *configuredDelegationAction) schedule(ctx context.Context, request Actio
 	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs',$1)`, request.Attempt.RunID); err != nil {
 		return "", err
 	}
-	return delegationID, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	if traceScope != nil {
+		traceScope.PublishAfterCommit(ctx)
+	}
+	return delegationID, nil
 }

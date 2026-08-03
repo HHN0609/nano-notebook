@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"testing"
+
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 )
 
 func TestChatSnapshotRestoresDurableMessagesAndTheNewestRunForEachInput(t *testing.T) {
@@ -28,12 +30,19 @@ func TestChatSnapshotRestoresDurableMessagesAndTheNewestRunForEachInput(t *testi
 		where id = $1`, admittedBody.RunID); err != nil {
 		t.Fatal(err)
 	}
-	const retryRunID = "run_snapshot_retry"
-	if _, err := api.db.Pool().Exec(ctx, `
-		insert into agent_runs(id, user_id, chat_id, input_message_id, status, model, prompt_version, created_at)
-		select $1, user_id, chat_id, input_message_id, 'queued', model, prompt_version, created_at + interval '1 second'
-		from agent_runs where id = $2`, retryRunID, admittedBody.RunID); err != nil {
-		t.Fatal(err)
+	retry := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+admittedBody.RunID+"/retry", map[string]any{
+		"time_zone": "Asia/Shanghai",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "snapshot-retry")
+	if retry.Code != http.StatusAccepted {
+		t.Fatalf("retry status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	var retryBody struct {
+		Run agent.RunSnapshot `json:"run"`
+	}
+	decodeBody(t, retry, &retryBody)
+	retryRunID := retryBody.Run.ID
+	if retryRunID == "" || retryRunID == admittedBody.RunID {
+		t.Fatalf("retry Run=%q old=%q", retryRunID, admittedBody.RunID)
 	}
 
 	snapshot := api.getWithCookie(t, "/api/v1/chats/"+chatID, sessionCookie)

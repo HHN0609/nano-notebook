@@ -33,8 +33,11 @@ func NewSearchEvidenceAction(backend EvidenceSearchBackend) Action {
 	return searchEvidenceAction{backend: backend}
 }
 
-func (searchEvidenceAction) Available(execution Execution) bool {
-	return execution.SelectedSourceCount > 0
+func (searchEvidenceAction) Available(execution Execution) (bool, string) {
+	if execution.SelectedSourceCount <= 0 {
+		return false, "no_sources_selected"
+	}
+	return true, ""
 }
 
 func (searchEvidenceAction) Definition() models.ActionDefinition {

@@ -163,7 +163,7 @@ func TestSprint5QueryCapacityAtControlPlaneBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	grantCapability(t, api, userID, "platform.trace.read")
-	server := app.NewServer(app.Config{CookieSecure: false, AdminTraces: queryClient}, api.db)
+	server := app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, AdminTraces: queryClient}), api.db)
 	controlPlane := httptest.NewServer(server.Handler())
 	defer controlPlane.Close()
 

@@ -360,7 +360,7 @@ func main() {
 		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolOrderedSync},
 		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync},
 	}
-	configuredDelegationTools, err := agent.NewConfiguredDelegationToolRegistrations(definitionCatalog, db.Pool())
+	configuredDelegationTools, err := agent.NewConfiguredDelegationToolRegistrations(definitionCatalog, db.Pool(), agent.ResearchAvailabilityFrom(searchProvider), traceExporter)
 	if err != nil {
 		slog.Error("configured Delegation Tools invalid", "error", err)
 		os.Exit(1)
@@ -401,8 +401,8 @@ func main() {
 		MaxBytes:           config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
 	})
 	roleRuntime := agent.NewLeaderExecutor(
-		db.Pool(), controller, agent.NewModelLeaderRouter(modelClient),
-		agent.NewModelResearchPlanner(modelClient), searchProvider, agent.WithLeaderTraceSink(traceExporter),
+		db.Pool(), controller, agent.NewModelResearchPlanner(modelClient), searchProvider,
+		agent.WithLeaderTraceSink(traceExporter),
 		agent.WithLeaderReplayStager(replayStager), agent.WithResearchCandidateValidator(candidateValidator),
 		agent.WithResearchMCPToolPlane(mcpToolHost, researchChild),
 		agent.WithResearchResultContract(researchResultContract),
@@ -830,6 +830,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		MailLeaseDuration: mailLeaseDuration, MailPollInterval: mailPollInterval, MailSMTPTimeout: mailSMTPTimeout,
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.AgentConfigurationID) == "" ||
+		config.AgentRelease.Identity == "" ||
 		strings.TrimSpace(config.LeaderModel) == "" || strings.TrimSpace(config.ResearchModel) == "" || strings.TrimSpace(config.Addr) == "" ||
 		strings.TrimSpace(collectorURL) == "" || strings.TrimSpace(config.CollectorServiceToken) == "" ||
 		strings.TrimSpace(config.ProducerID) == "" || config.BatchMaxRecords < 1 ||

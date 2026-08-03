@@ -35,7 +35,7 @@ func TestAdminTraceCapabilitiesGateRoutesAndAuditReplay(t *testing.T) {
 		AttachmentID: "019bf000-0000-7000-8000-000000000555", TraceID: "trace-admin", SpanID: "span-admin",
 		Class: replay.ClassModelRequest, Sealed: sealed,
 	}}
-	server := app.NewServer(app.Config{CookieSecure: false, AdminTraces: fake, ReplaySealer: sealer}, api.db)
+	server := app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, AdminTraces: fake, ReplaySealer: sealer}), api.db)
 	api.handler, api.server = server.Handler(), server
 
 	forbidden := api.getWithCookie(t, "/api/admin/traces", session)

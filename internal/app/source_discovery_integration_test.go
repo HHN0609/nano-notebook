@@ -119,9 +119,9 @@ func TestSourceDiscoveryImportsPersistedSelectionThroughURLSourcePipeline(t *tes
 		FinalURL: "https://import.example/article", MediaType: "text/html", Payload: payload,
 		ContentSHA256: hex.EncodeToString(digest[:]),
 	}}
-	api.server = app.NewServer(app.Config{
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{
 		CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objectstore.NewMemoryStore(),
-	}, api.db)
+	}), api.db)
 	api.handler = api.server.Handler()
 
 	response := api.postJSONWithCookieAndCSRF(t,
@@ -210,10 +210,10 @@ func TestSourceDiscoveryDropsCandidateWhenImportAdmissionFails(t *testing.T) {
 	`); err != nil {
 		t.Fatal(err)
 	}
-	api.server = app.NewServer(app.Config{
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{
 		CookieSecure: false, SourceFetcher: &recordingSourceFetcher{err: fetcher.ErrUnsafeDestination},
 		SourceSnapshots: objectstore.NewMemoryStore(),
-	}, api.db)
+	}), api.db)
 	api.handler = api.server.Handler()
 	response := api.postJSONWithCookieAndCSRF(t,
 		"/api/v1/source-discovery-sessions/dsc_import_failure/imports", map[string]any{},
@@ -270,7 +270,7 @@ func TestSourceDiscoveryImportDeduplicatesNormalizedRedirectTargetAcrossSessions
 		ContentSHA256: hex.EncodeToString(digest[:]),
 	}}
 	objects := objectstore.NewMemoryStore()
-	api.server = app.NewServer(app.Config{CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objects}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objects}), api.db)
 	api.handler = api.server.Handler()
 
 	var sourceIDs []string

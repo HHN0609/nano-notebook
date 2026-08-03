@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
@@ -66,7 +67,7 @@ type ActionPolicy struct {
 }
 
 type ActionAvailability interface {
-	Available(Execution) bool
+	Available(Execution) (bool, string)
 }
 
 type ActionRegistry struct {
@@ -113,16 +114,24 @@ func NewActionRegistry(actions ...Action) (*ActionRegistry, error) {
 	return &ActionRegistry{actions: registered, byName: byName}, nil
 }
 
-func (r *ActionRegistry) Definitions(policy ActionPolicy) []models.ActionDefinition {
+func (r *ActionRegistry) Definitions(ctx context.Context, policy ActionPolicy, tracers ...*agentobs.Tracer) []models.ActionDefinition {
 	if policy.RemainingActions <= 0 {
 		return nil
+	}
+	var tracer *agentobs.Tracer
+	if len(tracers) > 0 {
+		tracer = tracers[0]
 	}
 	definitions := make([]models.ActionDefinition, 0, len(r.actions))
 	for _, action := range r.actions {
 		definition := action.definition
 		if policy.Execution != nil {
-			if availability, ok := action.executor.(ActionAvailability); ok && !availability.Available(*policy.Execution) {
-				continue
+			if availability, ok := action.executor.(ActionAvailability); ok {
+				available, reasonCode := availability.Available(*policy.Execution)
+				if !available {
+					recordActionAvailabilityFiltered(ctx, tracer, definition.Name, reasonCode)
+					continue
+				}
 			}
 		}
 		if policy.AllowedNames != nil && !policy.AllowedNames[definition.Name] {
@@ -132,6 +141,24 @@ func (r *ActionRegistry) Definitions(policy ActionPolicy) []models.ActionDefinit
 		definitions = append(definitions, definition)
 	}
 	return definitions
+}
+
+func recordActionAvailabilityFiltered(ctx context.Context, tracer *agentobs.Tracer, toolName, reasonCode string) {
+	if tracer == nil || reasonCode == "" || toolName == "" {
+		return
+	}
+	span, ok := agentobs.SpanContextFromContext(ctx)
+	if !ok {
+		return
+	}
+	_ = tracer.Event(ctx, agentobs.Event{
+		IdentityKey: fmt.Sprintf("tool/%s/filtered/%s/%s/%d", toolName, span.TraceID, span.SpanID, time.Now().UnixNano()),
+		Name:        TraceEventToolFiltered,
+		Attributes: []agentobs.Attribute{
+			agentobs.String(TraceKeyToolName, toolName),
+			agentobs.String(TraceKeyToolReasonCode, reasonCode),
+		},
+	})
 }
 
 func (r *ActionRegistry) Resolve(name string) (Action, bool) {

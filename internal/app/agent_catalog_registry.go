@@ -128,6 +128,9 @@ func VerifyAgentCatalogReady(ctx context.Context, db *DB, catalog agentcatalog.C
 	if db == nil || db.pool == nil {
 		return agentcatalog.ReleaseManifest{}, errors.New("nil database")
 	}
+	if release.Identity == "" {
+		return agentcatalog.ReleaseManifest{}, errors.New("Agent release is required")
+	}
 	manifest, ok := catalog.ResolveRelease(release)
 	if !ok {
 		return agentcatalog.ReleaseManifest{}, fmt.Errorf("unsupported exact Agent release %s", release)

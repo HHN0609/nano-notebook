@@ -13,20 +13,10 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
-	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 	"github.com/jackc/pgx/v5"
 )
 
-type capturingLeaderRouter struct {
-	request agent.LeaderRouteRequest
-}
-
-func (r *capturingLeaderRouter) DecideRoute(_ context.Context, request agent.LeaderRouteRequest) (agent.LeaderRouteDecision, error) {
-	r.request = request
-	return agent.LeaderRouteDecision{Route: agent.LeaderContinueChat, ReasonCode: agent.LeaderReasonOrdinaryConversation}, nil
-}
-
-func TestLegacyAdmissionDualWritesChatRunAndAgentTreeOwnership(t *testing.T) {
+func TestConfiguredAdmissionDualWritesChatRunAndAgentTreeOwnership(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "generic-runtime@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c110")
 	var chatRunID, rootRunID, treeID, runtimeKind string
@@ -35,7 +25,7 @@ func TestLegacyAdmissionDualWritesChatRunAndAgentTreeOwnership(t *testing.T) {
 		from chat_runs chat_run join agent_runs run on run.id=chat_run.root_agent_run_id
 		where chat_run.id=$1
 	`, runID).Scan(&chatRunID, &rootRunID, &treeID, &runtimeKind)
-	if err != nil || chatRunID != runID || rootRunID != runID || treeID == "" || runtimeKind != "legacy_role" {
+	if err != nil || chatRunID != runID || rootRunID != runID || treeID == "" || runtimeKind != "configured" {
 		t.Fatalf("chat=%s root=%s tree=%s kind=%s err=%v", chatRunID, rootRunID, treeID, runtimeKind, err)
 	}
 	var treeRoot string
@@ -84,9 +74,9 @@ func TestConfiguredAgentRunRequiresNoRoleExecutorVersionOrChatOwnership(t *testi
 }
 
 func TestLegacyRuntimeDrainStatusBlocksOnlyActiveLegacyRuns(t *testing.T) {
-	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "legacy-drain-status@example.com")
-	legacyRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c122")
+	api, _, _, chatID := newChatFixture(t, "legacy-drain-status@example.com")
 	ctx := context.Background()
+	legacyRunID := admitLegacyRunForTest(t, api, chatID, "msg_legacy_drain_status", "run_legacy_drain_status", "job_legacy_drain_status")
 	readStatus := func() (active, retained int64, ready bool) {
 		t.Helper()
 		if err := api.db.Pool().QueryRow(ctx, `
@@ -186,16 +176,11 @@ func TestExactAgentReleaseActivatesConfiguredAdmissionForNewChatRuns(t *testing.
 	}
 	normal := &recordingNormalExecutor{}
 	runtime := agent.NewLeaderExecutor(
-		api.db.Pool(), normal, fixedLeaderRouter{route: agent.LeaderDelegateResearch},
-		fixedResearchPlanner{queries: []string{"unused"}}, &recordingResearchProvider{},
+		api.db.Pool(), normal, fixedResearchPlanner{queries: []string{"unused"}}, &recordingResearchProvider{},
 	)
 	resolution := agent.NewChatLeaderDefinitionExecutor(runtime).ExecuteAttempt(context.Background(), attemptFromClaim(claimed))
 	if resolution.Disposition != agent.AttemptCompleted || normal.calls != 1 {
 		t.Fatalf("resolution=%+v normal calls=%d", resolution, normal.calls)
-	}
-	var requestedRoute, effectiveRoute, policyReason string
-	if err := api.db.Pool().QueryRow(context.Background(), `select requested_route,effective_route,policy_reason_code from agent_run_routes where run_id=$1`, body.RunID).Scan(&requestedRoute, &effectiveRoute, &policyReason); err != nil || requestedRoute != "delegate_research" || effectiveRoute != "continue_chat" || policyReason != "relationship_unregistered" {
-		t.Fatalf("route=%q/%q policy=%q err=%v", requestedRoute, effectiveRoute, policyReason, err)
 	}
 	postgresRuntime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, func() string { return "msg_configured_answer" })
 	draft := appendFinalDraft(t, postgresRuntime, attemptFromClaim(claimed), "Configured Agent completed.")
@@ -219,7 +204,7 @@ func TestExactAgentReleaseActivatesConfiguredAdmissionForNewChatRuns(t *testing.
 	}
 	if runStatus != "completed" || productStatus != "completed" || outputMessageID != "msg_configured_answer" ||
 		resultContract != "chat.answer@1" || !strings.Contains(string(resultPayload), "Configured Agent completed.") ||
-		resultBytesConsumed != resultPayloadBytes || modelCallsConsumed != 2 || contextBytesConsumed < 1 {
+		resultBytesConsumed != resultPayloadBytes {
 		t.Fatalf("terminal run=%s product=%s output=%s result=%s payload=%s consumed=%d", runStatus, productStatus, outputMessageID, resultContract, resultPayload, resultBytesConsumed)
 	}
 	events := api.getWithCookie(t, "/api/v1/agent-runs/"+body.RunID+"/events", sessionCookie)
@@ -230,209 +215,6 @@ func TestExactAgentReleaseActivatesConfiguredAdmissionForNewChatRuns(t *testing.
 	chatProjection := api.getWithCookie(t, "/api/v1/chats/"+chatID, sessionCookie)
 	if chatProjection.Code != http.StatusOK || !strings.Contains(chatProjection.Body.String(), body.RunID) {
 		t.Fatalf("Chat projection status=%d body=%s", chatProjection.Code, chatProjection.Body.String())
-	}
-}
-
-func TestConfiguredLeaderSchedulesPinnedChildThroughMCPAndSuspends(t *testing.T) {
-	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "configured-mcp-delegation@example.com")
-	catalog, err := agentcatalog.LoadEmbedded()
-	if err != nil {
-		t.Fatal(err)
-	}
-	api.server = app.NewServer(app.Config{
-		CookieSecure: false, AgentCatalog: catalog,
-		AgentRelease: agentcatalog.MustParseReference("nano.default@1"),
-	}, api.db)
-	api.handler = api.server.Handler()
-	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
-		"id": "0190cdd2-5f2d-7ad8-b3f5-1b588788c125", "content": "请帮我查找最新资料", "time_zone": "Asia/Shanghai",
-	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
-	if response.Code != http.StatusAccepted {
-		t.Fatalf("admission=%d %s", response.Code, response.Body.String())
-	}
-	var admitted struct {
-		RunID string `json:"run_id"`
-	}
-	decodeBody(t, response, &admitted)
-	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(context.Background())
-	if err != nil || !ok || claimed.RunID != admitted.RunID {
-		t.Fatalf("claim=%+v ok=%t err=%v", claimed, ok, err)
-	}
-	var initialContextBytes int
-	if err := api.db.Pool().QueryRow(context.Background(), `
-		select tree.context_bytes_consumed from agent_runs run join agent_trees tree on tree.id=run.tree_id where run.id=$1
-	`, admitted.RunID).Scan(&initialContextBytes); err != nil {
-		t.Fatal(err)
-	}
-
-	provider := &recordingResearchProvider{results: map[string][]websearch.Candidate{
-		"configured research": {{Title: "Configured source", URL: "https://example.com/configured", DisplayURL: "example.com", Description: "Configured result", Rank: 1}},
-	}}
-	registrations := []agent.MCPToolRegistration{
-		{Action: agent.NewCalculateAction(), Scheduling: agentcatalog.ToolOrderedSync},
-		{Action: agent.NewCurrentTimeAction(nil), Scheduling: agentcatalog.ToolOrderedSync},
-		{Action: agent.NewSearchEvidenceAction(nil), Scheduling: agentcatalog.ToolOrderedSync},
-		{Action: agent.NewWebSearchAction(provider), Scheduling: agentcatalog.ToolOrderedSync},
-	}
-	generated, err := agent.NewConfiguredDelegationToolRegistrations(catalog, api.db.Pool())
-	if err != nil {
-		t.Fatal(err)
-	}
-	registrations = append(registrations, generated...)
-	mcpRegistry, err := agent.NewMCPToolRegistry(registrations...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	postgresRuntime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil)
-	mcpHost, err := agent.NewMCPToolHost(catalog, mcpRegistry, postgresRuntime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	root, _ := catalog.ResolveDefinition(agentcatalog.MustParseReference("chat.leader@1"))
-	child := root.Children[0]
-	inspection, err := mcpHost.OpenAttempt(context.Background(), agent.AttemptToolScope{
-		Definition: root.Reference(), Attempt: attemptFromClaim(claimed), DefaultTimeZone: "Asia/Shanghai",
-		RemainingActions: 1, Deadline: time.Now().Add(time.Minute),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	modelTools, err := inspection.ActionDefinitions(context.Background(), agent.ActionPolicy{
-		RemainingActions: 1, Execution: &agent.Execution{},
-	})
-	if closeErr := inspection.Close(); err == nil && closeErr != nil {
-		err = closeErr
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tool := range modelTools {
-		if tool.Name == "delegate.research.source-discovery.v1" {
-			t.Fatalf("internal scheduling receipt tool leaked into composer definitions: %+v", modelTools)
-		}
-	}
-	resultContract, _ := catalog.ResolveContract(agentcatalog.MustParseReference("research.discovery-result@1"))
-	runtime := agent.NewLeaderExecutor(
-		api.db.Pool(), &recordingNormalExecutor{}, fixedLeaderRouter{route: agent.LeaderDelegateResearch},
-		fixedResearchPlanner{queries: []string{"configured research"}}, provider,
-		agent.WithResearchMCPToolPlane(mcpHost, child), agent.WithResearchResultContract(resultContract),
-	)
-	if resolution := agent.NewChatLeaderDefinitionExecutor(runtime).ExecuteAttempt(context.Background(), attemptFromClaim(claimed)); resolution.Disposition != agent.AttemptCompleted {
-		t.Fatalf("parent scheduling resolution=%+v", resolution)
-	}
-
-	var parentStatus, parentJobStatus, route, childRunID, childKind, childDefinition, childExecutor, childJobStatus string
-	var actionID, parentRole, childRole *string
-	var manifest []byte
-	err = api.db.Pool().QueryRow(context.Background(), `
-		select parent.status,parent_job.status,route.effective_route,child.id,child.runtime_kind,
-			child.definition_identity||'@'||child.definition_version::text,child.executor_identity,child_job.status,
-			delegation.action_id,delegation.parent_role,delegation.child_role,child.parent_context_manifest
-		from agent_runs parent
-		join agent_jobs parent_job on parent_job.run_id=parent.id
-		join agent_run_routes route on route.run_id=parent.id
-		join agent_run_delegations delegation on delegation.parent_run_id=parent.id
-		join agent_runs child on child.id=delegation.child_run_id
-		join agent_jobs child_job on child_job.run_id=child.id
-		where parent.id=$1
-	`, admitted.RunID).Scan(
-		&parentStatus, &parentJobStatus, &route, &childRunID, &childKind, &childDefinition, &childExecutor, &childJobStatus,
-		&actionID, &parentRole, &childRole, &manifest,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var childContext struct {
-		Input map[string]string `json:"input"`
-	}
-	if err := json.Unmarshal(manifest, &childContext); err != nil {
-		t.Fatal(err)
-	}
-	if parentStatus != "running" || parentJobStatus != "waiting" || route != "delegate_research" ||
-		childKind != "configured" || childDefinition != child.String() || childExecutor != "research" || childJobStatus != "queued" ||
-		actionID == nil || *actionID != "decision:1/action:0" || parentRole != nil || childRole != nil ||
-		childContext.Input["request"] != "请帮我查找最新资料" {
-		t.Fatalf("parent=%s/%s route=%s child=%s %s/%s/%s/%s action=%v roles=%v/%v manifest=%s",
-			parentStatus, parentJobStatus, route, childRunID, childKind, childDefinition, childExecutor, childJobStatus,
-			actionID, parentRole, childRole, manifest)
-	}
-	var proposalCount, resultCount int
-	if err := api.db.Pool().QueryRow(context.Background(), `
-		select count(*) filter(where kind='action_proposal'),count(*) filter(where kind='action_result')
-		from agent_run_checkpoints where run_id=$1
-	`, admitted.RunID).Scan(&proposalCount, &resultCount); err != nil {
-		t.Fatal(err)
-	}
-	if proposalCount != 1 || resultCount != 0 {
-		t.Fatalf("checkpoints proposals=%d results=%d", proposalCount, resultCount)
-	}
-	var scheduledContextBytes int
-	if err := api.db.Pool().QueryRow(context.Background(), `
-		select tree.context_bytes_consumed from agent_runs run join agent_trees tree on tree.id=run.tree_id where run.id=$1
-	`, admitted.RunID).Scan(&scheduledContextBytes); err != nil {
-		t.Fatal(err)
-	}
-	if scheduledContextBytes <= initialContextBytes {
-		t.Fatalf("context bytes before=%d after=%d", initialContextBytes, scheduledContextBytes)
-	}
-
-	childClaim, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(context.Background())
-	if err != nil || !ok || childClaim.RunID != childRunID {
-		t.Fatalf("child claim=%+v ok=%t err=%v", childClaim, ok, err)
-	}
-	if resolution := agent.NewResearchDefinitionExecutor(runtime).ExecuteAttempt(context.Background(), attemptFromClaim(childClaim)); resolution.Disposition != agent.AttemptCompleted {
-		t.Fatalf("child resolution=%+v", resolution)
-	}
-	var childStatus, delegationState, parentQueued, resultID string
-	if err := api.db.Pool().QueryRow(context.Background(), `
-		select child.status,delegation.state,parent.status,delegation.result_id
-		from agent_runs child
-		join agent_run_delegations delegation on delegation.child_run_id=child.id
-		join agent_runs parent on parent.id=delegation.parent_run_id
-		where child.id=$1
-	`, childRunID).Scan(&childStatus, &delegationState, &parentQueued, &resultID); err != nil {
-		t.Fatal(err)
-	}
-	if childStatus != "completed" || delegationState != "succeeded" || parentQueued != "queued" || resultID == "" {
-		t.Fatalf("child=%s delegation=%s parent=%s result=%s", childStatus, delegationState, parentQueued, resultID)
-	}
-	var legacyCheckpointCount int
-	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_role_checkpoints where run_id=$1`, childRunID).Scan(&legacyCheckpointCount); err != nil {
-		t.Fatal(err)
-	}
-	if legacyCheckpointCount != 0 {
-		t.Fatalf("configured child wrote %d legacy Role checkpoints", legacyCheckpointCount)
-	}
-
-	parentClaim, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(context.Background())
-	if err != nil || !ok || parentClaim.RunID != admitted.RunID {
-		t.Fatalf("parent claim=%+v ok=%t err=%v", parentClaim, ok, err)
-	}
-	if resolution := agent.NewChatLeaderDefinitionExecutor(runtime).ExecuteAttempt(context.Background(), attemptFromClaim(parentClaim)); resolution.Disposition != agent.AttemptCompleted {
-		t.Fatalf("parent resume resolution=%+v", resolution)
-	}
-	var terminalParent, terminalJob, consumedState string
-	var consumedAt time.Time
-	if err := api.db.Pool().QueryRow(context.Background(), `
-		select parent.status,parent_job.status,delegation.state,delegation.consumed_at
-		from agent_runs parent join agent_jobs parent_job on parent_job.run_id=parent.id
-		join agent_run_delegations delegation on delegation.parent_run_id=parent.id
-		where parent.id=$1
-	`, admitted.RunID).Scan(&terminalParent, &terminalJob, &consumedState, &consumedAt); err != nil {
-		t.Fatal(err)
-	}
-	if terminalParent != "completed" || terminalJob != "succeeded" || consumedState != "succeeded" || consumedAt.IsZero() {
-		t.Fatalf("parent=%s job=%s delegation=%s consumed=%s", terminalParent, terminalJob, consumedState, consumedAt)
-	}
-	var parentResultPayload []byte
-	if err := api.db.Pool().QueryRow(context.Background(), `
-		select payload from agent_run_checkpoints
-		where run_id=$1 and kind='action_result' and action_id='decision:1/action:0'
-	`, admitted.RunID).Scan(&parentResultPayload); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(parentResultPayload), resultID) || strings.Contains(string(parentResultPayload), "Configured source") {
-		t.Fatalf("parent Result checkpoint=%s", parentResultPayload)
 	}
 }
 
@@ -656,7 +438,11 @@ func TestConfiguredChatAdmissionPinsTransitiveDefinitionAndPolicy(t *testing.T) 
 	legacyRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c112")
 	ctx := context.Background()
 	var userID, inputMessageID string
-	if err := api.db.Pool().QueryRow(ctx, `select user_id,input_message_id from agent_runs where id=$1`, legacyRunID).Scan(&userID, &inputMessageID); err != nil {
+	if err := api.db.Pool().QueryRow(ctx, `
+		select product.user_id,product.input_message_id
+		from agent_runs r join chat_runs product on product.root_agent_run_id=r.id
+		where r.id=$1
+	`, legacyRunID).Scan(&userID, &inputMessageID); err != nil {
 		t.Fatal(err)
 	}
 	catalog, _ := agentcatalog.LoadEmbedded()
@@ -773,6 +559,9 @@ func TestPostgresRuntimeLoadsConfiguredChatRootWithoutLegacyFields(t *testing.T)
 		execution.AgentConfigID != definition.Reference().String() || execution.TimeZone != "Asia/Shanghai" {
 		t.Fatalf("configured execution=%+v", execution)
 	}
+	if execution.MemberRole != "owner" || execution.ExistingChildCount != 0 {
+		t.Fatalf("configured delegation policy fields=%q/%d", execution.MemberRole, execution.ExistingChildCount)
+	}
 	if execution.ActionDecisionLimit != definition.Limits.ModelCalls-1 || execution.FinalDecisionLimit != 1 ||
 		execution.ActionLimit != definition.Limits.Actions || execution.ActionBatchLimit != definition.Limits.ActionBatch ||
 		execution.ActionResultByteLimit != definition.Limits.ResultBytes || execution.ActionResultsByteLimit != definition.Limits.ResultBytes {
@@ -787,19 +576,12 @@ func TestPostgresRuntimeLoadsConfiguredChatRootWithoutLegacyFields(t *testing.T)
 		t.Fatalf("deadline=%s want=%s", execution.DeadlineAt, deadline)
 	}
 	normal := &recordingNormalExecutor{}
-	router := &capturingLeaderRouter{}
 	runtime := agent.NewLeaderExecutor(
-		api.db.Pool(), normal, router,
-		fixedResearchPlanner{queries: []string{"unused"}}, &recordingResearchProvider{},
+		api.db.Pool(), normal, fixedResearchPlanner{queries: []string{"unused"}}, &recordingResearchProvider{},
 	)
 	resolution := agent.NewChatLeaderDefinitionExecutor(runtime).ExecuteAttempt(ctx, attempt)
 	if resolution.Disposition != agent.AttemptCompleted || normal.calls != 1 {
 		t.Fatalf("resolution=%+v normal calls=%d", resolution, normal.calls)
-	}
-	if router.request.InvocationPolicy.Temperature == nil || *router.request.InvocationPolicy.Temperature != policy.Temperature ||
-		router.request.InvocationPolicy.MaxOutputTokens != policy.MaxOutputTokens ||
-		router.request.InvocationPolicy.Timeout != time.Duration(policy.TimeoutMS)*time.Millisecond {
-		t.Fatalf("router invocation=%+v policy=%+v", router.request.InvocationPolicy, policy)
 	}
 }
 

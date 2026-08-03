@@ -25,6 +25,8 @@ type Execution struct {
 	ActionResultByteLimit  int
 	ActionResultsByteLimit int
 	SelectedSourceCount    int
+	MemberRole             string
+	ExistingChildCount     int
 }
 
 type Attempt struct {

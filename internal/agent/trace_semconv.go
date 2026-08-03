@@ -11,7 +11,6 @@ const TraceSemanticConventionVersion = 1
 const (
 	ModelPhaseAnswerComposition      = "answer_composition"
 	ModelPhaseQueryContextualization = "query_contextualization"
-	ModelPhaseLeaderRouting          = "leader_routing"
 	ModelPhaseResearchQueryExpansion = "research_query_expansion"
 )
 
@@ -39,10 +38,6 @@ func TraceQueryContextModelStartIdentity(runID string, attemptNo, decisionNo int
 	return fmt.Sprintf("run/%s/attempt/%d/query-context/model/%d/start", runID, attemptNo, decisionNo)
 }
 
-func TraceLeaderRouteModelStartIdentity(runID string, attemptNo int) string {
-	return fmt.Sprintf("run/%s/attempt/%d/leader-route/model/start", runID, attemptNo)
-}
-
 func TraceResearchPlanModelStartIdentity(runID string, attemptNo int) string {
 	return fmt.Sprintf("run/%s/attempt/%d/research-plan/model/start", runID, attemptNo)
 }
@@ -61,7 +56,7 @@ const (
 	TraceEventRecoveryExhausted  = "nano.run.recovery_exhausted"
 	TraceEventRetryAdmitted      = "nano.run.retry_admitted"
 	TraceEventAttemptDisposition = "nano.attempt.disposition"
-	TraceEventLeaderRoute        = "nano.leader.route"
+	TraceEventToolFiltered       = "nano.tool.filtered"
 	TraceEventDelegationCreated  = "nano.delegation.created"
 	TraceEventDelegationTerminal = "nano.delegation.terminal"
 	TraceEventDelegationWake     = "nano.delegation.parent_wake"
@@ -95,10 +90,8 @@ const (
 	TraceKeyPromptContract               = "nano.prompt.contract"
 	TraceKeyRequestedModel               = "nano.model.requested"
 	TraceKeyModelValidationOutcome       = "nano.model.validation_outcome"
-	TraceKeyRequestedRoute               = "nano.route.requested"
-	TraceKeyEffectiveRoute               = "nano.route.effective"
-	TraceKeyIntentReasonCode             = "nano.route.intent_reason_code"
-	TraceKeyPolicyReasonCode             = "nano.route.policy_reason_code"
+	TraceKeyToolName                     = "nano.tool.name"
+	TraceKeyToolReasonCode               = "nano.tool.reason_code"
 	TraceKeyParentRunID                  = "nano.delegation.parent_run_id"
 	TraceKeyChildRunID                   = "nano.delegation.child_run_id"
 	TraceKeyDelegationState              = "nano.delegation.state"

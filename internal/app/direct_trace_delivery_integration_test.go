@@ -16,7 +16,7 @@ import (
 func TestDirectTraceAdmissionCommitsOnlyAnchorAndProductSurvivesExporterOverflow(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "direct-trace-admission@example.com")
 	sink := &capturingDirectTraceSink{err: agentbatch.ErrQueueFull}
-	api.server = app.NewServer(app.Config{CookieSecure: false, TraceSink: sink}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, TraceSink: sink}), api.db)
 	api.handler = api.server.Handler()
 
 	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
@@ -48,7 +48,7 @@ func TestDirectTraceAdmissionCommitsOnlyAnchorAndProductSurvivesExporterOverflow
 func TestDirectTraceQueueClaimDoesNotAppendApplicationOutbox(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "direct-trace-worker@example.com")
 	sink := &capturingDirectTraceSink{}
-	api.server = app.NewServer(app.Config{CookieSecure: false, TraceSink: sink}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, TraceSink: sink}), api.db)
 	api.handler = api.server.Handler()
 
 	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{

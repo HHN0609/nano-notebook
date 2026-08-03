@@ -121,7 +121,10 @@ func TestQueueExpiresOverdueRunBeforeClaim(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "queue-deadline@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c073")
 	ctx := context.Background()
-	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, runID); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_trees set absolute_deadline = now() - interval '1 second'
+		where id = (select tree_id from agent_runs where id = $1)
+	`, runID); err != nil {
 		t.Fatal(err)
 	}
 

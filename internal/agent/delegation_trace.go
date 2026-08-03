@@ -10,22 +10,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func RecordLeaderRouteInTx(ctx context.Context, tx pgx.Tx, runID string, policy LeaderRoutePolicy) error {
-	if tx == nil || runID == "" || policy.RequestedRoute == "" || policy.EffectiveRoute == "" || policy.IntentReason == "" || policy.PolicyReason == "" {
-		return errors.New("Leader route Trace is incomplete")
-	}
-	return recordRootEvent(ctx, tx, runID, agentobs.Event{
-		IdentityKey: "run/" + runID + "/leader-route",
-		Name:        TraceEventLeaderRoute,
-		Attributes: []agentobs.Attribute{
-			agentobs.String(TraceKeyRequestedRoute, string(policy.RequestedRoute)),
-			agentobs.String(TraceKeyEffectiveRoute, string(policy.EffectiveRoute)),
-			agentobs.String(TraceKeyIntentReasonCode, string(policy.IntentReason)),
-			agentobs.String(TraceKeyPolicyReasonCode, string(policy.PolicyReason)),
-		},
-	})
-}
-
 func RecordDelegationCreatedInTx(ctx context.Context, tx pgx.Tx, parentRunID, childRunID string) error {
 	if tx == nil || parentRunID == "" || childRunID == "" {
 		return errors.New("delegation creation Trace is incomplete")

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -343,9 +344,13 @@ func (s *MCPAttemptSession) ListTools(ctx context.Context) ([]MaterializedMCPToo
 	return tools, nil
 }
 
-func (s *MCPAttemptSession) ActionDefinitions(ctx context.Context, policy ActionPolicy) ([]models.ActionDefinition, error) {
+func (s *MCPAttemptSession) ActionDefinitions(ctx context.Context, policy ActionPolicy, tracers ...*agentobs.Tracer) ([]models.ActionDefinition, error) {
 	if policy.RemainingActions <= 0 {
 		return nil, nil
+	}
+	var tracer *agentobs.Tracer
+	if len(tracers) > 0 {
+		tracer = tracers[0]
 	}
 	tools, err := s.ListTools(ctx)
 	if err != nil {
@@ -355,8 +360,12 @@ func (s *MCPAttemptSession) ActionDefinitions(ctx context.Context, policy Action
 	for _, tool := range tools {
 		registered := s.byName[tool.Name]
 		if policy.Execution != nil {
-			if availability, ok := registered.Action.(ActionAvailability); ok && !availability.Available(*policy.Execution) {
-				continue
+			if availability, ok := registered.Action.(ActionAvailability); ok {
+				available, reasonCode := availability.Available(*policy.Execution)
+				if !available {
+					recordActionAvailabilityFiltered(ctx, tracer, tool.Name, reasonCode)
+					continue
+				}
 			}
 		}
 		definitions = append(definitions, actionDefinitionFromMaterialized(tool))

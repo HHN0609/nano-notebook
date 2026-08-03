@@ -255,7 +255,7 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 		FetcherURL: strings.TrimRight(env("NANO_FETCHER_URL", "http://127.0.0.1:8083"), "/"),
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
-		strings.TrimSpace(config.CollectorURL) == "" || strings.TrimSpace(config.CollectorQueryToken) == "" ||
+		config.AgentRelease.Identity == "" || strings.TrimSpace(config.CollectorURL) == "" || strings.TrimSpace(config.CollectorQueryToken) == "" ||
 		strings.TrimSpace(config.CollectorServiceToken) == "" || strings.TrimSpace(config.ProducerID) == "" ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || strings.TrimSpace(config.FetcherURL) == "" || len(config.ReplayKEK) != 32 {
 		return controlPlaneConfig{}, errors.New("Control Plane configuration is incomplete")

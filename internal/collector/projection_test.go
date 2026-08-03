@@ -1,6 +1,7 @@
 package collector_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +131,35 @@ func TestBuildTraceProjectionConvergesWhenRootArrivesAfterChild(t *testing.T) {
 	}
 	if len(projection.Spans) != 2 || projection.Spans[0].SpanID != childID || projection.Spans[1].SpanID != rootID || projection.Spans[0].ParentSpanID != rootID {
 		t.Fatalf("late-root Spans = %#v", projection.Spans)
+	}
+}
+
+func TestBuildTraceProjectionWaitsForTerminalStart(t *testing.T) {
+	traceID := agentobs.TraceID("trace-late-terminal-start")
+	rootID := agentobs.SpanID("root-late-terminal")
+	base := time.Unix(1_700_200_000, 0).UTC()
+	terminal := collectorRecord(traceID, rootID, "late-terminal/root/end", agentobs.RecordSpanEnded, "agent.execution")
+	terminal.OccurredAt = base.Add(time.Second)
+	terminal.Status = agentobs.StatusOK
+	start := collectorRecord(traceID, rootID, "late-terminal/root/start", agentobs.RecordSpanStarted, "agent.execution")
+	start.OccurredAt = base
+	descriptor := collector.TraceDescriptor{
+		TraceID: traceID, RunID: "run-late-terminal", ChatID: "chat-late-terminal", NotebookID: "notebook-late-terminal",
+		RootSpanID: rootID, AgentName: "nano-research-agent", SchemaVersion: 1, SemanticConventionVersion: 1,
+	}
+	if _, err := collector.BuildTraceProjection(collector.StoredTrace{
+		Trace: descriptor, CommittedThrough: 1,
+		Records: []collector.SequencedRecord{collectorEnvelope(t, 1, terminal)},
+	}); !errors.Is(err, collector.ErrProjectionPending) {
+		t.Fatalf("terminal-only projection error = %v, want pending", err)
+	}
+	if _, err := collector.BuildTraceProjection(collector.StoredTrace{
+		Trace: descriptor, CommittedThrough: 2,
+		Records: []collector.SequencedRecord{
+			collectorEnvelope(t, 1, terminal), collectorEnvelope(t, 2, start),
+		},
+	}); err != nil {
+		t.Fatalf("converged projection error = %v", err)
 	}
 }
 

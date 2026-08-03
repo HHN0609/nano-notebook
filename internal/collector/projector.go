@@ -87,6 +87,12 @@ func (p *Projector) RunOnce(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if err := p.projectTrace(ctx, traceID, leaseToken); err != nil {
+		if errors.Is(err, ErrProjectionPending) {
+			if releaseErr := p.fail(ctx, traceID, leaseToken, "projection_pending"); releaseErr != nil {
+				return false, errors.Join(err, releaseErr)
+			}
+			return false, nil
+		}
 		if releaseErr := p.fail(ctx, traceID, leaseToken, "projection_invalid"); releaseErr != nil {
 			return false, errors.Join(err, releaseErr)
 		}

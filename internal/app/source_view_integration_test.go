@@ -76,7 +76,7 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 	if err := objects.Put(context.Background(), pageKey, pagePayload); err != nil {
 		t.Fatal(err)
 	}
-	api.server = app.NewServer(app.Config{CookieSecure: false, SourceSnapshots: objects}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceSnapshots: objects}), api.db)
 	api.handler = api.server.Handler()
 
 	response := getSourceView(t, api, owner, "src_view")
@@ -191,7 +191,7 @@ func TestImageViewerAssetStreamsOnlyAuthorizedReadyInlineContent(t *testing.T) {
 	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
 		t.Fatal(err)
 	}
-	api.server = app.NewServer(app.Config{CookieSecure: false, SourceSnapshots: objects}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceSnapshots: objects}), api.db)
 	api.handler = api.server.Handler()
 
 	response := api.getWithCookie(t, "/api/v1/sources/src_image_view/viewer-asset", owner)
@@ -327,7 +327,7 @@ func TestOriginalAssetServesOnlyAuthorizedReadyAllowlistedIntegrityVerifiedBytes
 	`, "src_original_corrupt", len(corruptPayload), strings.Repeat("f", 64)); err != nil {
 		t.Fatal(err)
 	}
-	api.server = app.NewServer(app.Config{CookieSecure: false, SourceSnapshots: objects}, api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceSnapshots: objects}), api.db)
 	api.handler = api.server.Handler()
 
 	response := api.getWithCookie(t, "/api/v1/sources/src_original_txt/original-asset", owner)

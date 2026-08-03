@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
 
@@ -16,15 +17,15 @@ func TestActionRegistryDiscoversDeterministicallyAndFiltersRunPolicy(t *testing.
 		t.Fatal(err)
 	}
 
-	definitions := registry.Definitions(ActionPolicy{RemainingActions: 2})
+	definitions := registry.Definitions(context.Background(), ActionPolicy{RemainingActions: 2})
 	if len(definitions) != 2 || definitions[0].Name != "calculate" || definitions[1].Name != "current_time" {
 		t.Fatalf("deterministic definitions = %+v", definitions)
 	}
-	filtered := registry.Definitions(ActionPolicy{RemainingActions: 1, AllowedNames: map[string]bool{"current_time": true}})
+	filtered := registry.Definitions(context.Background(), ActionPolicy{RemainingActions: 1, AllowedNames: map[string]bool{"current_time": true}})
 	if len(filtered) != 1 || filtered[0].Name != "current_time" {
 		t.Fatalf("filtered definitions = %+v", filtered)
 	}
-	if definitions := registry.Definitions(ActionPolicy{}); len(definitions) != 0 {
+	if definitions := registry.Definitions(context.Background(), ActionPolicy{}); len(definitions) != 0 {
 		t.Fatalf("zero-budget definitions = %+v", definitions)
 	}
 	resolved, ok := registry.Resolve("calculate")
@@ -54,7 +55,7 @@ func TestActionRegistrySnapshotsDefinitionsAtStartup(t *testing.T) {
 	action.definition.Description = "Mutated."
 	action.definition.InputSchema[2] = 'X'
 
-	definitions := registry.Definitions(ActionPolicy{RemainingActions: 1})
+	definitions := registry.Definitions(context.Background(), ActionPolicy{RemainingActions: 1})
 	if len(definitions) != 1 || definitions[0].Name != "current_time" || definitions[0].Description != "Read time." || string(definitions[0].InputSchema) != `{"type":"object"}` {
 		t.Fatalf("definitions changed after startup = %+v", definitions)
 	}
@@ -131,6 +132,41 @@ func TestActionResultRequiresOneValidVariant(t *testing.T) {
 	}
 }
 
+func TestActionRegistryRecordsFilteredToolReason(t *testing.T) {
+	registry, err := NewActionRegistry(NewSearchEvidenceAction(&evidenceSearchStub{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracer, exporter, ctx := instrumentationTestTracer(t)
+	got := registry.Definitions(ctx, ActionPolicy{RemainingActions: 1, Execution: &Execution{}}, tracer)
+	if len(got) != 0 {
+		t.Fatalf("filtered definitions=%+v", got)
+	}
+	for _, record := range exporter.Records() {
+		if record.Kind == agentobs.RecordEvent && record.Name == TraceEventToolFiltered {
+			reason := traceRecordAttribute(record, TraceKeyToolReasonCode)
+			if reason != "no_sources_selected" {
+				t.Fatalf("filtered reason=%q", reason)
+			}
+			return
+		}
+	}
+	t.Fatal("filtered tool trace event was not recorded")
+}
+
+func TestActionRegistryDoesNotRecordFilteredEventWhenAvailable(t *testing.T) {
+	registry, err := NewActionRegistry(NewSearchEvidenceAction(&evidenceSearchStub{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracer, exporter, ctx := instrumentationTestTracer(t)
+	before := countTraceEvents(exporter.Records(), TraceEventToolFiltered)
+	got := registry.Definitions(ctx, ActionPolicy{RemainingActions: 1, Execution: &Execution{SelectedSourceCount: 1}}, tracer)
+	if len(got) != 1 || countTraceEvents(exporter.Records(), TraceEventToolFiltered) != before {
+		t.Fatalf("definitions=%+v filtered events before=%d after=%d", got, before, countTraceEvents(exporter.Records(), TraceEventToolFiltered))
+	}
+}
+
 type stubAction struct {
 	name string
 }
@@ -157,4 +193,23 @@ func (*mutableStubAction) ValidateInput(json.RawMessage) error { return nil }
 
 func (*mutableStubAction) Execute(context.Context, ActionRequest) (ActionResult, error) {
 	return ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"ok":true}`)}, nil
+}
+
+func traceRecordAttribute(record agentobs.Record, key string) string {
+	for _, attribute := range record.Attributes {
+		if attribute.Key == key && attribute.Value.Kind == agentobs.ValueString {
+			return attribute.Value.String
+		}
+	}
+	return ""
+}
+
+func countTraceEvents(records []agentobs.Record, name string) int {
+	count := 0
+	for _, record := range records {
+		if record.Kind == agentobs.RecordEvent && record.Name == name {
+			count++
+		}
+	}
+	return count
 }

@@ -1261,29 +1261,7 @@ create trigger agent_runs_sync_studio_output
 create unique index if not exists agent_runs_one_research_child_idx
 	on agent_runs(parent_run_id) where agent_role='research';
 
-create table if not exists agent_run_routes (
-	run_id text primary key references agent_runs(id) on delete cascade,
-	route text not null check (route in ('continue_chat','delegate_research')),
-	requested_route text not null check (requested_route in ('continue_chat','delegate_research')),
-	effective_route text not null check (effective_route in ('continue_chat','delegate_research')),
-	intent_reason_code text not null check (char_length(intent_reason_code) between 3 and 80),
-	policy_reason_code text not null check (char_length(policy_reason_code) between 3 and 80),
-	created_at timestamptz not null default now()
-);
-
-alter table agent_run_routes add column if not exists requested_route text;
-alter table agent_run_routes add column if not exists effective_route text;
-alter table agent_run_routes add column if not exists intent_reason_code text;
-alter table agent_run_routes add column if not exists policy_reason_code text;
-update agent_run_routes set
-	requested_route=coalesce(requested_route,route),
-	effective_route=coalesce(effective_route,route),
-	intent_reason_code=coalesce(intent_reason_code,case when route='delegate_research' then 'explicit_source_discovery' else 'ordinary_conversation' end),
-	policy_reason_code=coalesce(policy_reason_code,'legacy_adopted');
-alter table agent_run_routes alter column requested_route set not null;
-alter table agent_run_routes alter column effective_route set not null;
-alter table agent_run_routes alter column intent_reason_code set not null;
-alter table agent_run_routes alter column policy_reason_code set not null;
+drop table if exists agent_run_routes;
 
 create table if not exists agent_research_delegations (
 	parent_run_id text primary key references agent_runs(id) on delete cascade,
@@ -2081,7 +2059,6 @@ alter table chat_runs enable row level security;
 alter table agent_trees enable row level security;
 alter table agent_run_results enable row level security;
 alter table studio_outputs enable row level security;
-alter table agent_run_routes enable row level security;
 alter table agent_run_delegations enable row level security;
 alter table agent_research_outcomes enable row level security;
 alter table agent_role_checkpoints enable row level security;
@@ -2182,7 +2159,6 @@ grant select, insert, update, delete on retrieval_index_versions, retrieval_eval
 grant select, insert, update, delete on retrieval_source_index_builds to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_worker;
-grant select, insert, update, delete on agent_run_routes to nano_worker;
 grant select, insert, update, delete on agent_run_delegations, agent_research_outcomes to nano_worker;
 grant select, insert on agent_role_checkpoints to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
@@ -2913,10 +2889,6 @@ create policy agent_run_results_worker_read on agent_run_results
 drop policy if exists agent_run_results_worker_append on agent_run_results;
 create policy agent_run_results_worker_append on agent_run_results
 	for insert to nano_worker with check (true);
-
-drop policy if exists agent_run_routes_worker on agent_run_routes;
-create policy agent_run_routes_worker on agent_run_routes
-	for all to nano_worker using (true) with check (true);
 
 drop policy if exists agent_run_delegations_worker on agent_run_delegations;
 create policy agent_run_delegations_worker on agent_run_delegations

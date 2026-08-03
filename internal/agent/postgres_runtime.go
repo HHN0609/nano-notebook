@@ -158,6 +158,8 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 			coalesce(r.action_result_byte_limit,(definition.limits->>'result_bytes')::integer),
 			coalesce(r.action_results_byte_limit,(definition.limits->>'result_bytes')::integer),
 			coalesce(r.selected_source_count,0),
+			m.role,
+			(select count(*) from agent_run_delegations child_link where child_link.parent_run_id=tree.root_agent_run_id),
 			r.runtime_kind='configured',policy.temperature,policy.max_output_tokens,policy.timeout_ms,
 			coalesce(r.deadline_at,tree.absolute_deadline) > now()
 		from agent_runs r
@@ -180,6 +182,7 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 			&execution.ActionLimit, &execution.ActionBatchLimit,
 			&execution.ActionResultByteLimit, &execution.ActionResultsByteLimit,
 			&execution.SelectedSourceCount,
+			&execution.MemberRole, &execution.ExistingChildCount,
 			&configured, &temperature, &maxOutputTokens, &timeoutMS,
 			&deadlineValid,
 		)

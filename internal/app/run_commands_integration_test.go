@@ -195,7 +195,7 @@ func TestRetryCreatesANewRunForTheSameMessageAndReplaysByIdempotencyKey(t *testi
 		t.Fatalf("retry replay Run=%q want=%q", replayBody.Run.ID, firstBody.Run.ID)
 	}
 	var retryTimeZone string
-	if err := api.db.Pool().QueryRow(context.Background(), `select time_zone from agent_runs where id=$1`, firstBody.Run.ID).Scan(&retryTimeZone); err != nil {
+	if err := api.db.Pool().QueryRow(context.Background(), `select coalesce(parent_context_manifest->>'time_zone','UTC') from agent_runs where id=$1`, firstBody.Run.ID).Scan(&retryTimeZone); err != nil {
 		t.Fatal(err)
 	}
 	if retryTimeZone != "Europe/London" {
@@ -222,10 +222,18 @@ func TestRetryCreatesANewRunForTheSameMessageAndReplaysByIdempotencyKey(t *testi
 	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from chat_messages where chat_id=$1`, chatID).Scan(&messages); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_runs where input_message_id=$1`, messageID).Scan(&runs); err != nil {
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select count(*) from agent_runs r join chat_runs product on product.root_agent_run_id=r.id
+		where product.input_message_id=$1
+	`, messageID).Scan(&runs); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_jobs j join agent_runs r on r.id=j.run_id where r.input_message_id=$1`, messageID).Scan(&jobCount); err != nil {
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select count(*) from agent_jobs j
+		join agent_runs r on r.id=j.run_id
+		join chat_runs product on product.root_agent_run_id=r.id
+		where product.input_message_id=$1
+	`, messageID).Scan(&jobCount); err != nil {
 		t.Fatal(err)
 	}
 	if messages != 1 || runs != 2 || jobCount != 2 {
@@ -274,10 +282,18 @@ func TestConcurrentRetriesOfTheSameCommandCreateOneEmptyRun(t *testing.T) {
 	}
 	var runs, jobsForInput, checkpoints int
 	ctx := context.Background()
-	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_runs where input_message_id = $1`, messageID).Scan(&runs); err != nil {
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(*) from agent_runs r join chat_runs product on product.root_agent_run_id=r.id
+		where product.input_message_id = $1
+	`, messageID).Scan(&runs); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_jobs j join agent_runs r on r.id = j.run_id where r.input_message_id = $1`, messageID).Scan(&jobsForInput); err != nil {
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(*) from agent_jobs j
+		join agent_runs r on r.id = j.run_id
+		join chat_runs product on product.root_agent_run_id=r.id
+		where product.input_message_id = $1
+	`, messageID).Scan(&jobsForInput); err != nil {
 		t.Fatal(err)
 	}
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_run_checkpoints where run_id = $1`, first.runID).Scan(&checkpoints); err != nil {
@@ -315,7 +331,10 @@ func TestRetryExpiresOverdueSourceBeforeRetryabilityAndActiveSlotChecks(t *testi
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "retry-deadline@example.com")
 	sourceRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c076")
 	ctx := context.Background()
-	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, sourceRunID); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_trees set absolute_deadline = now() - interval '1 second'
+		where id = (select tree_id from agent_runs where id = $1)
+	`, sourceRunID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -456,7 +475,10 @@ func TestRetryRejectsAnotherChatsActiveRunWithoutPartialRows(t *testing.T) {
 		t.Fatalf("retry active conflict status=%d body=%s", retry.Code, retry.Body.String())
 	}
 	var sourceRuns, retryKeys int
-	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_runs where input_message_id=$1`, messageID).Scan(&sourceRuns); err != nil {
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select count(*) from agent_runs r join chat_runs product on product.root_agent_run_id=r.id
+		where product.input_message_id=$1
+	`, messageID).Scan(&sourceRuns); err != nil {
 		t.Fatal(err)
 	}
 	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from platform_idempotency_keys where action='retry_agent_run' and key='retry-active-conflict'`).Scan(&retryKeys); err != nil {

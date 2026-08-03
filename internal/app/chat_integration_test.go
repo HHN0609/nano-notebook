@@ -127,7 +127,12 @@ func TestMessageAdmissionAtomicallyCreatesQueuedRunAndJob(t *testing.T) {
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where id = $1`, messageID).Scan(&messageCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(ctx, `select count(*), min(status), min(input_message_id), min(time_zone) from agent_runs where id = $1`, admittedBody.RunID).Scan(&runCount, &runStatus, &inputMessageID, &timeZone); err != nil {
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(*), min(r.status), min(coalesce(r.input_message_id, product.input_message_id)),
+			min(coalesce(r.parent_context_manifest->>'time_zone','UTC'))
+		from agent_runs r
+		left join chat_runs product on product.root_agent_run_id=r.id
+		where r.id = $1`, admittedBody.RunID).Scan(&runCount, &runStatus, &inputMessageID, &timeZone); err != nil {
 		t.Fatal(err)
 	}
 	if err := api.db.Pool().QueryRow(ctx, `select count(*), min(status), min(run_id) from agent_jobs where run_id = $1`, admittedBody.RunID).Scan(&jobCount, &jobStatus, &jobRunID); err != nil {
@@ -279,7 +284,7 @@ func installReadyEvidenceSetFixture(t *testing.T, api *testAPI, notebookID, sour
 
 func TestMessageAdmissionPinsConfiguredRunBudgets(t *testing.T) {
 	api := newTestAPI(t)
-	api.server = app.NewServer(app.Config{
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{
 		CookieSecure: false,
 		AgentRun: agent.RunConfig{
 			ID:                     "nano-research-test-v1",
@@ -291,7 +296,7 @@ func TestMessageAdmissionPinsConfiguredRunBudgets(t *testing.T) {
 			ActionResultsByteLimit: 24 * 1024,
 			Deadline:               3 * time.Minute,
 		},
-	}, api.db)
+	}), api.db)
 	api.handler = api.server.Handler()
 	sessionCookie, csrfCookie := api.registerWithCSRF(t, "configured-admission@example.com")
 
@@ -325,14 +330,23 @@ func TestMessageAdmissionPinsConfiguredRunBudgets(t *testing.T) {
 	var configID string
 	var decisions, finals, actions, batch, resultBytes, resultsBytes int
 	if err := api.db.Pool().QueryRow(context.Background(), `
-		select agent_config_id, deadline_at, action_decision_limit, final_decision_limit, action_limit,
-			action_batch_limit, action_result_byte_limit, action_results_byte_limit
-		from agent_runs where id = $1`, body.RunID).Scan(
+		select coalesce(r.agent_config_id,r.definition_identity||'@'||r.definition_version::text),
+			coalesce(r.deadline_at,tree.absolute_deadline),
+			coalesce(r.action_decision_limit,greatest(0,(definition.limits->>'model_calls')::integer-1)),
+			coalesce(r.final_decision_limit,1),
+			coalesce(r.action_limit,(definition.limits->>'actions')::integer),
+			coalesce(r.action_batch_limit,(definition.limits->>'action_batch')::integer),
+			coalesce(r.action_result_byte_limit,(definition.limits->>'result_bytes')::integer),
+			coalesce(r.action_results_byte_limit,(definition.limits->>'result_bytes')::integer)
+		from agent_runs r
+		join agent_trees tree on tree.id=r.tree_id
+		join agent_definition_versions definition on definition.definition_identity=r.definition_identity and definition.definition_version=r.definition_version
+		where r.id = $1`, body.RunID).Scan(
 		&configID, &deadlineAt, &decisions, &finals, &actions, &batch, &resultBytes, &resultsBytes,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if configID != "nano-research-test-v1" || decisions != 2 || finals != 1 || actions != 5 || batch != 2 || resultBytes != 8*1024 || resultsBytes != 24*1024 {
+	if configID != "chat.leader@1" || decisions != 4 || finals != 1 || actions != 8 || batch != 4 || resultBytes != 64*1024 || resultsBytes != 64*1024 {
 		t.Fatalf("pinned config=%q %d+%d/%d/%d/%d/%d", configID, decisions, finals, actions, batch, resultBytes, resultsBytes)
 	}
 	if deadlineAt.Before(admittedAfter.Add(2*time.Minute+50*time.Second)) || deadlineAt.After(admittedAfter.Add(3*time.Minute+10*time.Second)) {
@@ -344,7 +358,10 @@ func TestMessageAdmissionExpiresOverdueRunBeforeActiveSlotCheck(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "admission-deadline@example.com")
 	oldRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c074")
 	ctx := context.Background()
-	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, oldRunID); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_trees set absolute_deadline = now() - interval '1 second'
+		where id = (select tree_id from agent_runs where id = $1)
+	`, oldRunID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -399,7 +416,7 @@ func TestMessageAdmissionReusesTheOriginalRunForTheSameCommand(t *testing.T) {
 		t.Fatalf("replayed admission = %+v, want original run %q", replayedBody, firstBody.RunID)
 	}
 	var pinnedTimeZone string
-	if err := api.db.Pool().QueryRow(context.Background(), `select time_zone from agent_runs where id = $1`, firstBody.RunID).Scan(&pinnedTimeZone); err != nil {
+	if err := api.db.Pool().QueryRow(context.Background(), `select coalesce(parent_context_manifest->>'time_zone','UTC') from agent_runs where id = $1`, firstBody.RunID).Scan(&pinnedTimeZone); err != nil {
 		t.Fatal(err)
 	}
 	if pinnedTimeZone != "Asia/Tokyo" {
@@ -445,7 +462,7 @@ func TestMessageAdmissionFallsBackToUTCForInvalidTimeZone(t *testing.T) {
 	}
 	decodeBody(t, response, &body)
 	var timeZone string
-	if err := api.db.Pool().QueryRow(context.Background(), `select time_zone from agent_runs where id = $1`, body.RunID).Scan(&timeZone); err != nil {
+	if err := api.db.Pool().QueryRow(context.Background(), `select coalesce(parent_context_manifest->>'time_zone','UTC') from agent_runs where id = $1`, body.RunID).Scan(&timeZone); err != nil {
 		t.Fatal(err)
 	}
 	if timeZone != "UTC" {
@@ -524,7 +541,10 @@ func TestConcurrentDistinctMessagesAdmitExactlyOneRunWithoutOrphans(t *testing.T
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id = $1`, chatID).Scan(&messages); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_runs where chat_id = $1`, chatID).Scan(&runs); err != nil {
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(*) from agent_runs r join chat_runs product on product.root_agent_run_id=r.id
+		where product.chat_id = $1
+	`, chatID).Scan(&runs); err != nil {
 		t.Fatal(err)
 	}
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_jobs`).Scan(&jobs); err != nil {

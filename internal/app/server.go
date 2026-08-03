@@ -92,6 +92,9 @@ func NewServer(cfg Config, db *DB) *Server {
 	if cfg.Version == "" {
 		cfg.Version = "dev"
 	}
+	if cfg.AgentRelease.Identity == "" {
+		panic("Agent release is required")
+	}
 	if cfg.DefaultModel == "" {
 		cfg.DefaultModel = "aliyun/qwen-plus"
 	}
@@ -110,42 +113,40 @@ func NewServer(cfg Config, db *DB) *Server {
 	cfg.AgentRun.ExecutorVersion = leaderProfile.ExecutorVersion
 	var chatAgent *configuredChatAgent
 	studioAgents := make(map[studio.Kind]configuredStudioAgent)
-	if cfg.AgentRelease.Identity != "" {
-		release, ok := cfg.AgentCatalog.ResolveRelease(cfg.AgentRelease)
-		if !ok {
-			panic(fmt.Errorf("unknown exact Agent release %s", cfg.AgentRelease))
+	release, ok := cfg.AgentCatalog.ResolveRelease(cfg.AgentRelease)
+	if !ok {
+		panic(fmt.Errorf("unknown exact Agent release %s", cfg.AgentRelease))
+	}
+	root, ok := release.Roots["chat"]
+	if !ok {
+		panic(fmt.Errorf("Agent release %s has no Chat root", cfg.AgentRelease))
+	}
+	definition, ok := cfg.AgentCatalog.ResolveDefinition(root)
+	if !ok {
+		panic(fmt.Errorf("Agent release %s has unknown Chat root %s", cfg.AgentRelease, root))
+	}
+	policy, ok := cfg.AgentCatalog.ResolveModelPolicy(definition.ModelPolicy)
+	if !ok {
+		panic(fmt.Errorf("Agent Definition %s has unknown Model Policy %s", root, definition.ModelPolicy))
+	}
+	chatAgent = &configuredChatAgent{Release: cfg.AgentRelease, Definition: definition, Policy: policy}
+	for kind, purpose := range map[studio.Kind]string{
+		studio.KindReport: "studio_report", studio.KindFlashcards: "studio_flashcards",
+		studio.KindMindMap: "studio_mind_map", studio.KindDataTable: "studio_data_table",
+	} {
+		studioRoot, exists := release.Roots[purpose]
+		if !exists {
+			continue
 		}
-		root, ok := release.Roots["chat"]
-		if !ok {
-			panic(fmt.Errorf("Agent release %s has no Chat root", cfg.AgentRelease))
+		studioDefinition, exists := cfg.AgentCatalog.ResolveDefinition(studioRoot)
+		if !exists {
+			panic(fmt.Errorf("Agent release %s has unknown Studio root %s", cfg.AgentRelease, studioRoot))
 		}
-		definition, ok := cfg.AgentCatalog.ResolveDefinition(root)
-		if !ok {
-			panic(fmt.Errorf("Agent release %s has unknown Chat root %s", cfg.AgentRelease, root))
+		studioPolicy, exists := cfg.AgentCatalog.ResolveModelPolicy(studioDefinition.ModelPolicy)
+		if !exists {
+			panic(fmt.Errorf("Studio Agent Definition %s has unknown Model Policy %s", studioRoot, studioDefinition.ModelPolicy))
 		}
-		policy, ok := cfg.AgentCatalog.ResolveModelPolicy(definition.ModelPolicy)
-		if !ok {
-			panic(fmt.Errorf("Agent Definition %s has unknown Model Policy %s", root, definition.ModelPolicy))
-		}
-		chatAgent = &configuredChatAgent{Release: cfg.AgentRelease, Definition: definition, Policy: policy}
-		for kind, purpose := range map[studio.Kind]string{
-			studio.KindReport: "studio_report", studio.KindFlashcards: "studio_flashcards",
-			studio.KindMindMap: "studio_mind_map", studio.KindDataTable: "studio_data_table",
-		} {
-			studioRoot, exists := release.Roots[purpose]
-			if !exists {
-				continue
-			}
-			studioDefinition, exists := cfg.AgentCatalog.ResolveDefinition(studioRoot)
-			if !exists {
-				panic(fmt.Errorf("Agent release %s has unknown Studio root %s", cfg.AgentRelease, studioRoot))
-			}
-			studioPolicy, exists := cfg.AgentCatalog.ResolveModelPolicy(studioDefinition.ModelPolicy)
-			if !exists {
-				panic(fmt.Errorf("Studio Agent Definition %s has unknown Model Policy %s", studioRoot, studioDefinition.ModelPolicy))
-			}
-			studioAgents[kind] = configuredStudioAgent{Release: cfg.AgentRelease, Definition: studioDefinition, Policy: studioPolicy}
-		}
+		studioAgents[kind] = configuredStudioAgent{Release: cfg.AgentRelease, Definition: studioDefinition, Policy: studioPolicy}
 	}
 	s := &Server{
 		cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(),
@@ -1110,10 +1111,6 @@ func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, source
 	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		var err error
 		store := agent.NewStore(tx)
-		if s.chatAgent == nil {
-			run, _, err = store.RetryQueued(r.Context(), userID, sourceRunID, key, requestHash([]byte(sourceRunID+"\x00"+timeZone)), runID, jobID, timeZone, s.cfg.AgentRun)
-			return err
-		}
 		manifest, marshalErr := json.Marshal(map[string]any{
 			"agent_release": s.chatAgent.Release.String(), "time_zone": timeZone,
 		})
@@ -1376,25 +1373,19 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 			promptVersion = agent.GroundedPromptVersion
 		}
 		timeZone := normalizeBrowserTimeZone(req.TimeZone)
-		if s.chatAgent == nil {
-			if err := agentStore.CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, promptVersion, timeZone, s.cfg.AgentRun); err != nil {
-				return err
-			}
-		} else {
-			manifest, err := json.Marshal(map[string]any{
-				"agent_release": s.chatAgent.Release.String(), "time_zone": timeZone,
-				"selected_source_count": len(sourceIDs),
-			})
-			if err != nil {
-				return err
-			}
-			if err := agentStore.CreateConfiguredChatQueued(r.Context(), agent.ConfiguredChatAdmission{
-				RunID: runID, UserID: userID, ChatID: chatID, InputMessageID: req.ID,
-				Definition: s.chatAgent.Definition, ModelPolicy: s.chatAgent.Policy,
-				DeadlineAt: time.Now().Add(s.cfg.AgentRun.Deadline), ContextManifest: manifest,
-			}); err != nil {
-				return err
-			}
+		manifest, err := json.Marshal(map[string]any{
+			"agent_release": s.chatAgent.Release.String(), "time_zone": timeZone,
+			"selected_source_count": len(sourceIDs),
+		})
+		if err != nil {
+			return err
+		}
+		if err := agentStore.CreateConfiguredChatQueued(r.Context(), agent.ConfiguredChatAdmission{
+			RunID: runID, UserID: userID, ChatID: chatID, InputMessageID: req.ID,
+			Definition: s.chatAgent.Definition, ModelPolicy: s.chatAgent.Policy,
+			DeadlineAt: time.Now().Add(s.cfg.AgentRun.Deadline), ContextManifest: manifest,
+		}); err != nil {
+			return err
 		}
 		if err := agentStore.PinEvidenceSet(r.Context(), runID, userID, sourceIDs); err != nil {
 			return err
@@ -1403,16 +1394,12 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 			return err
 		}
 		traceModel, tracePrompt := s.cfg.DefaultModel, promptVersion
-		if s.chatAgent != nil {
-			traceModel, tracePrompt = s.chatAgent.Policy.ProviderModel, s.chatAgent.Definition.Reference().String()
-		}
+		traceModel, tracePrompt = s.chatAgent.Policy.ProviderModel, s.chatAgent.Definition.Reference().String()
 		if err := agent.StartRunTraceInTx(r.Context(), tx, runID, traceModel, tracePrompt, nil); err != nil {
 			return err
 		}
-		if s.chatAgent != nil {
-			if err := agentStore.FinalizeConfiguredChatOwnership(r.Context(), runID); err != nil {
-				return err
-			}
+		if err := agentStore.FinalizeConfiguredChatOwnership(r.Context(), runID); err != nil {
+			return err
 		}
 		_, err = tx.Exec(r.Context(), `select pg_notify('nano_agent_jobs', $1)`, jobID)
 		return err
