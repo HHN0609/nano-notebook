@@ -1,6 +1,12 @@
 .pi/
 .planning/
 .worktrees/
+evals/rag/.dataset-cache/
+evals/rag/sweep-out/
+evals/rag/retrieval-sweep-v1.json
+evals/rag/retrieval-sweep-sources-v1.json
+evals/rag/retrieval-sweep-grid-v1.json
+/scripts/rag-eval/
 node_modules/
 dist/
 test-results/

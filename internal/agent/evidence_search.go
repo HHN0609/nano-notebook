@@ -34,6 +34,13 @@ type EvidenceSearchService struct {
 	metrics *TaskMetricsRecorder
 }
 
+type RetrievalSearchOverrides struct {
+	DenseCandidates  int
+	SparseCandidates int
+	RRFK             int
+	RerankCandidates int
+}
+
 // WithMetrics attaches the Sprint 12 task-lifecycle metrics recorder and
 // returns the same Service, chainable onto NewEvidenceSearchService.
 func (s *EvidenceSearchService) WithMetrics(recorder *TaskMetricsRecorder) *EvidenceSearchService {
@@ -58,6 +65,19 @@ func NewEvidenceSearchService(pool *pgxpool.Pool, vectors evidenceVectorSearcher
 }
 
 func (s *EvidenceSearchService) SearchEvidence(ctx context.Context, attempt Attempt, query, _ string) (retrieval.SearchResult, error) {
+	return s.searchEvidence(ctx, attempt, query, RetrievalSearchOverrides{}, true)
+}
+
+// SearchEvidenceWithOverrides runs the same production retrieval pipeline as
+// SearchEvidence, but lets a sweep executor replace the query-time Index Config
+// values. This is a deliberate divergence from the normal Agent path: RerankLimit
+// is not capped at maxSearchEvidenceCandidates, so the sweep can measure the
+// configured rerank candidate count instead of the Agent result budget.
+func (s *EvidenceSearchService) SearchEvidenceWithOverrides(ctx context.Context, attempt Attempt, query string, overrides RetrievalSearchOverrides) (retrieval.SearchResult, error) {
+	return s.searchEvidence(ctx, attempt, query, overrides, false)
+}
+
+func (s *EvidenceSearchService) searchEvidence(ctx context.Context, attempt Attempt, query string, overrides RetrievalSearchOverrides, capRerank bool) (retrieval.SearchResult, error) {
 	if s == nil || s.pool == nil || s.vectors == nil || s.models == nil || strings.TrimSpace(query) == "" {
 		return retrieval.SearchResult{}, ErrSearchEvidenceUnavailable
 	}
@@ -65,6 +85,10 @@ func (s *EvidenceSearchService) SearchEvidence(ctx context.Context, attempt Atte
 	if err != nil {
 		return retrieval.SearchResult{}, err
 	}
+	return s.searchEvidenceScope(ctx, scope, query, overrides, capRerank)
+}
+
+func (s *EvidenceSearchService) searchEvidenceScope(ctx context.Context, scope pinnedSearchScope, query string, overrides RetrievalSearchOverrides, capRerank bool) (retrieval.SearchResult, error) {
 	embeddingQuery, err := retrieval.FormatEmbeddingQuery(scope.Version.Config.EmbeddingProfileID, query)
 	if err != nil {
 		return retrieval.SearchResult{}, fmt.Errorf("%w: dense query profile: %v", retrieval.ErrRetrievalUnavailable, err)
@@ -97,16 +121,19 @@ func (s *EvidenceSearchService) SearchEvidence(ctx context.Context, attempt Atte
 		sourceIDs = append(sourceIDs, item.SourceID)
 		revisionIDs = append(revisionIDs, item.RevisionID)
 	}
-	rerankLimit := scope.Version.Config.RerankCandidates
-	if rerankLimit > maxSearchEvidenceCandidates {
+	denseLimit := overrideOrDefault(overrides.DenseCandidates, scope.Version.Config.DenseCandidates)
+	sparseLimit := overrideOrDefault(overrides.SparseCandidates, scope.Version.Config.SparseCandidates)
+	rrfK := overrideOrDefault(overrides.RRFK, scope.Version.Config.RRFK)
+	rerankLimit := overrideOrDefault(overrides.RerankCandidates, scope.Version.Config.RerankCandidates)
+	if capRerank && rerankLimit > maxSearchEvidenceCandidates {
 		rerankLimit = maxSearchEvidenceCandidates
 	}
 	pipeline := retrieval.Pipeline{
 		Dense: func(ctx context.Context, _ retrieval.SearchRequest) ([]retrieval.Candidate, error) {
-			return s.vectors.SearchDense(ctx, embedded.Vectors[0], qdrantScope, scope.Version.Config.DenseCandidates)
+			return s.vectors.SearchDense(ctx, embedded.Vectors[0], qdrantScope, denseLimit)
 		},
 		Sparse: func(ctx context.Context, _ retrieval.SearchRequest) ([]retrieval.Candidate, error) {
-			return s.vectors.SearchSparse(ctx, sparse, qdrantScope, scope.Version.Config.SparseCandidates)
+			return s.vectors.SearchSparse(ctx, sparse, qdrantScope, sparseLimit)
 		},
 		Reload: func(ctx context.Context, _ retrieval.Scope, ids []string) ([]retrieval.EvidenceCandidate, error) {
 			return s.reloadCandidates(ctx, scope, ids)
@@ -123,13 +150,24 @@ func (s *EvidenceSearchService) SearchEvidence(ctx context.Context, attempt Atte
 		},
 	}
 	searchStartedAt := time.Now()
-	result, searchErr := pipeline.Search(ctx, retrieval.SearchRequest{
-		Query: query, Scope: retrieval.Scope{NotebookID: scope.NotebookID, SourceIDs: sourceIDs, RevisionIDs: revisionIDs},
-		DenseLimit: scope.Version.Config.DenseCandidates, SparseLimit: scope.Version.Config.SparseCandidates,
-		RerankLimit: rerankLimit, MinimumSurvivors: 1, RRFK: scope.Version.Config.RRFK,
-	})
+	request := retrievalSearchRequest(query, retrieval.Scope{NotebookID: scope.NotebookID, SourceIDs: sourceIDs, RevisionIDs: revisionIDs}, denseLimit, sparseLimit, rerankLimit, rrfK)
+	result, searchErr := pipeline.Search(ctx, request)
 	s.recordSearchMetrics(result, searchErr, searchStartedAt)
 	return result, searchErr
+}
+
+func overrideOrDefault(override, fallback int) int {
+	if override > 0 {
+		return override
+	}
+	return fallback
+}
+
+func retrievalSearchRequest(query string, scope retrieval.Scope, denseLimit, sparseLimit, rerankLimit, rrfK int) retrieval.SearchRequest {
+	return retrieval.SearchRequest{
+		Query: query, Scope: scope, DenseLimit: denseLimit, SparseLimit: sparseLimit,
+		RerankLimit: rerankLimit, MinimumSurvivors: 1, RRFK: rrfK,
+	}
 }
 
 // recordSearchMetrics emits nano_retrieval_search_seconds, nano_retrieval_stage_seconds,
