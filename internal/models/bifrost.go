@@ -314,7 +314,13 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 			continue
 		}
 		decision := ModelDecision{}
-		if choice.Message.Content != nil && strings.TrimSpace(*choice.Message.Content) != "" {
+		// A model may return non-empty prose alongside tool_calls (e.g. a
+		// spoken-aloud "let me check that" preamble) — this is a legitimate,
+		// common response shape, not evidence of a malformed reply. When
+		// tool_calls are present they are authoritative: the accompanying
+		// text is discarded rather than treated as a competing Final draft,
+		// matching how most tool-calling model APIs are consumed elsewhere.
+		if len(choice.Message.ToolCalls) == 0 && choice.Message.Content != nil && strings.TrimSpace(*choice.Message.Content) != "" {
 			decision.Final = &FinalDraft{Text: *choice.Message.Content}
 		}
 		if len(choice.Message.ToolCalls) > 0 {

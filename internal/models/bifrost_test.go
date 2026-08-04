@@ -336,13 +336,25 @@ func TestBifrostClientDecodesOneActionProposal(t *testing.T) {
 	}
 }
 
+func TestBifrostClientDiscardsProseAlongsideToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Let me check that for you.","tool_calls":[{"id":"call-a","type":"function","function":{"name":"current_time","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`))
+	}))
+	defer server.Close()
+	decision, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "aliyun/qwen-flash", Messages: []ModelMessage{{Role: RoleUser, Content: "Current time?"}},
+	})
+	if err != nil || decision.Proposal == nil || decision.Final != nil || len(decision.Proposal.Actions) != 1 || decision.Proposal.Actions[0].Name != "current_time" {
+		t.Fatalf("decision = %+v err=%v", decision, err)
+	}
+}
+
 func TestBifrostClientRejectsInvalidDecisions(t *testing.T) {
 	tests := []struct {
 		name     string
 		response string
 	}{
 		{name: "malformed arguments", response: `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"bad","type":"function","function":{"name":"calculate","arguments":"{"}}]}}]}`},
-		{name: "both variants", response: `{"choices":[{"message":{"role":"assistant","content":"text","tool_calls":[{"id":"both","type":"function","function":{"name":"current_time","arguments":"{}"}}]}}]}`},
 		{name: "neither variant", response: `{"choices":[{"message":{"role":"assistant","content":null}}]}`},
 		{name: "final with tool-call finish reason", response: `{"choices":[{"message":{"role":"assistant","content":"Contradictory final."},"finish_reason":"tool_calls"}]}`},
 		{name: "proposal with stop finish reason", response: `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-a","type":"function","function":{"name":"current_time","arguments":"{}"}}]},"finish_reason":"stop"}]}`},
