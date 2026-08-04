@@ -1,0 +1,11 @@
+{
+  "identity": "nano.default",
+  "version": 4,
+  "roots": {
+    "chat": "chat.leader@3",
+    "studio_report": "studio.report@1",
+    "studio_flashcards": "studio.flashcards@1",
+    "studio_mind_map": "studio.mind-map@1",
+    "studio_data_table": "studio.data-table@1"
+  }
+}

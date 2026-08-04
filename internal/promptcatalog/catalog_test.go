@@ -22,8 +22,9 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
-	if got := len(catalog.Versions()); got != len(want) {
-		t.Fatalf("versions=%d want=%d", got, len(want))
+	const extraVersions = 3 // agent.chat-composer-grounded@2/@3 and agent.chat-composer-bare@2, alongside their still-required @1s (legacy AgentPromptSet binding)
+	if got := len(catalog.Versions()); got != len(want)+extraVersions {
+		t.Fatalf("versions=%d want=%d", got, len(want)+extraVersions)
 	}
 	for identity, contract := range want {
 		prompt, ok := catalog.Resolve(identity, 1)
@@ -36,6 +37,22 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		if !strings.HasSuffix(prompt.SourcePath, ".md") {
 			t.Fatalf("source path=%q", prompt.SourcePath)
 		}
+	}
+	for _, version := range []int{2, 3} {
+		grounded, ok := catalog.Resolve("agent.chat-composer-grounded", version)
+		if !ok {
+			t.Fatalf("missing agent.chat-composer-grounded@%d", version)
+		}
+		if grounded.Contract != "grounded_final_draft_text.v1" || grounded.SHA256 == "" || strings.TrimSpace(grounded.Content) == "" {
+			t.Fatalf("prompt=%+v", grounded)
+		}
+	}
+	bare, ok := catalog.Resolve("agent.chat-composer-bare", 2)
+	if !ok {
+		t.Fatal("missing agent.chat-composer-bare@2")
+	}
+	if bare.Contract != "final_draft_text.v1" || bare.SHA256 == "" || strings.TrimSpace(bare.Content) == "" {
+		t.Fatalf("prompt=%+v", bare)
 	}
 }
 

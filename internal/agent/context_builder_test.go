@@ -8,21 +8,42 @@ import (
 
 func TestGroundedSystemPromptDescribesPlainTextSourceMarkerContract(t *testing.T) {
 	for _, required := range []string{
-		"always use search_evidence before answering",
-		"current request rather than continuing an older topic",
-		"not a reason to refuse",
+		"call `search_evidence` before answering",
+		"with an older topic",
+		"reason to refuse",
 		"actually asks for information from selected Sources",
 		"[source:<source_id>]",
 		"ordinary plain text",
 		"omit Source markers",
+		"delegate.research.source-discovery.v1",
+		"at most once per Run",
+		"available for review in the notebook's Source panel",
 	} {
 		if !strings.Contains(GroundedSystemPrompt, required) {
 			t.Fatalf("grounded prompt is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"claims", "must be only JSON", "verbatim"} {
+	for _, forbidden := range []string{"claims", "must be only JSON", "verbatim", "You must always use search_evidence"} {
 		if strings.Contains(GroundedSystemPrompt, forbidden) {
 			t.Fatalf("grounded prompt still contains %q", forbidden)
+		}
+	}
+}
+
+func TestBareSystemPromptDescribesResearchDelegationEscalation(t *testing.T) {
+	for _, required := range []string{
+		"delegate.research.source-discovery.v1",
+		"at most once per Run",
+		"available for review in the notebook's Source panel",
+		"do not delegate reflexively",
+	} {
+		if !strings.Contains(BareSystemPrompt, required) {
+			t.Fatalf("bare prompt is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"has no Sources or web research", "claim to have searched the web"} {
+		if strings.Contains(BareSystemPrompt, forbidden) {
+			t.Fatalf("bare prompt still contains stale phrase %q", forbidden)
 		}
 	}
 }

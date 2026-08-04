@@ -59,7 +59,7 @@ func validateGroundingPublication(ctx context.Context, tx pgx.Tx, runID string, 
 	if err != nil {
 		return "", err
 	}
-	if outcome != "source_less" && outcome != "source_free" && outcome != "source_cited" {
+	if outcome != "source_less" && outcome != "source_unsearched" && outcome != "source_free" && outcome != "source_cited" {
 		return "", ErrGroundingInvalid
 	}
 	references, err := loadDraftSourceReferences(ctx, tx, runID, notebookID)
@@ -114,6 +114,16 @@ func validateSourceReferenceDraft(
 ) error {
 	if outcome == "source_less" {
 		if selectedCount != 0 || researchPerformed || researchComplete || degraded || len(references) != 0 {
+			return ErrGroundingInvalid
+		}
+		normalized, _, _ := normalizeSourceMarkers(text, nil)
+		if normalized != text {
+			return ErrGroundingInvalid
+		}
+		return nil
+	}
+	if outcome == "source_unsearched" {
+		if selectedCount == 0 || researchPerformed || researchComplete || degraded || len(references) != 0 {
 			return ErrGroundingInvalid
 		}
 		normalized, _, _ := normalizeSourceMarkers(text, nil)

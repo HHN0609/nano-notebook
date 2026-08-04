@@ -42,6 +42,13 @@ type ReplayTraceRuntime interface {
 	ReplayStager() ReplayStager
 }
 
+// QueryContextRuntime is implemented by runtimes that must force their
+// decision loop's first Action to be a specific, isolated-query search
+// before any free tool choice — today, only Studio Output generation
+// (studioRuntime), which always needs exactly one evidence-gathering search
+// before composing. PostgresRuntime (the Leader chat loop) intentionally
+// does not implement this: chat's decision loop is fully free from decision
+// 1 onward (see docs/superpowers/specs/2026-08-04-prompt-driven-leader-decision-loop-design.md).
 type QueryContextRuntime interface {
 	BuildQueryContextRequest(context.Context, Execution, models.ActionDefinition) (models.ModelRequest, models.ActionProposal, int, error)
 }
@@ -156,7 +163,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		if !actionCapable && execution.FinalDecisionLimit < 1 {
 			return c.fail(ctx, attempt, ErrorAgentBudgetExhausted, errors.New("no reserved Final decision is available"))
 		}
-		if execution.PromptVersion == GroundedPromptVersion {
+		if queryContextRuntime, ok := c.runtime.(QueryContextRuntime); ok {
 			requiredAction, requiredErr := groundedRequiredAction(prefix)
 			if requiredErr != nil {
 				return c.fail(ctx, attempt, "context_failed", requiredErr)
@@ -169,7 +176,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 				if !ok {
 					return c.fail(ctx, attempt, "context_failed", ErrGroundingIncomplete)
 				}
-				if err := c.acceptContextualizedSearch(ctx, tracer, toolSession, attempt, execution, prefix, definition); err != nil {
+				if err := c.acceptContextualizedSearch(ctx, tracer, queryContextRuntime, toolSession, attempt, execution, prefix, definition); err != nil {
 					return err
 				}
 				continue
@@ -269,16 +276,13 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 func (c *Controller) acceptContextualizedSearch(
 	ctx context.Context,
 	tracer *agentobs.Tracer,
+	runtime QueryContextRuntime,
 	toolSession *MCPAttemptSession,
 	attempt Attempt,
 	execution Execution,
 	prefix CheckpointPrefix,
 	definition models.ActionDefinition,
 ) error {
-	runtime, ok := c.runtime.(QueryContextRuntime)
-	if !ok {
-		return c.fail(ctx, attempt, "context_failed", errors.New("query contextualization is unavailable"))
-	}
 	request, fallback, historyPairCount, err := runtime.BuildQueryContextRequest(ctx, execution, definition)
 	if err != nil {
 		return c.fail(ctx, attempt, "context_failed", err)

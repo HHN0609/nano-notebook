@@ -135,7 +135,19 @@ func (s *GroundingService) prepare(ctx context.Context, attempt Attempt, prefix 
 	}
 	result.research = research
 	if !research.performed {
-		return result, ErrGroundingIncomplete
+		normalizedText, references, discarded := normalizeSourceMarkers(draft.Text, nil)
+		draft.Text = normalizedText
+		result.validReferenceCount = len(references)
+		result.discardedMarkerCount = discarded
+		if strings.TrimSpace(draft.Text) == "" {
+			return result, ErrGroundingInvalid
+		}
+		if err := s.persistSourcePlan(ctx, attempt, draft, "source_unsearched", research, nil); err != nil {
+			return result, err
+		}
+		result.draft = draft
+		result.outcome = "source_unsearched"
+		return result, nil
 	}
 	allowed := make(map[string]struct{})
 	for _, item := range research.evidence {

@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 6; got != want {
+	if got, want := len(definitions), 8; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -23,6 +23,14 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		children []string
 	}{
 		"chat.leader@1": {
+			executor: "chat_leader", model: "agent.chat-default@1",
+			tools: []string{"calculate", "current_time", "search_evidence"}, children: []string{"research.source-discovery@1"},
+		},
+		"chat.leader@2": {
+			executor: "chat_leader", model: "agent.chat-default@1",
+			tools: []string{"calculate", "current_time", "search_evidence"}, children: []string{"research.source-discovery@1"},
+		},
+		"chat.leader@3": {
 			executor: "chat_leader", model: "agent.chat-default@1",
 			tools: []string{"calculate", "current_time", "search_evidence"}, children: []string{"research.source-discovery@1"},
 		},

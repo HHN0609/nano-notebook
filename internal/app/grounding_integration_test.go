@@ -159,12 +159,25 @@ func TestMigrationsReapplyWithSourceCitedGroundingPlan(t *testing.T) {
 	}
 }
 
-func TestGroundingRequiresSearchAttemptForSelectedSources(t *testing.T) {
+func TestGroundingAllowsUnsearchedFinalWhenModelSkipsSearchEvidence(t *testing.T) {
 	api, attempt, _, _ := groundingFixture(t, "mandatory-search-grounding@example.com", "src_mandatory", "evr_mandatory")
 	service := agent.NewGroundingService(api.db.Pool())
-	_, err := service.Prepare(context.Background(), attempt, agent.CheckpointPrefix{}, models.FinalDraft{Text: "Hello."})
-	if !errors.Is(err, agent.ErrGroundingIncomplete) {
-		t.Fatalf("error=%v", err)
+	prepared, err := service.Prepare(context.Background(), attempt, agent.CheckpointPrefix{}, models.FinalDraft{Text: "Hello [source:src_mandatory]."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Text != "Hello ." {
+		t.Fatalf("prepared=%+v", prepared)
+	}
+	var outcome string
+	var performed bool
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select outcome,research_performed from agent_run_grounding_plans where run_id=$1
+	`, attempt.RunID).Scan(&outcome, &performed); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "source_unsearched" || performed {
+		t.Fatalf("outcome=%s performed=%v", outcome, performed)
 	}
 }
 
@@ -285,7 +298,7 @@ func TestControllerPublishesPlainTextAfterSearchReturnsNoEvidence(t *testing.T) 
 	if err := agent.NewController(runtime, model, registry).Execute(context.Background(), attempt); err != nil {
 		t.Fatal(err)
 	}
-	if len(model.requests) != 2 || model.requests[0].RequiredActionName != "search_evidence" || model.requests[1].RequiredActionName != "" {
+	if len(model.requests) != 2 || model.requests[0].RequiredActionName != "" || model.requests[1].RequiredActionName != "" {
 		t.Fatalf("requests=%+v", model.requests)
 	}
 	var content, outcome string
@@ -302,7 +315,7 @@ func TestControllerPublishesPlainTextAfterSearchReturnsNoEvidence(t *testing.T) 
 	}
 }
 
-func TestGroundedControllerBuildsQueryContextFromBoundedCompletedPairs(t *testing.T) {
+func TestGroundedComposerRequestCarriesBoundedCompletedPairsOnEveryDecision(t *testing.T) {
 	api, attempt, _, _ := groundingFixture(t, "query-context-grounding@example.com", "src_query_context", "evr_query_context")
 	ctx := context.Background()
 	var chatID, userID string
@@ -361,50 +374,131 @@ func TestGroundedControllerBuildsQueryContextFromBoundedCompletedPairs(t *testin
 		t.Fatal(err)
 	}
 	if len(model.requests) != 2 {
-		t.Fatalf("model request count = %d, want contextualizer + composer", len(model.requests))
+		t.Fatalf("model request count = %d, want decision-1 (proposes search_evidence) + decision-2 (final)", len(model.requests))
 	}
-	queryRequest := model.requests[0]
-	if queryRequest.RequiredActionName != "search_evidence" || len(queryRequest.ActionDefinitions) != 1 ||
-		queryRequest.ActionDefinitions[0].Name != "search_evidence" || len(queryRequest.Messages) != 2 {
-		t.Fatalf("query contextualizer request = %+v", queryRequest)
-	}
-	queryContext := queryRequest.Messages[0].Content + "\n" + queryRequest.Messages[1].Content
-	for _, required := range []string{
-		"current Message is authoritative",
-		"preserve its key terms",
-		"Do not translate ambiguous terms",
-		"copy it rather than choose an interpretation",
-		"When is launch?",
-		"completed-question-2",
-		"completed-question-3",
-		"completed-question-4",
-	} {
-		if !strings.Contains(queryContext, required) {
-			t.Fatalf("query context is missing %q: %s", required, queryContext)
+	for index, request := range model.requests {
+		if request.RequiredActionName != "" {
+			t.Fatalf("request[%d] has RequiredActionName=%q, want free tool choice on every decision", index, request.RequiredActionName)
+		}
+		if len(request.Messages) < 2 || request.Messages[0].Role != models.RoleSystem || request.Messages[1].Role != models.RoleUser {
+			t.Fatalf("request[%d] messages = %+v, want to start with [system, bounded-history+current]", index, request.Messages)
+		}
+		requestContext := request.Messages[0].Content + "\n" + request.Messages[1].Content
+		for _, required := range []string{
+			"current Message is authoritative",
+			"preserve its key terms",
+			"Do not translate ambiguous terms",
+			"copy it rather than choose an interpretation",
+			"When is launch?",
+			"completed-question-2",
+			"completed-question-3",
+			"completed-question-4",
+		} {
+			if !strings.Contains(requestContext, required) {
+				t.Fatalf("request[%d] context is missing %q: %s", index, required, requestContext)
+			}
+		}
+		for _, forbidden := range []string{"completed-question-1", "UNPAIRED_OLD_TOPIC"} {
+			if strings.Contains(requestContext, forbidden) {
+				t.Fatalf("request[%d] context contains %q: %s", index, forbidden, requestContext)
+			}
+		}
+		if strings.Count(requestContext, "OLD_DEGREE_TOPIC") >= 1000 {
+			t.Fatalf("request[%d]: long prior answer was not bounded", index)
 		}
 	}
-	for _, forbidden := range []string{"completed-question-1", "UNPAIRED_OLD_TOPIC"} {
-		if strings.Contains(queryContext, forbidden) {
-			t.Fatalf("query context contains %q: %s", forbidden, queryContext)
-		}
-	}
-	if strings.Count(queryContext, "OLD_DEGREE_TOPIC") >= 1000 {
-		t.Fatalf("long prior answer was not bounded")
-	}
-	var composerContext strings.Builder
+	var decisionTwoContext strings.Builder
 	for _, message := range model.requests[1].Messages {
-		composerContext.WriteString(message.Content)
-		composerContext.WriteByte('\n')
+		decisionTwoContext.WriteString(message.Content)
+		decisionTwoContext.WriteByte('\n')
 	}
-	for _, required := range []string{"When is launch?", "complete_empty"} {
-		if !strings.Contains(composerContext.String(), required) {
-			t.Fatalf("composer context is missing %q: %s", required, composerContext.String())
-		}
+	if !strings.Contains(decisionTwoContext.String(), "complete_empty") {
+		t.Fatalf("decision-2 context is missing the decision-1 search_evidence Action Result: %s", decisionTwoContext.String())
 	}
-	for _, forbidden := range []string{"completed-question-1", "completed-question-2", "completed-question-3", "completed-question-4", "UNPAIRED_OLD_TOPIC", "OLD_DEGREE_TOPIC"} {
-		if strings.Contains(composerContext.String(), forbidden) {
-			t.Fatalf("composer context contains %q: %s", forbidden, composerContext.String())
-		}
+}
+
+type firstRequestCapturingModel struct {
+	firstDefinitions []models.ActionDefinition
+	calls            int
+}
+
+func (m *firstRequestCapturingModel) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
+	m.calls++
+	if m.calls == 1 {
+		m.firstDefinitions = request.ActionDefinitions
+	}
+	return models.ModelOutcome{ModelDecision: models.ModelDecision{
+		Final: &models.FinalDraft{Text: "Answering without checking selected Sources."},
+	}, Metadata: models.ModelCallMetadata{
+		RequestedModel: request.Model, SelectedProvider: "test", SelectedModel: "test",
+		ResultKind: models.ModelResultFinalDraft, FinishReason: "stop",
+	}}, nil
+}
+
+// TestGroundedDecisionOneOffersDelegationAlongsideSearchEvidence proves the
+// core claim of
+// docs/superpowers/specs/2026-08-04-prompt-driven-leader-decision-loop-design.md:
+// the Leader's very first decision on a Sources-selected chat turn is a
+// genuinely free choice among every currently-available tool — including
+// delegate.research.source-discovery.v1 — not a code-forced search_evidence
+// call. It also proves the model can finalize on decision 1 without ever
+// calling search_evidence, and that this now succeeds with the
+// source_unsearched grounding outcome instead of failing (see Phase 2 of the
+// same design).
+func TestGroundedDecisionOneOffersDelegationAlongsideSearchEvidence(t *testing.T) {
+	api, attempt, _, _ := groundingFixture(t, "decision-one-freedom@example.com", "src_decision_one", "evr_decision_one")
+	ctx := context.Background()
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, ok := catalog.ResolveDefinition(agentcatalog.MustParseReference("chat.leader@1"))
+	if !ok {
+		t.Fatal("chat.leader@1 not found in catalog")
+	}
+	generated, err := agent.NewConfiguredDelegationToolRegistrations(catalog, api.db.Pool(), availableResearchProvider{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrations := append([]agent.MCPToolRegistration{
+		{Action: agent.NewCalculateAction(), Scheduling: agentcatalog.ToolOrderedSync},
+		{Action: agent.NewCurrentTimeAction(nil), Scheduling: agentcatalog.ToolOrderedSync},
+		{Action: agent.NewSearchEvidenceAction(nil), Scheduling: agentcatalog.ToolOrderedSync},
+	}, generated...)
+	mcpRegistry, err := agent.NewMCPToolRegistry(registrations...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grounder := agent.NewGroundingService(api.db.Pool())
+	postgresRuntime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil, agent.WithGroundingService(grounder))
+	mcpHost, err := agent.NewMCPToolHost(catalog, mcpRegistry, postgresRuntime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directRegistry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil), agent.NewSearchEvidenceAction(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &firstRequestCapturingModel{}
+	if err := agent.NewMCPController(postgresRuntime, model, directRegistry, mcpHost, root.Reference()).Execute(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	offered := make(map[string]bool, len(model.firstDefinitions))
+	for _, definition := range model.firstDefinitions {
+		offered[definition.Name] = true
+	}
+	if !offered["search_evidence"] || !offered["delegate.research.source-discovery.v1"] {
+		t.Fatalf("decision-1 ActionDefinitions = %+v, want both search_evidence and delegate.research.source-discovery.v1", model.firstDefinitions)
+	}
+	var outcome string
+	var performed bool
+	if err := api.db.Pool().QueryRow(ctx, `
+		select outcome,research_performed from agent_run_grounding_plans where run_id=$1
+	`, attempt.RunID).Scan(&outcome, &performed); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "source_unsearched" || performed {
+		t.Fatalf("outcome=%s performed=%v, want source_unsearched/false (model finalized on decision 1 without searching)", outcome, performed)
 	}
 }
 

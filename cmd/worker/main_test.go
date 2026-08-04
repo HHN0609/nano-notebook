@@ -39,7 +39,7 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	if config.FetcherURL != "http://127.0.0.1:8083" {
 		t.Fatalf("Fetcher URL default=%q", config.FetcherURL)
 	}
-	if config.AgentRelease.String() != "nano.default@2" {
+	if config.AgentRelease.String() != "nano.default@4" {
 		t.Fatalf("Agent release default=%q", config.AgentRelease)
 	}
 }

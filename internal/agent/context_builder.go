@@ -75,18 +75,13 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 		}
 	}
 	request.ActionDefinitions = cloneActionDefinitions(definitions)
-	if execution.PromptVersion == GroundedPromptVersion {
-		request.RequiredActionName, err = groundedRequiredAction(prefix)
-		if err != nil {
-			return models.ModelRequest{}, err
-		}
-		if request.RequiredActionName != "" {
-			return models.ModelRequest{}, ErrGroundingIncomplete
-		}
-	}
 	return request, nil
 }
 
+// groundedRequiredAction is consulted only for runtimes that also implement
+// QueryContextRuntime (today, Studio Output generation) — see
+// docs/superpowers/specs/2026-08-04-prompt-driven-leader-decision-loop-design.md
+// for why the Leader chat loop no longer calls this.
 func groundedRequiredAction(prefix CheckpointPrefix) (string, error) {
 	research, err := parseResearchState(prefix)
 	if err != nil {
