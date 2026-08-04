@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
@@ -74,9 +76,23 @@ func (db *DB) WithRequestPrincipal(ctx context.Context, principalID string, fn f
 	return nil
 }
 
+// ResetForTests drops and recreates the public schema, so it must never run
+// against a database a human could be using for local development. It
+// refuses to run unless the connected database name ends in "_test" (the
+// convention scripts/test-go and every NANO_TEST_DATABASE_URL default in
+// this repo already follow) — this is the guard that was missing when a
+// hand-typed NANO_TEST_DATABASE_URL pointed at the dev database "nano" and
+// wiped it.
 func ResetForTests(ctx context.Context, db *DB) error {
 	if db == nil || db.pool == nil {
 		return errors.New("nil database")
+	}
+	var databaseName string
+	if err := db.pool.QueryRow(ctx, `select current_database()`).Scan(&databaseName); err != nil {
+		return err
+	}
+	if !strings.HasSuffix(databaseName, "_test") {
+		return fmt.Errorf("refusing to reset database %q: ResetForTests only runs against databases whose name ends in \"_test\"", databaseName)
 	}
 	_, err := db.pool.Exec(ctx, `drop schema if exists public cascade; create schema public;`)
 	return err

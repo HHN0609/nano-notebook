@@ -617,8 +617,24 @@ func openObservabilityTestPool(t *testing.T, ctx context.Context) *pgxpool.Pool 
 	return pool
 }
 
+// requireTestDatabase refuses to let a destructive schema reset run against
+// anything but a dedicated "_test"-suffixed database (repo convention, see
+// scripts/test-go) — the guard that was missing when a hand-typed test DSN
+// once pointed at the dev database and wiped it.
+func requireTestDatabase(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	var databaseName string
+	if err := pool.QueryRow(ctx, `select current_database()`).Scan(&databaseName); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(databaseName, "_test") {
+		t.Fatalf("refusing to reset database %q: only databases whose name ends in \"_test\" may be reset", databaseName)
+	}
+}
+
 func resetObservabilityTestSchema(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
+	requireTestDatabase(t, ctx, pool)
 	if _, err := pool.Exec(ctx, `drop schema if exists public cascade; create schema public`); err != nil {
 		t.Fatalf("reset Observability schema: %v", err)
 	}
