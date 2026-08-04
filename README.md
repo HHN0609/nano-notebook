@@ -73,11 +73,7 @@ cmd/            Application entry points (Control Plane, Workers, etc.)
 internal/       Go modules — Agent, Chat, Source, Retrieval, Notebook, Studio, etc.
 web/            React + TypeScript SPA
 docs/           Product discovery, technical architecture, and sprint runbooks
-config/         Configuration files
 infra/          Infrastructure definitions
-agents/         Agent prompt catalog
-skills/         Agent skill definitions
-templates/      Output templates
 memory/         Agent memory templates
 evals/          Evaluation cases and harness
 scripts/        Bootstrap, migration, and operational scripts
