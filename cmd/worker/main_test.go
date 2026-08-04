@@ -292,3 +292,27 @@ func (f *workerFlusher) Shutdown(context.Context) error {
 	f.shutdownCalls++
 	return nil
 }
+
+func TestRetryUntilReadySucceedsAfterTransientFailures(t *testing.T) {
+	attempts := 0
+	err := retryUntilReady(context.Background(), "test check", func() error {
+		attempts++
+		if attempts < 3 {
+			return errors.New("not ready yet")
+		}
+		return nil
+	})
+	if err != nil || attempts != 3 {
+		t.Fatalf("err=%v attempts=%d", err, attempts)
+	}
+}
+
+func TestRetryUntilReadyReturnsLastErrorAfterDeadline(t *testing.T) {
+	wantErr := errors.New("still not ready")
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := retryUntilReady(ctx, "test check", func() error { return wantErr })
+	if !errors.Is(err, wantErr) && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+}

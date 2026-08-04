@@ -131,6 +131,30 @@ type retrievalAuthority interface {
 	RequireActive(context.Context) error
 }
 
+// retryUntilReady retries check against a bounded window (30s, 1s between
+// attempts) to absorb the startup race against control-plane's migrations
+// (see the call sites in main). Returns the last error if the window
+// elapses without success.
+func retryUntilReady(ctx context.Context, label string, check func() error) error {
+	deadline := time.Now().Add(30 * time.Second)
+	var lastErr error
+	for attempt := 1; ; attempt++ {
+		lastErr = check()
+		if lastErr == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		slog.Warn(label+" not yet ready, retrying", "attempt", attempt, "error", lastErr)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
+	}
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -146,7 +170,15 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
-	if err := app.VerifyEmbeddedPromptCatalog(ctx, db); err != nil {
+	// control-plane runs RunMigrations (which registers the embedded catalog)
+	// on its own startup path, with no compose-level dependency ordering
+	// worker on it — the two containers start concurrently once postgres is
+	// healthy. Retry these readiness checks for a bounded window instead of
+	// failing on the first race, rather than relying on the container
+	// restart policy to paper over a startup-ordering race.
+	if err := retryUntilReady(ctx, "worker Prompt Catalog readiness", func() error {
+		return app.VerifyEmbeddedPromptCatalog(ctx, db)
+	}); err != nil {
 		slog.Error("worker Prompt Catalog readiness failed", "error", err)
 		os.Exit(1)
 	}
@@ -160,8 +192,12 @@ func main() {
 		slog.Error("worker Prompt Catalog invalid", "error", err)
 		os.Exit(1)
 	}
-	activeRelease, err := app.VerifyAgentCatalogReady(ctx, db, definitionCatalog, config.AgentRelease)
-	if err != nil {
+	var activeRelease agentcatalog.ReleaseManifest
+	if err := retryUntilReady(ctx, "worker Agent Catalog readiness", func() error {
+		var readyErr error
+		activeRelease, readyErr = app.VerifyAgentCatalogReady(ctx, db, definitionCatalog, config.AgentRelease)
+		return readyErr
+	}); err != nil {
 		slog.Error("worker Agent Catalog readiness failed", "release", config.AgentRelease, "error", err)
 		os.Exit(1)
 	}
