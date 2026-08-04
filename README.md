@@ -74,7 +74,6 @@ internal/       Go modules — Agent, Chat, Source, Retrieval, Notebook, Studio,
 web/            React + TypeScript SPA
 docs/           Product discovery, technical architecture, and sprint runbooks
 infra/          Infrastructure definitions
-memory/         Agent memory templates
 evals/          Evaluation cases and harness
 scripts/        Bootstrap, migration, and operational scripts
 ```
