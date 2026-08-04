@@ -1,7 +1,6 @@
 package collector_test
 
 import (
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -134,7 +133,7 @@ func TestBuildTraceProjectionConvergesWhenRootArrivesAfterChild(t *testing.T) {
 	}
 }
 
-func TestBuildTraceProjectionWaitsForTerminalStart(t *testing.T) {
+func TestBuildTraceProjectionDefersTerminalWithoutStartUntilItArrives(t *testing.T) {
 	traceID := agentobs.TraceID("trace-late-terminal-start")
 	rootID := agentobs.SpanID("root-late-terminal")
 	base := time.Unix(1_700_200_000, 0).UTC()
@@ -147,19 +146,27 @@ func TestBuildTraceProjectionWaitsForTerminalStart(t *testing.T) {
 		TraceID: traceID, RunID: "run-late-terminal", ChatID: "chat-late-terminal", NotebookID: "notebook-late-terminal",
 		RootSpanID: rootID, AgentName: "nano-research-agent", SchemaVersion: 1, SemanticConventionVersion: 1,
 	}
-	if _, err := collector.BuildTraceProjection(collector.StoredTrace{
+	terminalOnly, err := collector.BuildTraceProjection(collector.StoredTrace{
 		Trace: descriptor, CommittedThrough: 1,
 		Records: []collector.SequencedRecord{collectorEnvelope(t, 1, terminal)},
-	}); !errors.Is(err, collector.ErrProjectionPending) {
-		t.Fatalf("terminal-only projection error = %v, want pending", err)
+	})
+	if err != nil {
+		t.Fatalf("terminal-only projection error = %v, want nil (start not yet received should defer, not fail)", err)
 	}
-	if _, err := collector.BuildTraceProjection(collector.StoredTrace{
+	if len(terminalOnly.Spans) != 0 || !terminalOnly.Summary.Active {
+		t.Fatalf("terminal-only projection = %#v, want zero Spans and an Active Summary", terminalOnly)
+	}
+	converged, err := collector.BuildTraceProjection(collector.StoredTrace{
 		Trace: descriptor, CommittedThrough: 2,
 		Records: []collector.SequencedRecord{
 			collectorEnvelope(t, 1, terminal), collectorEnvelope(t, 2, start),
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("converged projection error = %v", err)
+	}
+	if len(converged.Spans) != 1 || converged.Spans[0].EndSequence == nil || converged.Summary.Active {
+		t.Fatalf("converged projection = %#v", converged)
 	}
 }
 

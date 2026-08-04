@@ -13,11 +13,23 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// ErrProjectionAbandoned wraps the error returned by RunOnce when a Trace's
+// projection has failed MaxAttempts times in a row. The queue row is parked
+// (available_at pushed out by AbandonedRetryDelay, last_error_code =
+// "projection_abandoned") instead of being retried on the normal cadence,
+// so a persistently broken Trace stops consuming claim/project cycles. A
+// genuinely new commit for that Trace still wakes it immediately (the
+// obs_projection_queue upsert in CommitTraceChunk always resets
+// available_at), so real recovery is not blocked by abandonment.
+var ErrProjectionAbandoned = errors.New("Collector Trace projection abandoned after max attempts")
+
 type ProjectorConfig struct {
-	Interval    time.Duration
-	Lease       time.Duration
-	RetryDelay  time.Duration
-	ReportError func(error)
+	Interval            time.Duration
+	Lease               time.Duration
+	RetryDelay          time.Duration
+	MaxAttempts         int
+	AbandonedRetryDelay time.Duration
+	ReportError         func(error)
 }
 
 type Projector struct {
@@ -45,10 +57,17 @@ func NewProjector(pool *pgxpool.Pool, config ProjectorConfig) (*Projector, error
 	if config.RetryDelay == 0 {
 		config.RetryDelay = 5 * time.Second
 	}
+	if config.MaxAttempts == 0 {
+		config.MaxAttempts = 20
+	}
+	if config.AbandonedRetryDelay == 0 {
+		config.AbandonedRetryDelay = time.Hour
+	}
 	if config.ReportError == nil {
 		config.ReportError = func(error) {}
 	}
-	if config.Interval <= 0 || config.Lease <= 0 || config.RetryDelay <= 0 {
+	if config.Interval <= 0 || config.Lease <= 0 || config.RetryDelay <= 0 ||
+		config.MaxAttempts < 1 || config.AbandonedRetryDelay <= 0 {
 		return nil, errors.New("Collector Projector bounds are invalid")
 	}
 	return &Projector{pool: pool, config: config}, nil
@@ -82,16 +101,18 @@ func (p *Projector) RunOnce(ctx context.Context) (bool, error) {
 	if p == nil || p.pool == nil {
 		return false, errors.New("nil Collector Projector")
 	}
-	traceID, leaseToken, found, err := p.claim(ctx)
+	traceID, leaseToken, attemptCount, found, err := p.claim(ctx)
 	if err != nil || !found {
 		return false, err
 	}
 	if err := p.projectTrace(ctx, traceID, leaseToken); err != nil {
-		if errors.Is(err, ErrProjectionPending) {
-			if releaseErr := p.fail(ctx, traceID, leaseToken, "projection_pending"); releaseErr != nil {
-				return false, errors.Join(err, releaseErr)
+		if attemptCount >= p.config.MaxAttempts {
+			abandonErr := fmt.Errorf("Collector Trace %q abandoned after %d projection attempts: %w: %w",
+				traceID, attemptCount, ErrProjectionAbandoned, err)
+			if releaseErr := p.abandon(ctx, traceID, leaseToken); releaseErr != nil {
+				return false, errors.Join(abandonErr, releaseErr)
 			}
-			return false, nil
+			return false, abandonErr
 		}
 		if releaseErr := p.fail(ctx, traceID, leaseToken, "projection_invalid"); releaseErr != nil {
 			return false, errors.Join(err, releaseErr)
@@ -125,17 +146,63 @@ func (p *Projector) EnqueueRebuildAll(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), err
 }
 
-func (p *Projector) claim(ctx context.Context) (agentobs.TraceID, string, bool, error) {
+// ProjectionQueueErrorStat is the count and oldest age of
+// obs_projection_queue rows currently stuck on a given last_error_code
+// (e.g. "projection_invalid", "projection_abandoned"). Age is measured
+// from the underlying obs_traces.created_at, the timestamp of the Trace's
+// first commit, which is a stable proxy for "how long has this Trace been
+// unable to make progress" — the queue row's own updated_at churns on
+// every claim/fail cycle and can't answer that question.
+type ProjectionQueueErrorStat struct {
+	ErrorCode        string
+	Count            int64
+	OldestAgeSeconds float64
+}
+
+// ProjectionQueueStats reports obs_projection_queue rows with a
+// last_error_code set, grouped by that code. It backs
+// nano_collector_projection_queue_stuck_records and
+// nano_collector_projection_queue_stuck_oldest_seconds (PRD follow-up:
+// observe pending/erroring projection age). Rows without a
+// last_error_code are still being retried on the normal cadence and are
+// not reported here; only stuck (erroring or abandoned) rows warrant
+// operator attention.
+func ProjectionQueueStats(ctx context.Context, pool *pgxpool.Pool) ([]ProjectionQueueErrorStat, error) {
+	if pool == nil {
+		return nil, errors.New("nil Collector Projector database")
+	}
+	rows, err := pool.Query(ctx, `
+		select q.last_error_code, count(*), extract(epoch from (now() - min(t.created_at)))
+		from obs_projection_queue q join obs_traces t using (trace_id)
+		where q.last_error_code is not null
+		group by q.last_error_code
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var stats []ProjectionQueueErrorStat
+	for rows.Next() {
+		var stat ProjectionQueueErrorStat
+		if err := rows.Scan(&stat.ErrorCode, &stat.Count, &stat.OldestAgeSeconds); err != nil {
+			return nil, err
+		}
+		stats = append(stats, stat)
+	}
+	return stats, rows.Err()
+}
+
+func (p *Projector) claim(ctx context.Context) (agentobs.TraceID, string, int, bool, error) {
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return "", "", false, err
+		return "", "", 0, false, err
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `
 		update obs_projection_queue set lease_token = null, lease_expires_at = null, updated_at = now()
 		where lease_token is not null and lease_expires_at <= now()
 	`); err != nil {
-		return "", "", false, err
+		return "", "", 0, false, err
 	}
 	var traceID agentobs.TraceID
 	err = tx.QueryRow(ctx, `
@@ -145,24 +212,26 @@ func (p *Projector) claim(ctx context.Context) (agentobs.TraceID, string, bool, 
 		for update skip locked limit 1
 	`).Scan(&traceID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", false, tx.Commit(ctx)
+		return "", "", 0, false, tx.Commit(ctx)
 	}
 	if err != nil {
-		return "", "", false, err
+		return "", "", 0, false, err
 	}
 	token := uuid.NewString()
-	if _, err := tx.Exec(ctx, `
+	var attemptCount int
+	if err := tx.QueryRow(ctx, `
 		update obs_projection_queue set lease_token = $2,
 			lease_expires_at = now() + ($3 * interval '1 second'),
 			attempt_count = attempt_count + 1, updated_at = now()
 		where trace_id = $1
-	`, traceID, token, p.config.Lease.Seconds()); err != nil {
-		return "", "", false, err
+		returning attempt_count
+	`, traceID, token, p.config.Lease.Seconds()).Scan(&attemptCount); err != nil {
+		return "", "", 0, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return "", "", false, err
+		return "", "", 0, false, err
 	}
-	return traceID, token, true, nil
+	return traceID, token, attemptCount, true, nil
 }
 
 func (p *Projector) fail(ctx context.Context, traceID agentobs.TraceID, token, code string) error {
@@ -171,6 +240,15 @@ func (p *Projector) fail(ctx context.Context, traceID agentobs.TraceID, token, c
 			available_at = now() + ($3 * interval '1 second'), last_error_code = $4, updated_at = now()
 		where trace_id = $1 and lease_token = $2
 	`, traceID, token, p.config.RetryDelay.Seconds(), code)
+	return err
+}
+
+func (p *Projector) abandon(ctx context.Context, traceID agentobs.TraceID, token string) error {
+	_, err := p.pool.Exec(ctx, `
+		update obs_projection_queue set lease_token = null, lease_expires_at = null,
+			available_at = now() + ($3 * interval '1 second'), last_error_code = 'projection_abandoned', updated_at = now()
+		where trace_id = $1 and lease_token = $2
+	`, traceID, token, p.config.AbandonedRetryDelay.Seconds())
 	return err
 }
 

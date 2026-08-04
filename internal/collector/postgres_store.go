@@ -134,15 +134,22 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 	`, chunk.Trace.TraceID, committedThrough); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(ctx, `
-		insert into obs_projection_queue (trace_id, target_sequence)
-		values ($1, $2)
-		on conflict (trace_id) do update
-		set target_sequence = greatest(obs_projection_queue.target_sequence, excluded.target_sequence),
-			available_at = least(obs_projection_queue.available_at, now()),
-			updated_at = now()
-	`, chunk.Trace.TraceID, committedThrough); err != nil {
-		return 0, err
+	// Only re-enqueue when this chunk actually advanced the committed
+	// cursor. A duplicate/resent chunk that adds no new records would
+	// otherwise still upsert the queue row (resetting available_at and
+	// waking a lease-free trace), re-triggering projection work for a
+	// trace that's already fully projected.
+	if committedThrough > existing.CommittedThrough {
+		if _, err := tx.Exec(ctx, `
+			insert into obs_projection_queue (trace_id, target_sequence)
+			values ($1, $2)
+			on conflict (trace_id) do update
+			set target_sequence = greatest(obs_projection_queue.target_sequence, excluded.target_sequence),
+				available_at = least(obs_projection_queue.available_at, now()),
+				updated_at = now()
+		`, chunk.Trace.TraceID, committedThrough); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err

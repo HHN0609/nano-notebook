@@ -41,14 +41,16 @@ type Catalog struct {
 	LabelRejected         *prometheus.CounterVec
 
 	// Runtime and leak surfaces (PRD section 4.6 / 6.4)
-	RunHubSubscribers           prometheus.Gauge
-	RunHubRunsTracked           prometheus.Gauge
-	SSEConnectionsActive        *prometheus.GaugeVec
-	HTTPInflightRequests        prometheus.Gauge
-	WorkerInflightAttempts      prometheus.Gauge
-	WorkerHeartbeatGoroutines   prometheus.Gauge
-	CollectorMemoryStoreRecords prometheus.Gauge
-	DBPoolConnections           *prometheus.GaugeVec
+	RunHubSubscribers                          prometheus.Gauge
+	RunHubRunsTracked                          prometheus.Gauge
+	SSEConnectionsActive                       *prometheus.GaugeVec
+	HTTPInflightRequests                       prometheus.Gauge
+	WorkerInflightAttempts                     prometheus.Gauge
+	WorkerHeartbeatGoroutines                  prometheus.Gauge
+	CollectorMemoryStoreRecords                prometheus.Gauge
+	DBPoolConnections                          *prometheus.GaugeVec
+	CollectorProjectionQueueStuckRecords       *prometheus.GaugeVec
+	CollectorProjectionQueueStuckOldestSeconds *prometheus.GaugeVec
 }
 
 // NewCatalog constructs and registers every metric against reg. It panics
@@ -115,6 +117,10 @@ func NewCatalog(reg *Registry) *Catalog {
 		"Records held by the Collector in-memory Trace store, when used.")
 	c.DBPoolConnections = mustGaugeVec(reg, "nano_db_pool_connections",
 		"pgx pool connection counts by state.", []string{"pool", "state"})
+	c.CollectorProjectionQueueStuckRecords = mustGaugeVec(reg, "nano_collector_projection_queue_stuck_records",
+		"obs_projection_queue rows with a last_error_code set, by error code.", []string{"error_code"})
+	c.CollectorProjectionQueueStuckOldestSeconds = mustGaugeVec(reg, "nano_collector_projection_queue_stuck_oldest_seconds",
+		"Age of the oldest Trace stuck in the Collector projection queue, by error code.", []string{"error_code"})
 
 	return c
 }

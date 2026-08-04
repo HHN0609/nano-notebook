@@ -192,6 +192,16 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 	for _, envelope := range orphanedTerminals {
 		sequence := envelope.Sequence
 		if err := applyProjectedSpanTerminal(&projection, spanIndex, sequence, envelope, modelNames); err != nil {
+			if errors.Is(err, ErrProjectionPending) {
+				// This Span's start never arrived in the committed record
+				// set. Treat it the same as a Span whose start simply
+				// hasn't been received yet: omit it from the projection
+				// rather than blocking the whole Trace. The next commit
+				// that actually carries the start re-triggers a full
+				// re-projection (see the obs_projection_queue upsert in
+				// CommitTraceChunk), which resolves it then.
+				continue
+			}
 			return TraceProjection{}, err
 		}
 	}

@@ -187,6 +187,7 @@ func run(ctx context.Context, config collectorConfig) error {
 	go metrics.ObservePoolStats(ctx, metricsCatalog, "collector_ingest", 15*time.Second, poolStatFunc(pool))
 	go metrics.ObservePoolStats(ctx, metricsCatalog, "collector_projection", 15*time.Second, poolStatFunc(projectionPool))
 	go metrics.ObservePoolStats(ctx, metricsCatalog, "collector_query", 15*time.Second, poolStatFunc(queryPool))
+	go metrics.ObserveProjectionQueueStats(ctx, metricsCatalog, 15*time.Second, projectionQueueStatFunc(projectionPool))
 
 	return runCollectorService(ctx, config, pool, projectionPool, queryPool)
 }
@@ -198,6 +199,22 @@ func poolStatFunc(pool *pgxpool.Pool) func() metrics.PoolStat {
 			AcquiredConns: stat.AcquiredConns(), IdleConns: stat.IdleConns(),
 			TotalConns: stat.TotalConns(), MaxConns: stat.MaxConns(),
 		}
+	}
+}
+
+func projectionQueueStatFunc(pool *pgxpool.Pool) func(context.Context) ([]metrics.ProjectionQueueErrorStat, error) {
+	return func(ctx context.Context) ([]metrics.ProjectionQueueErrorStat, error) {
+		stats, err := collector.ProjectionQueueStats(ctx, pool)
+		if err != nil {
+			return nil, err
+		}
+		converted := make([]metrics.ProjectionQueueErrorStat, len(stats))
+		for i, stat := range stats {
+			converted[i] = metrics.ProjectionQueueErrorStat{
+				ErrorCode: stat.ErrorCode, Count: stat.Count, OldestAgeSeconds: stat.OldestAgeSeconds,
+			}
+		}
+		return converted, nil
 	}
 }
 

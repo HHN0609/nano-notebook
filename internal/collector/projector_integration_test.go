@@ -2,6 +2,7 @@ package collector_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -153,6 +154,198 @@ func TestProjectorPersistsIncompleteDirectTraceAndConvergesAfterLateRoot(t *test
 	}
 	if converged.ProjectedThrough != 2 || len(converged.Projection.Spans) != 2 {
 		t.Fatalf("converged projection = %#v", converged)
+	}
+}
+
+func TestPostgresStoreSkipsProjectionRequeueOnNoOpResend(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	stored := projectionStoredTrace(t, true, true)
+	store := collector.NewPostgresStore(pool)
+	chunk := collector.TraceChunk{Trace: stored.Trace, FirstSequence: 1, Records: stored.Records}
+	if _, err := store.CommitTraceChunk(ctx, chunk); err != nil {
+		t.Fatalf("first CommitTraceChunk: %v", err)
+	}
+	projector, err := collector.NewProjector(pool, collector.ProjectorConfig{RetryDelay: time.Millisecond})
+	if err != nil {
+		t.Fatalf("NewProjector: %v", err)
+	}
+	if projected, err := projector.RunOnce(ctx); err != nil || !projected {
+		t.Fatalf("RunOnce projected=%t error=%v", projected, err)
+	}
+	assertQueueRowAbsent := func(when string) {
+		t.Helper()
+		var exists bool
+		if err := pool.QueryRow(ctx, `select exists(select 1 from obs_projection_queue where trace_id = $1)`,
+			stored.Trace.TraceID).Scan(&exists); err != nil {
+			t.Fatalf("query obs_projection_queue %s: %v", when, err)
+		}
+		if exists {
+			t.Fatalf("obs_projection_queue has a row for a fully projected Trace %s", when)
+		}
+	}
+	assertQueueRowAbsent("after first projection")
+
+	// Resend the identical chunk: no new records, committed_sequence does
+	// not advance. This must not re-enqueue the already-projected Trace.
+	if _, err := store.CommitTraceChunk(ctx, chunk); err != nil {
+		t.Fatalf("resend CommitTraceChunk: %v", err)
+	}
+	assertQueueRowAbsent("after no-op resend")
+}
+
+func TestProjectorAbandonsPersistentlyInvalidTraceAfterMaxAttempts(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	stored := projectionStoredTrace(t, true, true)
+	if _, err := collector.NewPostgresStore(pool).CommitTraceChunk(ctx, collector.TraceChunk{
+		Trace: stored.Trace, FirstSequence: 1, Records: stored.Records,
+	}); err != nil {
+		t.Fatalf("CommitTraceChunk: %v", err)
+	}
+	malformed := stored.Records[3].Record
+	malformed.Attributes = append(malformed.Attributes, collectorInvalidReplayReference())
+	malformedEnvelope := collectorEnvelope(t, 4, malformed)
+	payload, err := malformed.CanonicalPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `drop trigger obs_trace_records_immutable_update on obs_trace_records`); err != nil {
+		t.Fatalf("drop fixture immutability trigger: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		update obs_trace_records set canonical_payload = $3, canonical_sha256 = $4
+		where trace_id = $1 and sequence = $2
+	`, stored.Trace.TraceID, 4, payload, malformedEnvelope.CanonicalSHA256); err != nil {
+		t.Fatalf("seed malformed historical record: %v", err)
+	}
+	if err := collector.RunMigrations(ctx, pool); err != nil {
+		t.Fatalf("restore Collector invariants: %v", err)
+	}
+	projector, _ := collector.NewProjector(pool, collector.ProjectorConfig{RetryDelay: time.Millisecond, MaxAttempts: 3})
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		// RetryDelay is Postgres-clock-relative; give it real wall-clock
+		// room to elapse so the next claim's `available_at <= now()` check
+		// actually finds the row instead of racing it.
+		time.Sleep(50 * time.Millisecond)
+		projected, err := projector.RunOnce(ctx)
+		if err == nil || projected || errors.Is(err, collector.ErrProjectionAbandoned) {
+			t.Fatalf("attempt %d: RunOnce projected=%t error=%v, want a non-abandoned failure", attempt, projected, err)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	projected, err := projector.RunOnce(ctx)
+	if err == nil || projected || !errors.Is(err, collector.ErrProjectionAbandoned) {
+		t.Fatalf("final RunOnce projected=%t error=%v, want ErrProjectionAbandoned", projected, err)
+	}
+	var attemptCount int
+	var lastErrorCode string
+	var availableAt time.Time
+	if err := pool.QueryRow(ctx, `
+		select attempt_count, last_error_code, available_at from obs_projection_queue where trace_id = $1
+	`, stored.Trace.TraceID).Scan(&attemptCount, &lastErrorCode, &availableAt); err != nil {
+		t.Fatalf("load queue row: %v", err)
+	}
+	if attemptCount != 3 || lastErrorCode != "projection_abandoned" || !availableAt.After(time.Now().Add(time.Minute)) {
+		t.Fatalf("abandoned queue row attempts=%d code=%q available_at=%v", attemptCount, lastErrorCode, availableAt)
+	}
+
+	// A genuinely new commit still wakes the abandoned Trace immediately:
+	// the queue upsert always resets available_at regardless of last_error_code.
+	if _, err := collector.NewPostgresStore(pool).CommitTraceChunk(ctx, collector.TraceChunk{
+		Trace: stored.Trace, FirstSequence: len(stored.Records) + 1,
+		Records: []collector.SequencedRecord{collectorEnvelope(t, len(stored.Records)+1, agentobs.Record{
+			SchemaVersion: 1, SemanticConventionVersion: 1, PayloadVersion: 1,
+			IdentityKey: "late-wakeup", Kind: agentobs.RecordEvent, TraceID: stored.Trace.TraceID,
+			SpanID: stored.Trace.RootSpanID, Name: "nano.run.woken", OccurredAt: time.Now(),
+		})},
+	}); err != nil {
+		t.Fatalf("wakeup CommitTraceChunk: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `select available_at from obs_projection_queue where trace_id = $1`,
+		stored.Trace.TraceID).Scan(&availableAt); err != nil {
+		t.Fatalf("load woken queue row: %v", err)
+	}
+	if availableAt.After(time.Now().Add(time.Second)) {
+		t.Fatalf("abandoned Trace was not woken by a genuinely new commit: available_at=%v", availableAt)
+	}
+}
+
+func TestProjectionQueueStatsGroupsStuckRowsByErrorCode(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	store := collector.NewPostgresStore(pool)
+
+	invalid := projectionStoredTrace(t, true, true)
+	if _, err := store.CommitTraceChunk(ctx, collector.TraceChunk{
+		Trace: invalid.Trace, FirstSequence: 1, Records: invalid.Records,
+	}); err != nil {
+		t.Fatalf("CommitTraceChunk invalid: %v", err)
+	}
+	abandonedTraceID := agentobs.TraceID("trace-projection-queue-stats-abandoned")
+	abandonedRoot := agentobs.SpanID("root-projection-queue-stats-abandoned")
+	started := collectorRecord(abandonedTraceID, abandonedRoot, "queue-stats/root/start", agentobs.RecordSpanStarted, "agent.execution")
+	ended := collectorRecord(abandonedTraceID, abandonedRoot, "queue-stats/root/end", agentobs.RecordSpanEnded, "agent.execution")
+	ended.Status = agentobs.StatusOK
+	if _, err := store.CommitTraceChunk(ctx, collector.TraceChunk{
+		Trace: collector.TraceDescriptor{
+			TraceID: abandonedTraceID, RunID: "run-queue-stats", ChatID: "chat-queue-stats", NotebookID: "notebook-queue-stats",
+			RootSpanID: abandonedRoot, AgentName: "nano-research-agent", SchemaVersion: 1, SemanticConventionVersion: 1,
+		},
+		FirstSequence: 1,
+		Records:       []collector.SequencedRecord{collectorEnvelope(t, 1, started), collectorEnvelope(t, 2, ended)},
+	}); err != nil {
+		t.Fatalf("CommitTraceChunk abandoned: %v", err)
+	}
+
+	// Seed the queue rows directly with the two error codes RunOnce
+	// actually produces, rather than re-driving full failure/abandon
+	// cycles through the Projector — this isolates the SQL query itself
+	// (the thing this test exists to catch a bug in) from that machinery,
+	// which is already covered by TestProjectorFailureLeavesRawCursorAndDiagnostic
+	// and TestProjectorAbandonsPersistentlyInvalidTraceAfterMaxAttempts.
+	if _, err := pool.Exec(ctx, `
+		update obs_projection_queue set last_error_code = 'projection_invalid', updated_at = now()
+		where trace_id = $1
+	`, invalid.Trace.TraceID); err != nil {
+		t.Fatalf("seed projection_invalid queue row: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		update obs_projection_queue set last_error_code = 'projection_abandoned', updated_at = now()
+		where trace_id = $1
+	`, abandonedTraceID); err != nil {
+		t.Fatalf("seed projection_abandoned queue row: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `update obs_traces set created_at = now() - interval '1 hour' where trace_id = $1`,
+		abandonedTraceID); err != nil {
+		t.Fatalf("age the abandoned Trace: %v", err)
+	}
+
+	stats, err := collector.ProjectionQueueStats(ctx, pool)
+	if err != nil {
+		t.Fatalf("ProjectionQueueStats: %v", err)
+	}
+	byCode := make(map[string]collector.ProjectionQueueErrorStat, len(stats))
+	for _, stat := range stats {
+		byCode[stat.ErrorCode] = stat
+	}
+	if len(byCode) != 2 {
+		t.Fatalf("ProjectionQueueStats = %#v, want exactly 2 error codes", stats)
+	}
+	invalidStat, ok := byCode["projection_invalid"]
+	if !ok || invalidStat.Count != 1 {
+		t.Fatalf("projection_invalid stat = %#v, ok=%t", invalidStat, ok)
+	}
+	abandonedStat, ok := byCode["projection_abandoned"]
+	if !ok || abandonedStat.Count != 1 || abandonedStat.OldestAgeSeconds < 3500 {
+		t.Fatalf("projection_abandoned stat = %#v, ok=%t, want age >= ~1h", abandonedStat, ok)
 	}
 }
 
