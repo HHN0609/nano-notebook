@@ -855,7 +855,7 @@ func (s *Store) CreateConfiguredChatQueued(ctx context.Context, command Configur
 		!command.DeadlineAt.After(time.Now()) {
 		return errors.New("invalid configured Chat admission")
 	}
-	manifest, err := canonicalJSONObject(command.ContextManifest)
+	manifest, err := CanonicalJSONObject(command.ContextManifest)
 	if err != nil || len(manifest) > command.Definition.Limits.ContextBytes {
 		return errors.New("invalid configured Chat context manifest")
 	}

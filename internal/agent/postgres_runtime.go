@@ -133,77 +133,121 @@ func NewPostgresRuntime(pool *pgxpool.Pool, systemPrompt string, newMessageID fu
 	return runtime
 }
 
+// executionSelectFrom is the shared column list and join graph behind both
+// Load (live, lease-gated) and LoadForReplay (offline, no lease check).
+// $1/$2 are always GroundedPromptVersion/BarePromptVersion; callers append
+// their own WHERE clause starting at $3.
+const executionSelectFrom = `
+	select r.id, coalesce(r.chat_id,product.chat_id), coalesce(r.user_id,product.user_id),
+		coalesce(r.input_message_id,product.input_message_id), coalesce(r.model,r.provider_model),
+		coalesce(r.prompt_version,case when coalesce(r.selected_source_count,0)>0 then $1 else $2 end),
+		coalesce(r.agent_config_id,r.definition_identity||'@'||r.definition_version::text),
+		coalesce(r.time_zone,r.parent_context_manifest->>'time_zone','UTC'),
+		coalesce(r.deadline_at,tree.absolute_deadline),
+		coalesce(r.action_decision_limit,greatest(0,(definition.limits->>'model_calls')::integer-1)),
+		coalesce(r.final_decision_limit,1),
+		coalesce(r.action_limit,(definition.limits->>'actions')::integer),
+		coalesce(r.action_batch_limit,(definition.limits->>'action_batch')::integer),
+		coalesce(r.action_result_byte_limit,(definition.limits->>'result_bytes')::integer),
+		coalesce(r.action_results_byte_limit,(definition.limits->>'result_bytes')::integer),
+		coalesce(r.selected_source_count,0),
+		m.role,
+		(select count(*) from agent_run_delegations child_link where child_link.parent_run_id=tree.root_agent_run_id),
+		r.runtime_kind='configured',policy.temperature,policy.max_output_tokens,policy.timeout_ms,
+		coalesce(r.deadline_at,tree.absolute_deadline) > now()
+	from agent_runs r
+	join agent_jobs j on j.run_id = r.id
+	left join chat_runs product on product.root_agent_run_id=r.id
+	left join agent_trees tree on tree.id=r.tree_id
+	left join agent_definition_versions definition on definition.definition_identity=r.definition_identity and definition.definition_version=r.definition_version
+	left join agent_model_policy_versions policy
+		on policy.policy_identity=r.model_policy_identity and policy.policy_version=r.model_policy_version
+		and policy.canonical_sha256=r.model_policy_sha256 and policy.provider_model=r.provider_model
+	join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id) and c.creator_user_id=coalesce(r.user_id,product.user_id)
+	join notebook_memberships m on m.notebook_id=c.notebook_id and m.user_id=coalesce(r.user_id,product.user_id)
+`
+
+// loadExecutionRow runs executionSelectFrom+whereSQL (whereArgs bound
+// starting at $3) and scans the common Execution columns. It returns the
+// row's own deadlineValid flag so Load can enforce it while LoadForReplay
+// ignores it (a historical run's original deadline is not relevant to
+// replaying its decision today).
+func (r *PostgresRuntime) loadExecutionRow(ctx context.Context, tx pgx.Tx, whereSQL string, whereArgs ...any) (Execution, bool, error) {
+	var execution Execution
+	var deadlineValid bool
+	var configured bool
+	var temperature *float64
+	var maxOutputTokens, timeoutMS *int
+	args := append([]any{GroundedPromptVersion, BarePromptVersion}, whereArgs...)
+	err := tx.QueryRow(ctx, executionSelectFrom+whereSQL, args...).Scan(
+		&execution.RunID, &execution.ChatID, &execution.UserID, &execution.InputMessageID, &execution.Model,
+		&execution.PromptVersion, &execution.AgentConfigID, &execution.TimeZone, &execution.DeadlineAt,
+		&execution.ActionDecisionLimit, &execution.FinalDecisionLimit,
+		&execution.ActionLimit, &execution.ActionBatchLimit,
+		&execution.ActionResultByteLimit, &execution.ActionResultsByteLimit,
+		&execution.SelectedSourceCount,
+		&execution.MemberRole, &execution.ExistingChildCount,
+		&configured, &temperature, &maxOutputTokens, &timeoutMS,
+		&deadlineValid,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Execution{}, false, ErrLeaseLost
+	}
+	if err != nil {
+		return Execution{}, false, err
+	}
+	if configured {
+		if temperature == nil || maxOutputTokens == nil || timeoutMS == nil {
+			return Execution{}, false, errors.New("configured Model Policy pin is invalid")
+		}
+		execution.ModelInvocation = models.ModelInvocationPolicy{
+			Temperature: temperature, MaxOutputTokens: *maxOutputTokens, Timeout: time.Duration(*timeoutMS) * time.Millisecond,
+		}
+	}
+	return execution, deadlineValid, nil
+}
+
 func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution, error) {
 	tx, err := r.workerTx(ctx)
 	if err != nil {
 		return Execution{}, err
 	}
 	defer tx.Rollback(ctx)
-	var execution Execution
-	var deadlineValid bool
-	var configured bool
-	var temperature *float64
-	var maxOutputTokens, timeoutMS *int
-	err = tx.QueryRow(ctx, `
-		select r.id, coalesce(r.chat_id,product.chat_id), coalesce(r.user_id,product.user_id),
-			coalesce(r.input_message_id,product.input_message_id), coalesce(r.model,r.provider_model),
-			coalesce(r.prompt_version,case when coalesce(r.selected_source_count,0)>0 then $4 else $5 end),
-			coalesce(r.agent_config_id,r.definition_identity||'@'||r.definition_version::text),
-			coalesce(r.time_zone,r.parent_context_manifest->>'time_zone','UTC'),
-			coalesce(r.deadline_at,tree.absolute_deadline),
-			coalesce(r.action_decision_limit,greatest(0,(definition.limits->>'model_calls')::integer-1)),
-			coalesce(r.final_decision_limit,1),
-			coalesce(r.action_limit,(definition.limits->>'actions')::integer),
-			coalesce(r.action_batch_limit,(definition.limits->>'action_batch')::integer),
-			coalesce(r.action_result_byte_limit,(definition.limits->>'result_bytes')::integer),
-			coalesce(r.action_results_byte_limit,(definition.limits->>'result_bytes')::integer),
-			coalesce(r.selected_source_count,0),
-			m.role,
-			(select count(*) from agent_run_delegations child_link where child_link.parent_run_id=tree.root_agent_run_id),
-			r.runtime_kind='configured',policy.temperature,policy.max_output_tokens,policy.timeout_ms,
-			coalesce(r.deadline_at,tree.absolute_deadline) > now()
-		from agent_runs r
-		join agent_jobs j on j.run_id = r.id
-		left join chat_runs product on product.root_agent_run_id=r.id
-		left join agent_trees tree on tree.id=r.tree_id
-		left join agent_definition_versions definition on definition.definition_identity=r.definition_identity and definition.definition_version=r.definition_version
-		left join agent_model_policy_versions policy
-			on policy.policy_identity=r.model_policy_identity and policy.policy_version=r.model_policy_version
-			and policy.canonical_sha256=r.model_policy_sha256 and policy.provider_model=r.provider_model
-		join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id) and c.creator_user_id=coalesce(r.user_id,product.user_id)
-		join notebook_memberships m on m.notebook_id=c.notebook_id and m.user_id=coalesce(r.user_id,product.user_id)
-		where r.id = $1 and j.id = $2 and j.lease_token = $3::uuid
+	execution, deadlineValid, err := r.loadExecutionRow(ctx, tx,
+		`where r.id = $3 and j.id = $4 and j.lease_token = $5::uuid
 			and r.status = 'running' and j.status = 'running'
-			and j.lease_expires_at > now() and r.output_message_id is null`, attempt.RunID, attempt.JobID, attempt.LeaseToken, GroundedPromptVersion, BarePromptVersion).
-		Scan(
-			&execution.RunID, &execution.ChatID, &execution.UserID, &execution.InputMessageID, &execution.Model,
-			&execution.PromptVersion, &execution.AgentConfigID, &execution.TimeZone, &execution.DeadlineAt,
-			&execution.ActionDecisionLimit, &execution.FinalDecisionLimit,
-			&execution.ActionLimit, &execution.ActionBatchLimit,
-			&execution.ActionResultByteLimit, &execution.ActionResultsByteLimit,
-			&execution.SelectedSourceCount,
-			&execution.MemberRole, &execution.ExistingChildCount,
-			&configured, &temperature, &maxOutputTokens, &timeoutMS,
-			&deadlineValid,
-		)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Execution{}, ErrLeaseLost
-	}
+			and j.lease_expires_at > now() and r.output_message_id is null`,
+		attempt.RunID, attempt.JobID, attempt.LeaseToken)
 	if err != nil {
 		return Execution{}, err
 	}
 	if !deadlineValid {
 		return Execution{}, ErrRunDeadlineExceeded
 	}
-	if configured {
-		if temperature == nil || maxOutputTokens == nil || timeoutMS == nil {
-			return Execution{}, errors.New("configured Model Policy pin is invalid")
-		}
-		execution.ModelInvocation = models.ModelInvocationPolicy{
-			Temperature: temperature, MaxOutputTokens: *maxOutputTokens, Timeout: time.Duration(*timeoutMS) * time.Millisecond,
-		}
-	}
 	execution.Attempt = attempt
+	if err := tx.Commit(ctx); err != nil {
+		return Execution{}, err
+	}
+	return execution, nil
+}
+
+// LoadForReplay reconstructs a Leader Run's Execution configuration
+// without claiming worker authority over it — no lease, status, or
+// deadline check, unlike Load. For internal/agenteval's offline
+// decision-replay tooling only; must not be used by the live Controller
+// loop, which depends on Load's lease guarantee for correctness.
+func (r *PostgresRuntime) LoadForReplay(ctx context.Context, runID string) (Execution, error) {
+	tx, err := r.workerTx(ctx)
+	if err != nil {
+		return Execution{}, err
+	}
+	defer tx.Rollback(ctx)
+	execution, _, err := r.loadExecutionRow(ctx, tx, `where r.id = $3`, runID)
+	if err != nil {
+		return Execution{}, err
+	}
+	execution.Attempt = Attempt{RunID: runID}
+	execution.ReplayOnly = true
 	if err := tx.Commit(ctx); err != nil {
 		return Execution{}, err
 	}

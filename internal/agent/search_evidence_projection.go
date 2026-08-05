@@ -37,7 +37,13 @@ func (r *PostgresRuntime) loadSearchEvidenceModelCandidates(ctx context.Context,
 		return nil, nil
 	}
 	search := &EvidenceSearchService{pool: r.pool}
-	scope, err := search.loadPinnedScope(ctx, execution.Attempt)
+	var scope pinnedSearchScope
+	var err error
+	if execution.ReplayOnly {
+		scope, err = search.loadPinnedScopeForReplay(ctx, execution.RunID, execution.SelectedSourceCount)
+	} else {
+		scope, err = search.loadPinnedScope(ctx, execution.Attempt)
+	}
 	if err != nil {
 		return nil, err
 	}

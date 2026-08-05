@@ -420,3 +420,34 @@ func loadRunCheckpoints(ctx context.Context, tx pgx.Tx, runID string) ([]Checkpo
 	}
 	return checkpoints, nil
 }
+
+// LoadRunCheckpointsBefore loads the checkpoint rows for runID with
+// decision_no strictly less than beforeDecisionNo, ordered by sequence_no.
+// Unlike LoadCheckpointPrefix, it performs no lease/authority check against
+// agent_runs/agent_jobs, so its result must not be treated as claiming
+// execution authority over the run. It exists for offline replay/eval
+// tooling (internal/agenteval) that reconstructs the checkpoint prefix a
+// historical, no-longer-running decision saw.
+func LoadRunCheckpointsBefore(ctx context.Context, tx pgx.Tx, runID string, beforeDecisionNo int) ([]Checkpoint, error) {
+	rows, err := tx.Query(ctx, `
+		select `+selectCheckpointColumns+`
+		from agent_run_checkpoints
+		where run_id = $1 and decision_no < $2
+		order by sequence_no`, runID, beforeDecisionNo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	checkpoints := make([]Checkpoint, 0)
+	for rows.Next() {
+		checkpoint, err := scanCheckpoint(rows)
+		if err != nil {
+			return nil, err
+		}
+		checkpoints = append(checkpoints, checkpoint)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return checkpoints, nil
+}

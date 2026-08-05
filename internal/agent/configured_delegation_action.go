@@ -272,7 +272,7 @@ func (a *configuredDelegationAction) schedule(ctx context.Context, request Actio
 	if err != nil {
 		return "", err
 	}
-	manifest, err := canonicalJSONObject(encodedManifest)
+	manifest, err := CanonicalJSONObject(encodedManifest)
 	if err != nil || len(manifest) > a.child.Limits.ContextBytes {
 		return "", errors.New("configured child context exceeds its Contract")
 	}

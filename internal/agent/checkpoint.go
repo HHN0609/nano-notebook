@@ -50,7 +50,7 @@ func NewProposalCheckpoint(decisionNo int, batch models.ActionProposalBatch) (Pe
 		if !actionNamePattern.MatchString(action.Name) {
 			return PendingCheckpoint{}, errors.New("invalid Action proposal name")
 		}
-		input, err := canonicalJSONObject(action.Input)
+		input, err := CanonicalJSONObject(action.Input)
 		if err != nil {
 			return PendingCheckpoint{}, err
 		}
@@ -92,7 +92,7 @@ func NewActionResultCheckpoint(decisionNo, actionIndex int, actionID string, res
 	}
 	payload := actionResultCheckpointPayload{ActionID: actionID, Status: result.Status, ErrorCode: result.ErrorCode}
 	if result.Status == ActionSucceeded {
-		output, err := canonicalJSONObject(result.Output)
+		output, err := CanonicalJSONObject(result.Output)
 		if err != nil {
 			return PendingCheckpoint{}, err
 		}
@@ -137,7 +137,11 @@ func NewFinalDraftCheckpoint(decisionNo int, draft models.FinalDraft) (PendingCh
 	}, nil
 }
 
-func canonicalJSONObject(raw json.RawMessage) (json.RawMessage, error) {
+// CanonicalJSONObject decodes raw as a JSON object and re-encodes it with
+// deterministic key ordering, rejecting non-object values and trailing
+// data. Also used by internal/agenteval to compare Action inputs for
+// equality independent of key order.
+func CanonicalJSONObject(raw json.RawMessage) (json.RawMessage, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var value map[string]any

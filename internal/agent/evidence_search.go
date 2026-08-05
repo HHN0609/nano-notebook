@@ -229,6 +229,39 @@ func (s *EvidenceSearchService) loadPinnedScope(ctx context.Context, attempt Att
 	if err != nil {
 		return pinnedSearchScope{}, err
 	}
+	scope, err := s.loadPinnedEvidenceRows(ctx, tx, attempt.RunID, selectedCount)
+	if err != nil {
+		return pinnedSearchScope{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return pinnedSearchScope{}, err
+	}
+	return scope, nil
+}
+
+// loadPinnedScopeForReplay loads the same pinned Evidence scope
+// loadPinnedScope does, but without its live-lease/status check — the
+// caller supplies selectedSourceCount (already known from a prior
+// LoadForReplay) instead of it being re-derived from a running Attempt.
+// For internal/agenteval's offline decision-replay tooling only; must not
+// be used by the live Controller loop.
+func (s *EvidenceSearchService) loadPinnedScopeForReplay(ctx context.Context, runID string, selectedSourceCount int) (pinnedSearchScope, error) {
+	tx, err := s.workerTx(ctx)
+	if err != nil {
+		return pinnedSearchScope{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	scope, err := s.loadPinnedEvidenceRows(ctx, tx, runID, selectedSourceCount)
+	if err != nil {
+		return pinnedSearchScope{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return pinnedSearchScope{}, err
+	}
+	return scope, nil
+}
+
+func (s *EvidenceSearchService) loadPinnedEvidenceRows(ctx context.Context, tx pgx.Tx, runID string, selectedCount int) (pinnedSearchScope, error) {
 	if selectedCount < 1 {
 		return pinnedSearchScope{}, fmt.Errorf("%w: Run has no selected Sources", retrieval.ErrRetrievalUnavailable)
 	}
@@ -242,7 +275,7 @@ func (s *EvidenceSearchService) loadPinnedScope(ctx context.Context, attempt Att
 			and b.index_version_id=e.index_version_id and b.status='verified'
 		join retrieval_index_versions v on v.id=e.index_version_id and v.status in ('candidate','active','retired')
 		where e.run_id=$1 order by e.ordinal
-	`, attempt.RunID)
+	`, runID)
 	if err != nil {
 		return pinnedSearchScope{}, err
 	}
@@ -270,9 +303,6 @@ func (s *EvidenceSearchService) loadPinnedScope(ctx context.Context, attempt Att
 	}
 	if len(scope.Evidence) != selectedCount || !validSearchIndexConfig(scope.Version.Config) {
 		return pinnedSearchScope{}, fmt.Errorf("%w: pinned Source authority changed", retrieval.ErrRetrievalUnavailable)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return pinnedSearchScope{}, err
 	}
 	return scope, nil
 }

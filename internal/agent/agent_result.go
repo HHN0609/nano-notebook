@@ -32,7 +32,7 @@ func NewAgentResult(id, producerRunID string, contract agentcatalog.ContractVers
 	if id == "" || producerRunID == "" || len(contract.SHA256) != 64 {
 		return AgentResult{}, errors.New("invalid Agent Result identity or Contract")
 	}
-	canonical, err := canonicalJSONObject(payload)
+	canonical, err := CanonicalJSONObject(payload)
 	if err != nil || len(canonical) > maxAgentResultBytes {
 		return AgentResult{}, errors.New("invalid or oversized Agent Result payload")
 	}
@@ -68,7 +68,7 @@ func StoreAgentResultInTx(ctx context.Context, tx pgx.Tx, result AgentResult) er
 	); err != nil {
 		return err
 	}
-	stored.Payload, _ = canonicalJSONObject(json.RawMessage(storedPayload))
+	stored.Payload, _ = CanonicalJSONObject(json.RawMessage(storedPayload))
 	if stored.ID != result.ID || stored.ProducerRunID != result.ProducerRunID || stored.Contract != result.Contract ||
 		stored.ContractSHA256 != result.ContractSHA256 || stored.PayloadSHA256 != result.PayloadSHA256 ||
 		stored.PayloadBytes != result.PayloadBytes || !reflect.DeepEqual(stored.Payload, result.Payload) {

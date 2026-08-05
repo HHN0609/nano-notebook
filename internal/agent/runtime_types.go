@@ -27,6 +27,14 @@ type Execution struct {
 	SelectedSourceCount    int
 	MemberRole             string
 	ExistingChildCount     int
+
+	// ReplayOnly marks an Execution reconstructed by LoadForReplay (offline
+	// decision-replay tooling, internal/agenteval) rather than by the live
+	// Controller's Load. Code paths that would otherwise re-verify a live
+	// worker lease (e.g. loadSearchEvidenceModelCandidates) must check this
+	// and use the lease-free replay variant instead — a historical run is
+	// never 'running', so the normal lease check would always fail it.
+	ReplayOnly bool
 }
 
 type Attempt struct {
