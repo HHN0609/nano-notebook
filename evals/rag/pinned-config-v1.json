@@ -15,7 +15,7 @@
     "rrf_k": 60,
     "reranker_id": "cohere/rerank-v4.0-pro",
     "rerank_candidates": 20,
-    "rerank_relevance_threshold": 0.25,
+    "rerank_relevance_threshold": 0.28,
     "degradation_policy_id": "hybrid-required-v1"
   },
   "composer_model": "qwen-plus",

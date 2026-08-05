@@ -188,7 +188,10 @@ sweeping all 81 combinations at this case count would cost roughly
 distribution, not a parameter sweep. Report files:
 
 - `evals/rag/sweep-out/retrieval-sweep-v1.json` (no threshold applied)
-- `evals/rag/sweep-out/retrieval-sweep-v1-threshold.json` (`rerank_relevance_threshold=0.25` applied)
+- `evals/rag/sweep-out/retrieval-sweep-v1-threshold.json` (`rerank_relevance_threshold=0.25` applied
+  — this was the live pipeline verification for the gate mechanism itself,
+  done before the threshold was revised to the final 0.28; see "Threshold
+  choice" below for why, and why 0.28 did not need a separate live rerun)
 
 | Metric | No threshold | `threshold=0.25` |
 | --- | --- | --- |
@@ -201,7 +204,9 @@ The degradation rate is the Cohere trial key's rate limit, not a pipeline bug �
 Bifrost's `max_retries: 2` did not fully absorb it under sustained load. Recall
 and MRR hold steady with the gate on, confirming degraded searches correctly
 skip the threshold filter (`pipeline.go`'s post-rerank filter step) rather than
-compounding into empty results.
+compounding into empty results. This run's purpose was proving the filter
+mechanism works end to end against real scores, not validating the exact
+cutoff value — 0.25 was superseded by 0.28 below.
 
 ### Rerank score distribution (non-degraded cases only, no-threshold run)
 
@@ -221,15 +226,36 @@ different real passages. The separation is still clear: three-quarters of
 non-relevant candidates score below 0.28, while the worst relevant match still
 scored 0.261.
 
-### Threshold choice: 0.25
+### Threshold choice: 0.28 (revised from an initial 0.25)
 
-Set just below the observed relevant-candidate minimum (0.261) so no true
-match is at risk of being filtered, while still sitting under the 50th
-percentile of non-relevant candidates. The `threshold=0.25` rerun confirms this
-empirically: every surviving candidate scored at least 0.252, zero surviving
-candidates scored below 0.25, and no non-degraded case lost recall. This
-threshold is specific to `cohere/rerank-v4.0-pro`'s score scale — switching
-reranker providers requires rerunning this calibration.
+The first candidate value, 0.25, was set just below the observed
+relevant-candidate minimum (0.261) so no true match would be at risk. A
+`threshold=0.25` rerun confirmed this worked: every surviving candidate scored
+at least 0.252, zero surviving candidates scored below 0.25, and no
+non-degraded case lost recall.
+
+Inspecting the one case sitting at that 0.261 floor
+(`msmarco-0006`, "what county is grottoes virginia in") changed the call. Its
+labeled-relevant passage is a general description of Rockingham County — it
+never mentions "Grottoes" at all; MS MARCO's annotators presumably knew
+Grottoes, VA sits in Rockingham County and labeled it relevant on that
+outside knowledge, not on anything stated in the passage text. A reranker
+that only sees the query and the passage text has no way to make that
+connection, so scoring it low is not a reranker defect — it is a case where
+the passage's textual support for the answer is already weak independent of
+this gate.
+
+Given that, 0.28 was chosen instead: it accepts losing that one
+weak-evidence case (case-level recall 319/320 = 0.9969 instead of 1.000) in
+exchange for also filtering the 208 additional non-relevant candidates that
+scored in [0.25, 0.28) across the non-degraded cases — real gain, since those
+are genuinely low-relevance candidates, at the cost of one genuinely
+ambiguous label. Both threshold values were computed from the same real
+`cohere/rerank-v4.0-pro` score data (`evals/rag/sweep-out/retrieval-sweep-v1.json`,
+no live rerun needed to compare them — the filter itself is a deterministic
+cutoff over already-collected scores). This threshold is specific to that
+model's score scale — switching reranker providers requires rerunning this
+calibration.
 
 ### Latency
 
