@@ -621,8 +621,8 @@ func (r *PostgresRuntime) Fail(ctx context.Context, attempt Attempt, errorCode s
 	jobTag, err := tx.Exec(ctx, `
 		update agent_jobs
 		set status = 'failed', lease_token = null, lease_expires_at = null,
-			finished_at = now(), updated_at = now()
-		where id = $1 and status = 'running' and lease_token = $2::uuid`, jobID, attempt.LeaseToken)
+			last_error_code = $3, finished_at = now(), updated_at = now()
+		where id = $1 and status = 'running' and lease_token = $2::uuid`, jobID, attempt.LeaseToken, errorCode)
 	if err != nil {
 		return err
 	}

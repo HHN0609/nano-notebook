@@ -95,6 +95,21 @@ func TestRetryableExecutionFailureIsExplicitlyRequeuedWithBackoff(t *testing.T) 
 	}
 }
 
+func TestRetryableToolCallErrorIsExplicitlyRequeuedWithBackoff(t *testing.T) {
+	queue := &recordingQueue{jobs: []jobs.ClaimedJob{{ID: "job_one", RunID: "run_one", AttemptNo: 2, LeaseToken: "lease_one"}}, heartbeatOK: true}
+	executor := errorExecutor{err: &agent.ToolCallError{Kind: agent.ToolErrorInfrastructure, Code: "tool_execution_failed"}}
+	service := NewService(nil, queue, executor, time.Second, time.Minute)
+
+	processed, err := service.ProcessAvailable(context.Background())
+	if processed != 1 || err != nil {
+		t.Fatalf("processed=%d err=%v", processed, err)
+	}
+	want := agent.AttemptResolution{Disposition: agent.AttemptRetryable, ErrorCode: "tool_execution_failed", Backoff: agent.AttemptRetryBackoff(2, "job_one")}
+	if !reflect.DeepEqual(queue.resolutions, []agent.AttemptResolution{want}) {
+		t.Fatalf("resolutions=%#v, want %#v", queue.resolutions, []agent.AttemptResolution{want})
+	}
+}
+
 func TestNonRetryableExecutionFailureIsExplicitlyTerminal(t *testing.T) {
 	queue := &recordingQueue{jobs: []jobs.ClaimedJob{{ID: "job_one", RunID: "run_one", AttemptNo: 1, LeaseToken: "lease_one"}}, heartbeatOK: true}
 	executor := errorExecutor{err: errors.New("private provider detail")}

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -447,6 +448,33 @@ func TestPublicationAcknowledgementLossReconcilesCommittedSuccess(t *testing.T) 
 	}
 	if runStatus != "completed" || assistants != 1 {
 		t.Fatalf("reconciled state run=%q assistants=%d", runStatus, assistants)
+	}
+}
+
+func TestPostgresRuntimeFailPersistsJobAndRunErrorCode(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "fail-code-persist@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, uuid.NewString())
+	ctx := context.Background()
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim = %+v ok=%v err=%v", claimed, ok, err)
+	}
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", nil)
+	if err := runtime.Fail(ctx, attemptFromClaim(claimed), "tool_execution_failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	var runStatus, jobStatus, runCode, jobCode string
+	if err := api.db.Pool().QueryRow(ctx, `select status, coalesce(error_code,'') from agent_runs where id=$1`, runID).
+		Scan(&runStatus, &runCode); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select status, coalesce(last_error_code,'') from agent_jobs where run_id=$1`, runID).
+		Scan(&jobStatus, &jobCode); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "failed" || jobStatus != "failed" || runCode != "tool_execution_failed" || jobCode != "tool_execution_failed" {
+		t.Fatalf("terminal state run=%s/%s job=%s/%s, want both failed with tool_execution_failed", runStatus, runCode, jobStatus, jobCode)
 	}
 }
 

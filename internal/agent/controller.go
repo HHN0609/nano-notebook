@@ -389,6 +389,23 @@ func (c *Controller) isExclusiveDelegation(session *MCPAttemptSession, name stri
 	return ok && tool.Scheduling == agentcatalog.ToolExclusiveDelegation
 }
 
+func (c *Controller) actionExecutionError(ctx context.Context, attempt Attempt, err error) error {
+	if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
+		return result
+	}
+	if errors.Is(err, ErrLeaseLost) {
+		return c.handleRuntimeError(ctx, attempt, err)
+	}
+	if ctx.Err() != nil {
+		return err
+	}
+	var toolErr *ToolCallError
+	if errors.As(err, &toolErr) {
+		return err
+	}
+	return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
+}
+
 func (c *Controller) executeDelegationAction(
 	ctx context.Context,
 	tracer *agentobs.Tracer,
@@ -431,16 +448,7 @@ func (c *Controller) executeDelegationAction(
 		result, err = executor.Execute(ctx, request)
 	}
 	if err != nil {
-		if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
-			return result
-		}
-		if errors.Is(err, ErrLeaseLost) {
-			return c.handleRuntimeError(ctx, attempt, err)
-		}
-		if ctx.Err() != nil {
-			return err
-		}
-		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
+		return c.actionExecutionError(ctx, attempt, err)
 	}
 	if err := result.Validate(); err != nil {
 		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
@@ -499,16 +507,7 @@ func (c *Controller) executeAction(
 		result, err = executor.Execute(ctx, request)
 	}
 	if err != nil {
-		if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
-			return result
-		}
-		if errors.Is(err, ErrLeaseLost) {
-			return c.handleRuntimeError(ctx, attempt, err)
-		}
-		if ctx.Err() != nil {
-			return err
-		}
-		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
+		return c.actionExecutionError(ctx, attempt, err)
 	}
 	if err := result.Validate(); err != nil {
 		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)

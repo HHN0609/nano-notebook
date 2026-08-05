@@ -506,6 +506,44 @@ func TestControllerReturnsTransientModelFailureToRoleExecutorWithoutTerminalizin
 	}
 }
 
+func TestControllerReturnsToolCallErrorToRoleExecutorWithoutTerminalizing(t *testing.T) {
+	tests := []struct {
+		name string
+		kind ToolErrorKind
+		code string
+	}{
+		{name: "retryable infrastructure", kind: ToolErrorInfrastructure, code: "tool_execution_failed"},
+		{name: "safe terminal invariant", kind: ToolErrorInvariant, code: "materialized_tool_mismatch"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry, err := NewActionRegistry(&toolErrorAction{
+				name: "tool_error",
+				err:  &ToolCallError{Kind: test.kind, Code: test.code},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+			model := &decisionModelStub{decisions: []models.ModelDecision{{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{
+				{Name: "tool_error", Input: json.RawMessage(`{}`)},
+			}}}}}
+
+			err = NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt)
+			var toolErr *ToolCallError
+			if !errors.As(err, &toolErr) || toolErr.Kind != test.kind || toolErr.Code != test.code {
+				t.Fatalf("controller error = %v, want %s/%s", err, test.kind, test.code)
+			}
+			if len(runtime.failed) != 0 {
+				t.Fatalf("ToolCallError must not be terminalized by Controller: %v", runtime.failed)
+			}
+			if len(runtime.checkpoints) != 1 || runtime.checkpoints[0].Kind != CheckpointActionProposal {
+				t.Fatalf("ToolCallError must not append an Action Result checkpoint: %+v", runtime.checkpoints)
+			}
+		})
+	}
+}
+
 func TestControllerDerivesActionResultByteBudgetsFromAcceptedCheckpoints(t *testing.T) {
 	t.Run("one result", func(t *testing.T) {
 		executionOrder := make([]string, 0, 1)
@@ -833,6 +871,32 @@ type recordingAction struct {
 	started  chan<- struct{}
 	proceed  <-chan struct{}
 	attempts []Attempt
+}
+
+type toolErrorAction struct {
+	name string
+	err  error
+}
+
+func (a *toolErrorAction) Definition() models.ActionDefinition {
+	return models.ActionDefinition{
+		Name: a.name, Description: "Return a classified ToolCallError.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+	}
+}
+
+func (a *toolErrorAction) ValidateInput(raw json.RawMessage) error {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return errors.New("invalid tool error input")
+	}
+	return nil
+}
+
+func (a *toolErrorAction) Execute(context.Context, ActionRequest) (ActionResult, error) {
+	if a.err == nil {
+		return ActionResult{}, errors.New("toolErrorAction requires an error")
+	}
+	return ActionResult{}, a.err
 }
 
 func (a *recordingAction) Definition() models.ActionDefinition {
