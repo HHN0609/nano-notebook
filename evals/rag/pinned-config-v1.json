@@ -13,9 +13,9 @@
     "dense_candidates": 40,
     "sparse_candidates": 40,
     "rrf_k": 60,
-    "reranker_id": "qwen-rerank-v1",
+    "reranker_id": "cohere/rerank-v4.0-pro",
     "rerank_candidates": 20,
-    "rerank_relevance_threshold": 0,
+    "rerank_relevance_threshold": 0.25,
     "degradation_policy_id": "hybrid-required-v1"
   },
   "composer_model": "qwen-plus",

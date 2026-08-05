@@ -11,15 +11,28 @@ cases and 50 Chinese DuReader-retrieval cases. Every case is one real passage
 admitted through the normal Source ingestion pipeline and labeled with the
 nano-notebook Evidence Unit IDs produced by the active Index Version.
 
-`prepare_dataset.py` now also samples a FiQA (English, financial-domain) and a
+`prepare_dataset.py` also samples a FiQA (English, financial-domain) and a
 CmedqaRetrieval (Chinese, medical-domain) vertical alongside MS MARCO/DuReader,
 plus random unrelated distractor passages per dataset (see
 `docs/superpowers/specs/2026-08-05-rerank-relevance-gate-design.md`), so the
 rerank relevance score has a real irrelevant-candidate population to compare
-against. The "Results" section below still reflects the original two-dataset,
-no-distractor run; it needs a rerun against the extended suite before the
-`rerank_relevance_threshold` in `evals/rag/pinned-config-v1.json` can be set to
-anything other than its current disabled value of `0`.
+against. The extended suite has been run for real against this reranker and
+`rerank_relevance_threshold` is set in `evals/rag/pinned-config-v1.json`; see
+"Results" below.
+
+**Reranker provider gap found and fixed during this run.** `infra/bifrost/config.json`
+had no provider configured for rerank at all — `reranker_id: "qwen-rerank-v1"`
+pointed at a model no provider offered, so every search silently degraded
+(`reranker_unavailable`) and fell back to RRF-only ordering. This had been true
+since the original two-dataset sweep below; its suspiciously fast 0.25ms mean
+"rerank" latency was that degradation, not a real rerank call. Bifrost's rerank
+routing only has native support for Bedrock, Cohere, Vertex AI, and vLLM —
+Aliyun/DashScope is not among them and uses a different API shape entirely, so
+the existing `aliyun` provider could not simply gain a rerank model. A Cohere
+provider was added (`cohere/rerank-v4.0-pro`, trial key) to unblock this
+calibration. **The trial key is not a production decision** — it caps at
+1000 calls/month, which this one sweep alone used a third of. Which reranker
+provider nano-notebook runs in production long-term is still open.
 
 ## Data
 
@@ -153,72 +166,108 @@ production baseline 40/40/60/20:
 
 ## Results
 
-Full 81-combination run completed with 8,100 case searches and 0 failures.
-Report files:
+### Original two-dataset run (superseded)
 
-- `evals/rag/sweep-out/retrieval-sweep-v1.json`
-- `evals/rag/sweep-out/retrieval-sweep-v1.csv`
+The first sweep (50 MS MARCO + 50 DuReader, no distractors, 81-combination
+grid) completed with 8,100 case searches, 0 failures, Recall 1.000 and MRR
+0.9825 across every combination, and a suspiciously fast 0.25ms mean "rerank"
+stage. That speed was the tell: as the section above explains, the reranker
+was never actually reachable and every search silently degraded to RRF-only
+ordering. Recall/MRR looked fine only because 50 Sources per Notebook and one
+relevant passage per query made the retrieval task too easy to fail either way.
 
-### Quality
+### Extended run with a real reranker (current)
 
-| Metric | Result |
-| --- | --- |
-| Grid combinations | 81 |
-| Case searches | 8,100 |
-| Failed searches | 0 |
-| Recall range | 1.000 across all combinations |
-| MRR range | 0.9825 across all combinations |
+Suite: 120 MS MARCO + 40 FiQA + 120 DuReader + 40 CmedqaRetrieval relevant
+cases (320 total), each sub-dataset also carrying 40 random distractor Sources
+in the same Notebooks (480 Sources ingested total). Grid: a single pinned
+combination at the production baseline (`40/40/60/20`), not the full
+81-combination grid — with a real per-query rerank call now in the loop,
+sweeping all 81 combinations at this case count would cost roughly
+32,000 rerank calls; calibrating a threshold only needs one config's score
+distribution, not a parameter sweep. Report files:
 
-Every query is paired with exactly one relevant passage, and the sweep pins only
-50 Sources per Notebook. Retrieval therefore always finds the expected Unit, so
-this first suite cannot discriminate between `top_k`, `rrf_k`, or
-`rerank_candidates` on Recall/MRR. It does provide honest latency data and shows
-that the pipeline is reliable on the current production Index Version.
+- `evals/rag/sweep-out/retrieval-sweep-v1.json` (no threshold applied)
+- `evals/rag/sweep-out/retrieval-sweep-v1-threshold.json` (`rerank_relevance_threshold=0.25` applied)
+
+| Metric | No threshold | `threshold=0.25` |
+| --- | --- | --- |
+| Completed cases | 320 / 320 | 320 / 320 |
+| Recall | 1.000 | 1.000 |
+| MRR | 0.9636 | 0.9633 |
+| Cases degraded (`reranker_unavailable`) | 175 / 320 (55%) | 155 / 320 (48%) |
+
+The degradation rate is the Cohere trial key's rate limit, not a pipeline bug —
+Bifrost's `max_retries: 2` did not fully absorb it under sustained load. Recall
+and MRR hold steady with the gate on, confirming degraded searches correctly
+skip the threshold filter (`pipeline.go`'s post-rerank filter step) rather than
+compounding into empty results.
+
+### Rerank score distribution (non-degraded cases only, no-threshold run)
+
+145 of 320 cases got a real rerank call. Restricting to those, by
+`expected_match` on each returned candidate (`candidate_scores` in the report):
+
+| Population | n | min | p25 | p50 | p75 | p90 | mean | max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Expected Unit (relevant) | 161 | 0.261 | 0.884 | 0.920 | 0.948 | 0.961 | 0.887 | 0.984 |
+| Every other candidate | 2,739 | 0.035 | 0.141 | 0.203 | 0.280 | 0.390 | 0.229 | 0.910 |
+
+"Every other candidate" mixes the deliberately-random distractor Sources with
+real sibling passages from other cases sharing the same Notebook, so this is
+if anything a conservative (harder-to-separate) population — a candidate
+scoring in this bucket is not guaranteed to be a distractor, some are just
+different real passages. The separation is still clear: three-quarters of
+non-relevant candidates score below 0.28, while the worst relevant match still
+scored 0.261.
+
+### Threshold choice: 0.25
+
+Set just below the observed relevant-candidate minimum (0.261) so no true
+match is at risk of being filtered, while still sitting under the 50th
+percentile of non-relevant candidates. The `threshold=0.25` rerun confirms this
+empirically: every surviving candidate scored at least 0.252, zero surviving
+candidates scored below 0.25, and no non-degraded case lost recall. This
+threshold is specific to `cohere/rerank-v4.0-pro`'s score scale — switching
+reranker providers requires rerunning this calibration.
 
 ### Latency
 
-The baseline production configuration `40/40/60/20`:
+Baseline production configuration `40/40/60/20`, extended suite, real reranker:
 
-| Stage | Mean |
-| --- | --- |
-| Dense | 1.08 ms |
-| BM25 | 1.02 ms |
-| Fuse | 0.01 ms |
-| Evidence load | 3.79 ms |
-| Rerank | 0.25 ms |
-| Total | 6.15 ms |
-
-Latency range across the grid:
-
-| Metric | Fastest | Slowest |
+| Stage | Mean (no threshold) | Mean (`threshold=0.25`) |
 | --- | --- | --- |
-| Total mean | 6.01 ms | 23.88 ms |
+| Dense | 3.24 ms | 2.69 ms |
+| BM25 | 1.62 ms | 1.47 ms |
+| Fuse | 0.01 ms | 0.02 ms |
+| Evidence load | 6.54 ms | 6.28 ms |
+| Rerank | 2,346 ms | 2,556 ms |
+| Total | 2,358 ms | 2,566 ms |
 
-Fastest observed combination: `dense=20, sparse=80, rrf_k=30,
-rerank=20`. Slowest observed combination: `dense=20, sparse=20, rrf_k=30,
-rerank=10`. Most of the spread comes from dense/BM25/evidence-load timing rather
-than rerank.
+Rerank dominates total latency once it is a real network call, and most of
+that is the trial key's rate-limit backoff, not the Cohere API itself (single
+ad hoc calls during setup returned in ~0.4-1.5s). This is not a representative
+production latency number; it reflects trial-tier throttling.
 
 ### Interpretation
 
-This run proves the retrieval-layer sweep tooling end to end, but the dataset
-above is too easy for parameter tuning: every query is paired with exactly one
-relevant passage and the sweep pinned only 50 Sources per Notebook, so the
-expected Unit was essentially always found.
+The retrieval-layer sweep tooling, the distractor/vertical dataset extension,
+and the rerank relevance gate are now all verified end to end against a real
+reranker, not just unit tests. Two things remain open, both operational rather
+than code:
 
-The dataset and tooling gaps that caused this are now closed:
-`prepare_dataset.py` adds random distractor passages per sub-dataset and two
-additional verticals (see "Data" above), and `RetrievalCaseResult` in
-`internal/rageval/retrieval_eval.go` now reports each returned candidate's
-`rerank_score` and whether it matched the expected Unit
-(`candidate_scores` in the sweep JSON report), so a real score distribution for
-relevant vs. irrelevant candidates can finally be read off a sweep run.
-
-What's still open is running it: this section's numbers have not been
-regenerated against the extended suite yet. That rerun, plus picking
-`rerank_relevance_threshold` from the resulting score separation and setting it
-in `evals/rag/pinned-config-v1.json`, is the remaining step in
-`docs/superpowers/specs/2026-08-05-rerank-relevance-gate-design.md`.
+1. **Production reranker provider.** Cohere's trial key unblocked this
+   calibration but caps at 1000 calls/month — nowhere near production traffic,
+   and `reranker_id`/the calibrated threshold are provider-specific. A real
+   provider decision (Cohere paid tier, AWS Bedrock, Vertex AI, or self-hosted
+   vLLM — the four Bifrost natively supports for rerank) is still needed.
+2. **Whether production has been running rerank-degraded too.** This sweep
+   only tested the local dev Bifrost config
+   (`infra/bifrost/config.json`, gitignored `infra/compose/.env`). There is
+   only one `infra/bifrost/config.json` in this repo, with no separate
+   production copy found, which is a strong signal — but not proof — that
+   production has been silently falling back to RRF-only ordering the same
+   way. Worth checking directly against the production Bifrost config/logs.
 
 ## Operational notes
 
@@ -230,3 +279,21 @@ in `evals/rag/pinned-config-v1.json`, is the remaining step in
 - The Gemini embedding free tier previously returned `429 RESOURCE_EXHAUSTED`
   with limit `embed_content_free_tier_requests: 1000`. A paid tier or a later
   quota reset is required if a sweep without embedding caching is repeated.
+- `evals/rag/retrieval-sweep-grid-v1.json` is gitignored and regenerated per
+  run. For threshold calibration (as opposed to `top_k`/`rrf_k` tuning) it
+  should pin a single combination — `{"dense_candidates":[40],
+  "sparse_candidates":[40],"rrf_k":[60],"rerank_candidates":[20]}` — not the
+  81-combination cross product, since every combination now costs one real
+  rerank call per case.
+- `admitNotebook` in `internal/rageval/retrieval_live_executor.go` pins one
+  agent Run per Notebook for the life of the sweep, and Postgres enforces one
+  active Run per **user**, not per Notebook (`agent_runs_one_active_per_user_idx`).
+  Sweeping cases across N Notebooks concurrently needs N distinct principals,
+  one owner per Notebook — reusing a single user across many eval Notebooks
+  makes every Notebook after the first fail admission.
+- This run's local dev Postgres now has 12 eval Notebooks (`nb_eval_msmarco_1..4`,
+  `nb_eval_fiqa_1..2`, `nb_eval_dureader_1..4`, `nb_eval_cmedqa_1..2`), one
+  eval user owning each, and 480 ingested Sources (320 relevant + 160
+  distractors, per the counts in "Data"). These are reusable fixtures for the
+  next recalibration once a production reranker decision is made; they do not
+  need to be recreated from scratch.
