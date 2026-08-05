@@ -213,6 +213,9 @@ func TestBifrostRerankerReturnsCandidateIdentitiesWithoutProviderDocuments(t *te
 	if !reflect.DeepEqual(outcome.CandidateIDs, []string{"unit_b", "unit_a"}) || outcome.Metadata.Provider != "cohere" {
 		t.Fatalf("rerank outcome=%+v", outcome)
 	}
+	if outcome.Scores["unit_a"] != 0.4 || outcome.Scores["unit_b"] != 0.9 || len(outcome.Scores) != 2 {
+		t.Fatalf("rerank scores=%+v", outcome.Scores)
+	}
 }
 
 func TestBifrostCapabilitiesRejectMalformedProviderResults(t *testing.T) {

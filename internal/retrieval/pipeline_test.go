@@ -26,11 +26,11 @@ func TestHybridPipelineReloadsAuthorityBeforeBoundedReranking(t *testing.T) {
 				{ID: "unit_a", Preview: "authoritative A"}, {ID: "unit_b", Preview: "authoritative B"},
 			}, nil
 		},
-		Rerank: func(_ context.Context, _ string, candidates []retrieval.EvidenceCandidate) ([]string, error) {
+		Rerank: func(_ context.Context, _ string, candidates []retrieval.EvidenceCandidate) (retrieval.RerankResult, error) {
 			for _, candidate := range candidates {
 				rerankedInput = append(rerankedInput, candidate.ID)
 			}
-			return []string{"unit_b", "unit_a"}, nil
+			return retrieval.RerankResult{OrderedIDs: []string{"unit_b", "unit_a"}}, nil
 		},
 	}
 	result, err := pipeline.Search(context.Background(), retrieval.SearchRequest{
@@ -68,8 +68,8 @@ func TestHybridPipelineAppliesExplicitDegradationMatrix(t *testing.T) {
 			}
 			return result, nil
 		},
-		Rerank: func(context.Context, string, []retrieval.EvidenceCandidate) ([]string, error) {
-			return nil, unavailable
+		Rerank: func(context.Context, string, []retrieval.EvidenceCandidate) (retrieval.RerankResult, error) {
+			return retrieval.RerankResult{}, unavailable
 		},
 	}
 	request := retrieval.SearchRequest{
@@ -97,6 +97,89 @@ func TestHybridPipelineAppliesExplicitDegradationMatrix(t *testing.T) {
 	if _, err := base.Search(context.Background(), request); !errors.Is(err, retrieval.ErrRetrievalUnavailable) {
 		t.Fatalf("both-channel error = %v", err)
 	}
+}
+
+func TestHybridPipelineFiltersCandidatesBelowRerankRelevanceThreshold(t *testing.T) {
+	newPipeline := func(err error) retrieval.Pipeline {
+		return retrieval.Pipeline{
+			Dense: func(context.Context, retrieval.SearchRequest) ([]retrieval.Candidate, error) {
+				return []retrieval.Candidate{{ID: "unit_a", Score: .9}, {ID: "unit_b", Score: .8}}, nil
+			},
+			Sparse: func(context.Context, retrieval.SearchRequest) ([]retrieval.Candidate, error) { return nil, nil },
+			Reload: func(_ context.Context, _ retrieval.Scope, ids []string) ([]retrieval.EvidenceCandidate, error) {
+				result := make([]retrieval.EvidenceCandidate, 0, len(ids))
+				for _, id := range ids {
+					result = append(result, retrieval.EvidenceCandidate{ID: id, Preview: id})
+				}
+				return result, nil
+			},
+			Rerank: func(context.Context, string, []retrieval.EvidenceCandidate) (retrieval.RerankResult, error) {
+				if err != nil {
+					return retrieval.RerankResult{}, err
+				}
+				return retrieval.RerankResult{
+					OrderedIDs: []string{"unit_a", "unit_b"},
+					Scores:     map[string]float64{"unit_a": 0.9, "unit_b": 0.2},
+				}, nil
+			},
+		}
+	}
+	baseRequest := retrieval.SearchRequest{
+		Query: "evidence", Scope: retrieval.Scope{NotebookID: "nb", SourceIDs: []string{"src"}},
+		DenseLimit: 5, SparseLimit: 5, RerankLimit: 5, MinimumSurvivors: 1, RRFK: 60,
+	}
+
+	t.Run("removes candidates below threshold and records them", func(t *testing.T) {
+		request := baseRequest
+		request.RerankRelevanceThreshold = 0.5
+		result, err := newPipeline(nil).Search(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.CompleteEmpty || len(result.Candidates) != 1 || result.Candidates[0].ID != "unit_a" ||
+			result.Candidates[0].RerankScore != 0.9 ||
+			!reflect.DeepEqual(result.Diagnostics.RelevanceFiltered, []string{"unit_b"}) {
+			t.Fatalf("result=%+v", result)
+		}
+	})
+
+	t.Run("marks CompleteEmpty when every candidate is filtered", func(t *testing.T) {
+		request := baseRequest
+		request.RerankRelevanceThreshold = 0.95
+		result, err := newPipeline(nil).Search(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.CompleteEmpty || len(result.Candidates) != 0 ||
+			!reflect.DeepEqual(result.Diagnostics.RelevanceFiltered, []string{"unit_a", "unit_b"}) {
+			t.Fatalf("result=%+v", result)
+		}
+	})
+
+	t.Run("leaves candidates untouched when threshold is unset", func(t *testing.T) {
+		request := baseRequest
+		result, err := newPipeline(nil).Search(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.CompleteEmpty || len(result.Candidates) != 2 || result.Diagnostics.RelevanceFiltered != nil {
+			t.Fatalf("result=%+v", result)
+		}
+	})
+
+	t.Run("skips the gate when reranking fails", func(t *testing.T) {
+		unavailable := errors.New("reranker down")
+		request := baseRequest
+		request.RerankRelevanceThreshold = 0.95
+		result, err := newPipeline(unavailable).Search(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Degraded || result.CompleteEmpty || len(result.Candidates) != 2 ||
+			!reflect.DeepEqual(result.Degradations, []string{"reranker_unavailable"}) {
+			t.Fatalf("result=%+v", result)
+		}
+	})
 }
 
 func TestHybridPipelineMarksCompleteEmptyOnlyWhenBothChannelsComplete(t *testing.T) {

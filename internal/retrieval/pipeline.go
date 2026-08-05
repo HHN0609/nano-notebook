@@ -20,13 +20,14 @@ type Scope struct {
 }
 
 type SearchRequest struct {
-	Query            string
-	Scope            Scope
-	DenseLimit       int
-	SparseLimit      int
-	RerankLimit      int
-	MinimumSurvivors int
-	RRFK             int
+	Query                    string
+	Scope                    Scope
+	DenseLimit               int
+	SparseLimit              int
+	RerankLimit              int
+	MinimumSurvivors         int
+	RRFK                     int
+	RerankRelevanceThreshold float64
 }
 
 type EvidenceCandidate struct {
@@ -36,6 +37,7 @@ type EvidenceCandidate struct {
 	SourceTitle string
 	Preview     string
 	UnitRefs    []UnitRef
+	RerankScore float64
 }
 
 type SearchResult struct {
@@ -53,18 +55,24 @@ type SearchStageDiagnostics struct {
 }
 
 type SearchDiagnostics struct {
-	Dense        SearchStageDiagnostics
-	BM25         SearchStageDiagnostics
-	Fused        SearchStageDiagnostics
-	EvidenceLoad SearchStageDiagnostics
-	Rerank       SearchStageDiagnostics
-	Degradations []string
+	Dense             SearchStageDiagnostics
+	BM25              SearchStageDiagnostics
+	Fused             SearchStageDiagnostics
+	EvidenceLoad      SearchStageDiagnostics
+	Rerank            SearchStageDiagnostics
+	Degradations      []string
+	RelevanceFiltered []string
+}
+
+type RerankResult struct {
+	OrderedIDs []string
+	Scores     map[string]float64
 }
 
 type DenseSearchFunc func(context.Context, SearchRequest) ([]Candidate, error)
 type SparseSearchFunc func(context.Context, SearchRequest) ([]Candidate, error)
 type AuthorityReloadFunc func(context.Context, Scope, []string) ([]EvidenceCandidate, error)
-type RerankFunc func(context.Context, string, []EvidenceCandidate) ([]string, error)
+type RerankFunc func(context.Context, string, []EvidenceCandidate) (RerankResult, error)
 
 type Pipeline struct {
 	Dense  DenseSearchFunc
@@ -165,7 +173,7 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 		return result, nil
 	}
 	rerankStarted := time.Now()
-	orderedIDs, err := p.Rerank(ctx, request.Query, append([]EvidenceCandidate(nil), authoritative...))
+	rerankResult, err := p.Rerank(ctx, request.Query, append([]EvidenceCandidate(nil), authoritative...))
 	if err != nil {
 		result.Degraded = true
 		result.Degradations = append(result.Degradations, "reranker_unavailable")
@@ -173,11 +181,27 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 		result.Diagnostics.Degradations = append([]string(nil), result.Degradations...)
 		return result, nil
 	}
-	result.Candidates, err = applyRerankOrder(authoritative, orderedIDs)
+	result.Candidates, err = applyRerankOrder(authoritative, rerankResult)
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("%w: invalid reranker result: %v", ErrRetrievalUnavailable, err)
 	}
 	result.Diagnostics.Rerank = candidateStage(true, time.Since(rerankStarted), evidenceCandidateIDs(result.Candidates))
+	if request.RerankRelevanceThreshold > 0 {
+		kept := make([]EvidenceCandidate, 0, len(result.Candidates))
+		var filtered []string
+		for _, candidate := range result.Candidates {
+			if candidate.RerankScore >= request.RerankRelevanceThreshold {
+				kept = append(kept, candidate)
+			} else {
+				filtered = append(filtered, candidate.ID)
+			}
+		}
+		result.Candidates = kept
+		result.Diagnostics.RelevanceFiltered = filtered
+		if len(kept) == 0 {
+			result.CompleteEmpty = true
+		}
+	}
 	return result, nil
 }
 
@@ -256,7 +280,8 @@ func orderAuthoritativeCandidates(ids []string, candidates []EvidenceCandidate) 
 	return ordered, nil
 }
 
-func applyRerankOrder(candidates []EvidenceCandidate, ids []string) ([]EvidenceCandidate, error) {
+func applyRerankOrder(candidates []EvidenceCandidate, result RerankResult) ([]EvidenceCandidate, error) {
+	ids := result.OrderedIDs
 	if len(ids) != len(candidates) {
 		return nil, errors.New("reranker must return an exact permutation")
 	}
@@ -275,6 +300,7 @@ func applyRerankOrder(candidates []EvidenceCandidate, ids []string) ([]EvidenceC
 			return nil, errors.New("reranker returned a duplicate candidate")
 		}
 		seen[id] = struct{}{}
+		candidate.RerankScore = result.Scores[id]
 		ordered = append(ordered, candidate)
 	}
 	return ordered, nil

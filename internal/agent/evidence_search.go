@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -138,7 +139,7 @@ func (s *EvidenceSearchService) searchEvidenceScope(ctx context.Context, scope p
 		Reload: func(ctx context.Context, _ retrieval.Scope, ids []string) ([]retrieval.EvidenceCandidate, error) {
 			return s.reloadCandidates(ctx, scope, ids)
 		},
-		Rerank: func(ctx context.Context, query string, candidates []retrieval.EvidenceCandidate) ([]string, error) {
+		Rerank: func(ctx context.Context, query string, candidates []retrieval.EvidenceCandidate) (retrieval.RerankResult, error) {
 			items := make([]models.RerankCandidate, 0, len(candidates))
 			for _, candidate := range candidates {
 				items = append(items, models.RerankCandidate{ID: candidate.ID, Text: candidate.Preview})
@@ -146,11 +147,11 @@ func (s *EvidenceSearchService) searchEvidenceScope(ctx context.Context, scope p
 			outcome, err := s.models.Rerank(ctx, models.RerankRequest{
 				Model: scope.Version.Config.RerankerID, Query: query, Candidates: items, TopN: len(items),
 			})
-			return outcome.CandidateIDs, err
+			return retrieval.RerankResult{OrderedIDs: outcome.CandidateIDs, Scores: outcome.Scores}, err
 		},
 	}
 	searchStartedAt := time.Now()
-	request := retrievalSearchRequest(query, retrieval.Scope{NotebookID: scope.NotebookID, SourceIDs: sourceIDs, RevisionIDs: revisionIDs}, denseLimit, sparseLimit, rerankLimit, rrfK)
+	request := retrievalSearchRequest(query, retrieval.Scope{NotebookID: scope.NotebookID, SourceIDs: sourceIDs, RevisionIDs: revisionIDs}, denseLimit, sparseLimit, rerankLimit, rrfK, scope.Version.Config.RerankRelevanceThreshold)
 	result, searchErr := pipeline.Search(ctx, request)
 	s.recordSearchMetrics(result, searchErr, searchStartedAt)
 	return result, searchErr
@@ -163,10 +164,11 @@ func overrideOrDefault(override, fallback int) int {
 	return fallback
 }
 
-func retrievalSearchRequest(query string, scope retrieval.Scope, denseLimit, sparseLimit, rerankLimit, rrfK int) retrieval.SearchRequest {
+func retrievalSearchRequest(query string, scope retrieval.Scope, denseLimit, sparseLimit, rerankLimit, rrfK int, rerankRelevanceThreshold float64) retrieval.SearchRequest {
 	return retrieval.SearchRequest{
 		Query: query, Scope: scope, DenseLimit: denseLimit, SparseLimit: sparseLimit,
 		RerankLimit: rerankLimit, MinimumSurvivors: 1, RRFK: rrfK,
+		RerankRelevanceThreshold: rerankRelevanceThreshold,
 	}
 }
 
@@ -345,5 +347,6 @@ func validSearchIndexConfig(config retrieval.IndexConfig) bool {
 		strings.TrimSpace(config.AnalyzerID) != "" && config.BM25K1 > 0 && config.BM25AverageDocumentLength > 0 &&
 		strings.TrimSpace(config.EmbeddingModel) != "" && config.EmbeddingDimensions > 0 && retrieval.IsEmbeddingProfileID(config.EmbeddingProfileID) &&
 		config.DenseCandidates > 0 && config.SparseCandidates > 0 && config.RRFK > 0 &&
-		strings.TrimSpace(config.RerankerID) != "" && config.RerankCandidates > 0
+		strings.TrimSpace(config.RerankerID) != "" && config.RerankCandidates > 0 &&
+		config.RerankRelevanceThreshold >= 0 && !math.IsNaN(config.RerankRelevanceThreshold)
 }

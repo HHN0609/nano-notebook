@@ -51,6 +51,7 @@ type RerankRequest struct {
 
 type RerankOutcome struct {
 	CandidateIDs []string
+	Scores       map[string]float64
 	Metadata     CapabilityMetadata
 }
 
@@ -168,6 +169,7 @@ func (c *BifrostClient) Rerank(ctx context.Context, request RerankRequest) (Rera
 		return RerankOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid rerank response")}
 	}
 	ordered := make([]string, 0, len(decoded.Results))
+	scores := make(map[string]float64, len(decoded.Results))
 	seen := make(map[int]struct{}, len(decoded.Results))
 	for _, result := range decoded.Results {
 		if result.Index < 0 || result.Index >= len(request.Candidates) || math.IsNaN(result.RelevanceScore) || math.IsInf(result.RelevanceScore, 0) {
@@ -177,13 +179,15 @@ func (c *BifrostClient) Rerank(ctx context.Context, request RerankRequest) (Rera
 			return RerankOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("duplicate rerank index")}
 		}
 		seen[result.Index] = struct{}{}
-		ordered = append(ordered, request.Candidates[result.Index].ID)
+		id := request.Candidates[result.Index].ID
+		ordered = append(ordered, id)
+		scores[id] = result.RelevanceScore
 	}
 	metadata, err := capabilityMetadata(request.Model, decoded.ExtraFields.Provider, decoded.Model, decoded.Usage.PromptTokens, decoded.Usage.TotalTokens, latency, decoded.Cost, decoded.CostCurrency, decoded.CostSource)
 	if err != nil {
 		return RerankOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 	}
-	return RerankOutcome{CandidateIDs: ordered, Metadata: metadata}, nil
+	return RerankOutcome{CandidateIDs: ordered, Scores: scores, Metadata: metadata}, nil
 }
 
 func (c *BifrostClient) capabilityRequest(ctx context.Context, path string, body []byte) ([]byte, time.Duration, error) {

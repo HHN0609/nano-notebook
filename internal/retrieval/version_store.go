@@ -34,6 +34,7 @@ type IndexConfig struct {
 	RRFK                      int         `json:"rrf_k"`
 	RerankerID                string      `json:"reranker_id"`
 	RerankCandidates          int         `json:"rerank_candidates"`
+	RerankRelevanceThreshold  float64     `json:"rerank_relevance_threshold"`
 	DegradationPolicyID       string      `json:"degradation_policy_id"`
 }
 
@@ -340,5 +341,6 @@ func validIndexConfig(config IndexConfig) bool {
 		config.DenseCandidates > 0 && config.SparseCandidates > 0 && config.RRFK > 0 &&
 		strings.TrimSpace(config.RerankerID) != "" && config.RerankCandidates > 0 &&
 		config.RerankCandidates <= config.DenseCandidates+config.SparseCandidates &&
+		config.RerankRelevanceThreshold >= 0 && !math.IsNaN(config.RerankRelevanceThreshold) &&
 		strings.TrimSpace(config.DegradationPolicyID) != ""
 }

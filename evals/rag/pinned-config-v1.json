@@ -15,6 +15,7 @@
     "rrf_k": 60,
     "reranker_id": "qwen-rerank-v1",
     "rerank_candidates": 20,
+    "rerank_relevance_threshold": 0,
     "degradation_policy_id": "hybrid-required-v1"
   },
   "composer_model": "qwen-plus",
