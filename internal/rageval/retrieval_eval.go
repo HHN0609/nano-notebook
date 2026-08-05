@@ -136,6 +136,16 @@ type RetrievalGridResult struct {
 	TotalDurationMilliseconds        float64 `json:"total_ms"`
 }
 
+// RetrievalCandidateScore reports the post-rerank relevance score for one
+// returned candidate, keyed by chunk ID rather than a parallel array so a
+// human comparing the score distribution of expected vs. distractor
+// candidates does not have to correlate two separate slices by index.
+type RetrievalCandidateScore struct {
+	ChunkID       string  `json:"chunk_id"`
+	RerankScore   float64 `json:"rerank_score"`
+	ExpectedMatch bool    `json:"expected_match"`
+}
+
 type RetrievalCaseResult struct {
 	CaseID    string `json:"case_id"`
 	Question  string `json:"question"`
@@ -147,12 +157,13 @@ type RetrievalCaseResult struct {
 	RRFK             int `json:"rrf_k"`
 	RerankCandidates int `json:"rerank_candidates"`
 
-	ExpectedEvidenceSetCount int      `json:"expected_evidence_set_count"`
-	Recall                   float64  `json:"recall"`
-	MRR                      float64  `json:"mrr"`
-	RetrievedEvidenceIDs     []string `json:"retrieved_evidence_ids"`
-	RetrievedChunkIDs        []string `json:"retrieved_chunk_ids"`
-	Degradations             []string `json:"degradations,omitempty"`
+	ExpectedEvidenceSetCount int                       `json:"expected_evidence_set_count"`
+	Recall                   float64                   `json:"recall"`
+	MRR                      float64                   `json:"mrr"`
+	RetrievedEvidenceIDs     []string                  `json:"retrieved_evidence_ids"`
+	RetrievedChunkIDs        []string                  `json:"retrieved_chunk_ids"`
+	CandidateScores          []RetrievalCandidateScore `json:"candidate_scores,omitempty"`
+	Degradations             []string                  `json:"degradations,omitempty"`
 
 	DenseDurationMilliseconds        float64 `json:"dense_ms"`
 	BM25DurationMilliseconds         float64 `json:"bm25_ms"`
@@ -226,6 +237,7 @@ func RunRetrievalSweep(ctx context.Context, suite RetrievalSuite, grid Retrieval
 			row.CompletedCases++
 			caseResult.RetrievedEvidenceIDs, caseResult.RetrievedChunkIDs = orderedRetrievalIDs(searchResult.Candidates)
 			caseResult.Recall, caseResult.MRR = retrievalRecallMRR(evalCase, caseResult.RetrievedEvidenceIDs)
+			caseResult.CandidateScores = candidateScores(searchResult.Candidates, expectedUnitIDs(evalCase))
 			caseResult.Degradations = append([]string(nil), searchResult.Degradations...)
 			caseResult.DenseDurationMilliseconds = milliseconds(searchResult.Diagnostics.Dense.DurationNanoseconds)
 			caseResult.BM25DurationMilliseconds = milliseconds(searchResult.Diagnostics.BM25.DurationNanoseconds)
@@ -333,13 +345,35 @@ func orderedRetrievalIDs(candidates []retrieval.EvidenceCandidate) ([]string, []
 	return unitIDs, chunkIDs
 }
 
-func retrievalRecallMRR(evalCase RetrievalCase, ids []string) (float64, float64) {
+func expectedUnitIDs(evalCase RetrievalCase) map[string]bool {
 	allowed := make(map[string]bool)
 	for _, set := range evalCase.ExpectedEvidenceSets {
 		for _, id := range set {
 			allowed[id] = true
 		}
 	}
+	return allowed
+}
+
+func candidateScores(candidates []retrieval.EvidenceCandidate, allowed map[string]bool) []RetrievalCandidateScore {
+	scores := make([]RetrievalCandidateScore, 0, len(candidates))
+	for _, candidate := range candidates {
+		expectedMatch := false
+		for _, ref := range candidate.UnitRefs {
+			if allowed[ref.UnitID] {
+				expectedMatch = true
+				break
+			}
+		}
+		scores = append(scores, RetrievalCandidateScore{
+			ChunkID: candidate.ID, RerankScore: candidate.RerankScore, ExpectedMatch: expectedMatch,
+		})
+	}
+	return scores
+}
+
+func retrievalRecallMRR(evalCase RetrievalCase, ids []string) (float64, float64) {
+	allowed := expectedUnitIDs(evalCase)
 	found := 0
 	for _, set := range evalCase.ExpectedEvidenceSets {
 		matched := false

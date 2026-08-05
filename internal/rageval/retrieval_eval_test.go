@@ -106,6 +106,28 @@ func TestRunRetrievalSweepComputesRecallMRRAndStageLatencyAverages(t *testing.T)
 	}
 }
 
+func TestRunRetrievalSweepReportsCandidateScoresAndExpectedMatch(t *testing.T) {
+	suite := retrievalSuite()
+	executor := &retrievalExecutorStub{
+		results: map[string]retrieval.SearchResult{
+			"case-1": retrievalSearchResult([]retrieval.EvidenceCandidate{
+				{ID: "chunk-a", RerankScore: 0.91, UnitRefs: []retrieval.UnitRef{{UnitID: "unit-one"}}},
+				{ID: "chunk-b", RerankScore: 0.12, UnitRefs: []retrieval.UnitRef{{UnitID: "distractor-unit"}}},
+			}, 0, 0, 0, 0, 0),
+		},
+	}
+	report, err := rageval.RunRetrievalSweep(context.Background(), suite, retrievalGrid(), executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scores := report.Cases[0].CandidateScores
+	if len(scores) != 2 ||
+		scores[0].ChunkID != "chunk-a" || scores[0].RerankScore != 0.91 || !scores[0].ExpectedMatch ||
+		scores[1].ChunkID != "chunk-b" || scores[1].RerankScore != 0.12 || scores[1].ExpectedMatch {
+		t.Fatalf("candidate scores = %+v", scores)
+	}
+}
+
 func TestRunRetrievalSweepRecordsSearchErrorsWithoutFailingTheReport(t *testing.T) {
 	suite := retrievalSuite()
 	executor := &retrievalExecutorStub{

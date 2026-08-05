@@ -1,0 +1,2 @@
+ir_datasets>=0.5.9
+pyarrow>=14.0.0

@@ -6,7 +6,7 @@ evals/rag/sweep-out/
 evals/rag/retrieval-sweep-v1.json
 evals/rag/retrieval-sweep-sources-v1.json
 evals/rag/retrieval-sweep-grid-v1.json
-/scripts/rag-eval/
+__pycache__/
 node_modules/
 dist/
 test-results/

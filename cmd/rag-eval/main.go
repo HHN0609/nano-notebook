@@ -133,13 +133,14 @@ func runUnits(args []string, output io.Writer) error {
 }
 
 type sampleRecord struct {
-	CaseID    string `json:"case_id"`
-	DatasetID string `json:"dataset_id"`
-	QueryID   string `json:"query_id"`
-	Query     string `json:"query"`
-	DocID     string `json:"doc_id"`
-	DocText   string `json:"doc_text"`
-	SourceRef string `json:"source_ref"`
+	CaseID       string `json:"case_id"`
+	DatasetID    string `json:"dataset_id"`
+	QueryID      string `json:"query_id"`
+	Query        string `json:"query"`
+	DocID        string `json:"doc_id"`
+	DocText      string `json:"doc_text"`
+	SourceRef    string `json:"source_ref"`
+	IsDistractor bool   `json:"is_distractor"`
 }
 
 func runIngestSamples(args []string, output io.Writer) error {
@@ -296,6 +297,12 @@ func runBuildSuite(args []string, output io.Writer) error {
 		}
 		item.EvidenceRevisionID = revisionID
 		byCase[caseID] = item
+		if record.IsDistractor {
+			// Distractors are admitted as ordinary Sources so they sit in the
+			// retrieval candidate pool, but they have no query of their own and
+			// must never become an expected answer for any Case.
+			continue
+		}
 		suite.Cases = append(suite.Cases, rageval.RetrievalCase{
 			ID: caseID, Question: record.Query, Language: sampleLanguage(record.DatasetID),
 			DatasetID: record.DatasetID, SourceRef: record.SourceRef,
@@ -385,8 +392,11 @@ func loadSampleRecords(path string) ([]sampleRecord, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
 			return nil, err
 		}
-		if strings.TrimSpace(record.DatasetID) == "" || strings.TrimSpace(record.Query) == "" || strings.TrimSpace(record.DocText) == "" {
-			return nil, errors.New("sample JSONL contains a blank dataset_id, query, or doc_text")
+		if strings.TrimSpace(record.DatasetID) == "" || strings.TrimSpace(record.DocText) == "" {
+			return nil, errors.New("sample JSONL contains a blank dataset_id or doc_text")
+		}
+		if !record.IsDistractor && strings.TrimSpace(record.Query) == "" {
+			return nil, errors.New("sample JSONL contains a blank query for a non-distractor row")
 		}
 		records = append(records, record)
 	}
@@ -408,7 +418,7 @@ func sampleCaseID(record sampleRecord, index int) string {
 }
 
 func sampleLanguage(datasetID string) string {
-	if strings.Contains(datasetID, "dureader") {
+	if strings.Contains(datasetID, "dureader") || strings.Contains(datasetID, "cmedqa") {
 		return "zh"
 	}
 	return "en"
