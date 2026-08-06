@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -87,12 +88,23 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 	}
 
 	result := SearchResult{}
-	denseStarted := time.Now()
-	dense, denseErr := runSearchChannel(ctx, p.Dense, request, request.DenseLimit)
-	result.Diagnostics.Dense = candidateStage(denseErr == nil, time.Since(denseStarted), candidateIDs(dense))
-	sparseStarted := time.Now()
-	sparse, sparseErr := runSearchChannel(ctx, p.Sparse, request, request.SparseLimit)
-	result.Diagnostics.BM25 = candidateStage(sparseErr == nil, time.Since(sparseStarted), candidateIDs(sparse))
+	var dense, sparse []Candidate
+	var denseErr, sparseErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		started := time.Now()
+		dense, denseErr = runSearchChannel(ctx, p.Dense, request, request.DenseLimit)
+		result.Diagnostics.Dense = candidateStage(denseErr == nil, time.Since(started), candidateIDs(dense))
+	}()
+	go func() {
+		defer wg.Done()
+		started := time.Now()
+		sparse, sparseErr = runSearchChannel(ctx, p.Sparse, request, request.SparseLimit)
+		result.Diagnostics.BM25 = candidateStage(sparseErr == nil, time.Since(started), candidateIDs(sparse))
+	}()
+	wg.Wait()
 	if denseErr != nil && sparseErr != nil {
 		return SearchResult{}, fmt.Errorf("%w: dense and BM25 channels failed", ErrRetrievalUnavailable)
 	}

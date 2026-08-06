@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 )
@@ -200,5 +201,39 @@ func TestHybridPipelineMarksCompleteEmptyOnlyWhenBothChannelsComplete(t *testing
 	})
 	if err != nil || !result.CompleteEmpty || result.Degraded || len(result.Candidates) != 0 {
 		t.Fatalf("empty result=%+v err=%v", result, err)
+	}
+}
+
+func TestHybridPipelineRunsDenseAndSparseConcurrently(t *testing.T) {
+	const channelDelay = 80 * time.Millisecond
+	pipeline := retrieval.Pipeline{
+		Dense: func(context.Context, retrieval.SearchRequest) ([]retrieval.Candidate, error) {
+			time.Sleep(channelDelay)
+			return []retrieval.Candidate{{ID: "unit_a", Score: .9}}, nil
+		},
+		Sparse: func(context.Context, retrieval.SearchRequest) ([]retrieval.Candidate, error) {
+			time.Sleep(channelDelay)
+			return []retrieval.Candidate{{ID: "unit_a", Score: 5}}, nil
+		},
+		Reload: func(context.Context, retrieval.Scope, []string) ([]retrieval.EvidenceCandidate, error) {
+			return []retrieval.EvidenceCandidate{{ID: "unit_a", Preview: "authoritative A"}}, nil
+		},
+	}
+	started := time.Now()
+	result, err := pipeline.Search(context.Background(), retrieval.SearchRequest{
+		Query: "evidence", Scope: retrieval.Scope{NotebookID: "nb_1", SourceIDs: []string{"src_1"}},
+		DenseLimit: 10, SparseLimit: 10, RerankLimit: 2, MinimumSurvivors: 1, RRFK: 60,
+	})
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Candidates) != 1 || result.Candidates[0].ID != "unit_a" {
+		t.Fatalf("result=%+v", result)
+	}
+	// Serial execution of two channelDelay-sleeping channels would take at
+	// least 2*channelDelay; concurrent execution takes roughly channelDelay.
+	if elapsed >= 2*channelDelay {
+		t.Fatalf("dense and sparse channels ran serially: elapsed=%s channelDelay=%s", elapsed, channelDelay)
 	}
 }
