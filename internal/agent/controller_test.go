@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
@@ -541,6 +542,101 @@ func TestControllerReturnsToolCallErrorToRoleExecutorWithoutTerminalizing(t *tes
 				t.Fatalf("ToolCallError must not append an Action Result checkpoint: %+v", runtime.checkpoints)
 			}
 		})
+	}
+}
+
+// TestControllerParallelBatchCommitsSuccessfulSiblingsWhenFirstActionFails is
+// the case the plan's relaxed checkpoint ordering exists for: a proposal
+// batch where every action is registered ToolParallel, and the *first*
+// action (index 0) fails while its siblings succeed. Before the relaxed
+// ordering (checkpoint_prefix.go), committing index 1/2 without index 0
+// would have been rejected as "out of order" and the whole attempt would
+// have been unable to preserve the completed work. This test proves: all
+// three actions actually ran (the batch is genuinely concurrent, not
+// silently falling back to sequential), the failing action's ToolCallError
+// is surfaced without terminalizing the attempt, and the two successful
+// siblings are durably committed so a retried attempt only has to redo the
+// failed index.
+func TestControllerParallelBatchCommitsSuccessfulSiblingsWhenFirstActionFails(t *testing.T) {
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	calculate := testMCPAction("calculate")
+	calculate.err = errors.New("boom")
+	currentTime := testMCPAction("current_time")
+	searchEvidence := testMCPAction("search_evidence")
+	registry, err := NewMCPToolRegistry(
+		MCPToolRegistration{Action: calculate, Scheduling: agentcatalog.ToolParallel},
+		MCPToolRegistration{Action: currentTime, Scheduling: agentcatalog.ToolParallel},
+		MCPToolRegistration{Action: searchEvidence, Scheduling: agentcatalog.ToolParallel},
+		MCPToolRegistration{Action: testMCPAction("web_search"), Scheduling: agentcatalog.ToolOrderedSync},
+		testDelegationMCPRegistration(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	host, err := NewMCPToolHost(catalog, registry, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directRegistry, err := NewActionRegistry(testMCPAction("calculate"), testMCPAction("current_time"), testMCPAction("search_evidence"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{
+			{Name: "calculate", Input: json.RawMessage(`{"operation":"add"}`)},
+			{Name: "current_time", Input: json.RawMessage(`{}`)},
+			{Name: "search_evidence", Input: json.RawMessage(`{}`)},
+		}}},
+	}}
+	controller := NewMCPController(runtime, model, directRegistry, host, agentcatalog.MustParseReference("chat.leader@1"))
+
+	err = controller.Execute(context.Background(), runtime.execution.Attempt)
+	var toolErr *ToolCallError
+	if !errors.As(err, &toolErr) || toolErr.Kind != ToolErrorInfrastructure || toolErr.Code != "tool_execution_failed" {
+		t.Fatalf("controller error = %v", err)
+	}
+	if len(runtime.failed) != 0 {
+		t.Fatalf("a retryable ToolCallError must not terminalize the attempt: %v", runtime.failed)
+	}
+	if len(calculate.calls) != 1 || len(currentTime.calls) != 1 || len(searchEvidence.calls) != 1 {
+		t.Fatalf("all three actions must run concurrently regardless of the failure: calculate=%d current_time=%d search_evidence=%d",
+			len(calculate.calls), len(currentTime.calls), len(searchEvidence.calls))
+	}
+
+	if len(runtime.checkpoints) != 3 {
+		t.Fatalf("checkpoints = %+v", runtime.checkpoints)
+	}
+	if runtime.checkpoints[0].Kind != CheckpointActionProposal {
+		t.Fatalf("checkpoint 0 = %+v", runtime.checkpoints[0])
+	}
+	gotIndices := map[int]bool{}
+	for _, checkpoint := range runtime.checkpoints[1:] {
+		if checkpoint.Kind != CheckpointActionResult || checkpoint.ActionIndex == nil {
+			t.Fatalf("checkpoint = %+v", checkpoint)
+		}
+		gotIndices[*checkpoint.ActionIndex] = true
+	}
+	if gotIndices[0] || !gotIndices[1] || !gotIndices[2] {
+		t.Fatalf("committed Action Result indices = %+v, want {1,2} and not 0", gotIndices)
+	}
+
+	prefix, err := LoadCheckpointPrefix(context.Background(), runtime.checkpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := prefix.Proposals[0].Actions
+	if len(actions) != 3 || actions[0].Result != nil {
+		t.Fatalf("action 0 must remain incomplete for the next attempt to retry: %+v", actions[0])
+	}
+	if actions[1].Result == nil || actions[1].Result.Status != ActionSucceeded {
+		t.Fatalf("action 1 must be durably committed: %+v", actions[1])
+	}
+	if actions[2].Result == nil || actions[2].Result.Status != ActionSucceeded {
+		t.Fatalf("action 2 must be durably committed: %+v", actions[2])
 	}
 }
 

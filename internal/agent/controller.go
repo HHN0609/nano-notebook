@@ -138,9 +138,16 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		if prefix.Final != nil {
 			return c.runtime.PublishFinal(ctx, attempt, *prefix.Final)
 		}
-		if proposal, action, ok := firstIncompleteAction(prefix); ok {
+		if proposal, pending, ok := incompleteActions(prefix); ok {
+			action := pending[0]
 			if c.isExclusiveDelegation(toolSession, action.Name) && execution.ExistingChildCount == 0 {
 				return c.executeDelegationAction(ctx, tracer, toolSession, attempt, execution, action)
+			}
+			if len(pending) > 1 && c.allParallelEligible(toolSession, pending) {
+				if err := c.executeParallelBatch(ctx, tracer, toolSession, attempt, execution, prefix, proposal, pending); err != nil {
+					return err
+				}
+				continue
 			}
 			if err := c.executeAction(ctx, tracer, toolSession, attempt, execution, prefix, proposal, action); err != nil {
 				return err
@@ -466,43 +473,16 @@ func (c *Controller) executeAction(
 	proposal AcceptedProposal,
 	action AcceptedAction,
 ) error {
-	var executor Action
-	if toolSession == nil {
-		var ok bool
-		executor, ok = c.registry.Resolve(action.Name)
-		if !ok {
-			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), fmt.Errorf("accepted unknown Action %q", action.Name))
-		}
-	} else {
-		var ok bool
-		executor, ok = toolSession.actionAdapter(action.Name)
-		if !ok {
-			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), fmt.Errorf("accepted unknown MCP Tool %q", action.Name))
-		}
+	executor, err := c.resolveActionExecutor(toolSession, action.Name)
+	if err != nil {
+		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
 	}
 	request := ActionRequest{ActionID: action.ActionID, Input: action.Input, DefaultTimeZone: execution.TimeZone, Attempt: attempt}
-	var result ActionResult
-	var err error
-	if tracer != nil {
-		startIdentity := TraceActionStartIdentity(attempt.RunID, attempt.AttemptNo, action.ActionID)
-		options := ActionTraceOptions{
-			StartIdentity: startIdentity, InputIdentity: startIdentity + "/replay/input",
-			ResultIdentity: startIdentity + "/replay/result", ReplayStager: c.replayStager(),
-		}
-		if retryRuntime, ok := c.runtime.(ActionRetryTraceRuntime); ok {
-			prior, found, priorErr := retryRuntime.PreviousActionSpan(ctx, attempt, action.ActionID)
-			if priorErr != nil {
-				return c.handleRuntimeError(ctx, attempt, priorErr)
-			}
-			if found {
-				options.RetryTarget = &prior
-				options.LinkIdentity = options.StartIdentity + "/retries"
-			}
-		}
-		result, err = InvokeAgentAction(ctx, tracer, executor, action.ActionID, request, options)
-	} else {
-		result, err = executor.Execute(ctx, request)
+	options, err := c.actionTraceOptions(ctx, tracer, attempt, action)
+	if err != nil {
+		return c.handleRuntimeError(ctx, attempt, err)
 	}
+	result, err := c.invokeActionExecutor(ctx, tracer, executor, action, request, options)
 	if err != nil {
 		return c.actionExecutionError(ctx, attempt, err)
 	}
@@ -526,6 +506,182 @@ func (c *Controller) executeAction(
 	return nil
 }
 
+// executeParallelBatch runs every action in pending concurrently via
+// ToolBatchExecutor. Callers must only invoke this once c.allParallelEligible
+// has confirmed every pending action is registered ToolParallel — a batch
+// with any ordered_sync (or unscheduled) action stays on the executeAction
+// one-at-a-time path unchanged.
+//
+// Preflight (executor resolution, request construction, retry-span lookup)
+// runs sequentially before any goroutine starts, mirroring Pi's two-phase
+// design: serial preflight, concurrent execution.
+//
+// A failing action never blocks committing its successful siblings: the
+// relaxed checkpoint ordering (checkpoint_prefix.go) allows Action Results
+// to land in any index order, so every successful outcome is committed and
+// only the failed index is left missing for the existing attempt-retry path
+// to pick up. Byte-budget accounting is still applied in index order across
+// the successful outcomes, since it is a cumulative resource rather than a
+// per-action one; once it would be exceeded, that action and everything
+// after it in index order are left uncommitted rather than partially
+// spent. If both an execution failure and budget exhaustion occur in the
+// same batch, the execution failure is surfaced — it is the more specific,
+// actionable condition.
+func (c *Controller) executeParallelBatch(
+	ctx context.Context,
+	tracer *agentobs.Tracer,
+	toolSession *MCPAttemptSession,
+	attempt Attempt,
+	execution Execution,
+	prefix CheckpointPrefix,
+	proposal AcceptedProposal,
+	pending []AcceptedAction,
+) error {
+	type preparedAction struct {
+		action   AcceptedAction
+		executor Action
+		request  ActionRequest
+		options  ActionTraceOptions
+	}
+	prepared := make([]preparedAction, 0, len(pending))
+	for _, action := range pending {
+		executor, err := c.resolveActionExecutor(toolSession, action.Name)
+		if err != nil {
+			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
+		}
+		request := ActionRequest{ActionID: action.ActionID, Input: action.Input, DefaultTimeZone: execution.TimeZone, Attempt: attempt}
+		options, err := c.actionTraceOptions(ctx, tracer, attempt, action)
+		if err != nil {
+			return c.handleRuntimeError(ctx, attempt, err)
+		}
+		prepared = append(prepared, preparedAction{action: action, executor: executor, request: request, options: options})
+	}
+
+	tasks := make([]BatchTask, len(prepared))
+	for i, item := range prepared {
+		item := item
+		tasks[i] = BatchTask{Index: item.action.Index, Run: func(taskCtx context.Context) (ActionResult, error) {
+			return c.invokeActionExecutor(taskCtx, tracer, item.executor, item.action, item.request, item.options)
+		}}
+	}
+	outcomes := ToolBatchExecutor{}.RunParallel(ctx, tasks)
+
+	usedResultBytes, err := encodedActionResultBytes(prefix)
+	if err != nil {
+		return c.fail(ctx, attempt, string(ErrCheckpointInvalid.Error()), err)
+	}
+	type batchFailure struct {
+		invalidResponse bool
+		err             error
+	}
+	var failure *batchFailure
+	budgetExceeded := false
+	toCommit := make([]PendingCheckpoint, 0, len(outcomes))
+	for i, outcome := range outcomes {
+		action := prepared[i].action
+		if outcome.Err != nil {
+			if failure == nil {
+				failure = &batchFailure{err: outcome.Err}
+			}
+			continue
+		}
+		if err := outcome.Result.Validate(); err != nil {
+			if failure == nil {
+				failure = &batchFailure{invalidResponse: true, err: err}
+			}
+			continue
+		}
+		if budgetExceeded {
+			continue
+		}
+		checkpoint, err := NewActionResultCheckpoint(proposal.DecisionNo, action.Index, action.ActionID, outcome.Result)
+		if err != nil {
+			if failure == nil {
+				failure = &batchFailure{invalidResponse: true, err: err}
+			}
+			continue
+		}
+		if len(checkpoint.Payload) > execution.ActionResultByteLimit || usedResultBytes+len(checkpoint.Payload) > execution.ActionResultsByteLimit {
+			budgetExceeded = true
+			continue
+		}
+		usedResultBytes += len(checkpoint.Payload)
+		toCommit = append(toCommit, checkpoint)
+	}
+	for _, checkpoint := range toCommit {
+		if _, err := c.runtime.AppendCheckpoint(ctx, attempt, checkpoint); err != nil {
+			return c.handleRuntimeError(ctx, attempt, err)
+		}
+	}
+	if failure != nil {
+		if failure.invalidResponse {
+			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), failure.err)
+		}
+		return c.actionExecutionError(ctx, attempt, failure.err)
+	}
+	if budgetExceeded {
+		return c.fail(ctx, attempt, ErrorAgentBudgetExhausted, errors.New("Action Result byte budget exceeded"))
+	}
+	return nil
+}
+
+func (c *Controller) resolveActionExecutor(session *MCPAttemptSession, name string) (Action, error) {
+	if session == nil {
+		executor, ok := c.registry.Resolve(name)
+		if !ok {
+			return nil, fmt.Errorf("accepted unknown Action %q", name)
+		}
+		return executor, nil
+	}
+	executor, ok := session.actionAdapter(name)
+	if !ok {
+		return nil, fmt.Errorf("accepted unknown MCP Tool %q", name)
+	}
+	return executor, nil
+}
+
+func (c *Controller) actionTraceOptions(ctx context.Context, tracer *agentobs.Tracer, attempt Attempt, action AcceptedAction) (ActionTraceOptions, error) {
+	if tracer == nil {
+		return ActionTraceOptions{}, nil
+	}
+	startIdentity := TraceActionStartIdentity(attempt.RunID, attempt.AttemptNo, action.ActionID)
+	options := ActionTraceOptions{
+		StartIdentity: startIdentity, InputIdentity: startIdentity + "/replay/input",
+		ResultIdentity: startIdentity + "/replay/result", ReplayStager: c.replayStager(),
+	}
+	if retryRuntime, ok := c.runtime.(ActionRetryTraceRuntime); ok {
+		prior, found, err := retryRuntime.PreviousActionSpan(ctx, attempt, action.ActionID)
+		if err != nil {
+			return ActionTraceOptions{}, err
+		}
+		if found {
+			options.RetryTarget = &prior
+			options.LinkIdentity = options.StartIdentity + "/retries"
+		}
+	}
+	return options, nil
+}
+
+func (c *Controller) invokeActionExecutor(ctx context.Context, tracer *agentobs.Tracer, executor Action, action AcceptedAction, request ActionRequest, options ActionTraceOptions) (ActionResult, error) {
+	if tracer == nil {
+		return executor.Execute(ctx, request)
+	}
+	return InvokeAgentAction(ctx, tracer, executor, action.ActionID, request, options)
+}
+
+func (c *Controller) allParallelEligible(session *MCPAttemptSession, actions []AcceptedAction) bool {
+	if session == nil {
+		return false
+	}
+	for _, action := range actions {
+		tool, ok := session.byName[action.Name]
+		if !ok || tool.Scheduling != agentcatalog.ToolParallel {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Controller) replayStager() ReplayStager {
 	runtime, ok := c.runtime.(ReplayTraceRuntime)
 	if !ok {
@@ -534,17 +690,25 @@ func (c *Controller) replayStager() ReplayStager {
 	return runtime.ReplayStager()
 }
 
-func firstIncompleteAction(prefix CheckpointPrefix) (AcceptedProposal, AcceptedAction, bool) {
+// incompleteActions returns every action in the current proposal's batch
+// that has not yet completed (in index order), so callers can decide
+// between running the whole batch concurrently (executeParallelBatch) or
+// falling back to one-at-a-time execution (executeAction).
+func incompleteActions(prefix CheckpointPrefix) (AcceptedProposal, []AcceptedAction, bool) {
 	if len(prefix.Proposals) == 0 {
-		return AcceptedProposal{}, AcceptedAction{}, false
+		return AcceptedProposal{}, nil, false
 	}
 	proposal := prefix.Proposals[len(prefix.Proposals)-1]
+	pending := make([]AcceptedAction, 0, len(proposal.Actions))
 	for _, action := range proposal.Actions {
 		if action.Result == nil {
-			return proposal, action, true
+			pending = append(pending, action)
 		}
 	}
-	return AcceptedProposal{}, AcceptedAction{}, false
+	if len(pending) == 0 {
+		return AcceptedProposal{}, nil, false
+	}
+	return proposal, pending, true
 }
 
 func encodedActionResultBytes(prefix CheckpointPrefix) (int, error) {
