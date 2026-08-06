@@ -461,7 +461,7 @@ func (s *MCPAttemptSession) CallTool(ctx context.Context, name string, input jso
 		cause := mcpToolErrorCause(envelope.ErrorCode)
 		return ActionResult{}, &ToolCallError{Kind: envelope.ErrorKind, Code: envelope.ErrorCode, Cause: cause}
 	}
-	actionResult := ActionResult{Status: envelope.Status, Output: envelope.Output, ErrorCode: envelope.ErrorCode}
+	actionResult := ActionResult{Status: envelope.Status, Output: envelope.Output, ErrorCode: envelope.ErrorCode, traceAttributes: envelope.Attributes}
 	if err := actionResult.Validate(); err != nil {
 		return ActionResult{}, &ToolCallError{Kind: ToolErrorInvariant, Code: "action_result_invalid", Cause: err}
 	}
@@ -491,10 +491,11 @@ func (s *MCPAttemptSession) Close() error {
 }
 
 type mcpToolEnvelope struct {
-	Status    ActionResultStatus `json:"status,omitempty"`
-	Output    json.RawMessage    `json:"output,omitempty"`
-	ErrorKind ToolErrorKind      `json:"error_kind,omitempty"`
-	ErrorCode string             `json:"error_code,omitempty"`
+	Status     ActionResultStatus   `json:"status,omitempty"`
+	Output     json.RawMessage      `json:"output,omitempty"`
+	ErrorKind  ToolErrorKind        `json:"error_kind,omitempty"`
+	ErrorCode  string               `json:"error_code,omitempty"`
+	Attributes []agentobs.Attribute `json:"attributes,omitempty"`
 }
 
 func (h *MCPToolHost) executeMCPTool(ctx context.Context, request *mcp.CallToolRequest, expectedHandle string, expectedTool MaterializedMCPTool) (*mcp.CallToolResult, error) {
@@ -539,7 +540,7 @@ func (h *MCPToolHost) executeMCPTool(ctx context.Context, request *mcp.CallToolR
 	if err := result.Validate(); err != nil {
 		return mcpToolErrorResult(ToolErrorInvariant, "action_result_invalid"), nil
 	}
-	envelope := mcpToolEnvelope{Status: result.Status, Output: result.Output, ErrorCode: result.ErrorCode}
+	envelope := mcpToolEnvelope{Status: result.Status, Output: result.Output, ErrorCode: result.ErrorCode, Attributes: result.traceAttributes}
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(result.Status)}}, StructuredContent: envelope,
 	}, nil

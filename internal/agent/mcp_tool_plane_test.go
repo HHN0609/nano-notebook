@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ type mcpToolAction struct {
 	definition models.ActionDefinition
 	calls      []ActionRequest
 	err        error
+	attributes []agentobs.Attribute
 }
 
 func (a *mcpToolAction) Definition() models.ActionDefinition { return a.definition }
@@ -32,7 +34,7 @@ func (a *mcpToolAction) Execute(_ context.Context, request ActionRequest) (Actio
 	if a.err != nil {
 		return ActionResult{}, a.err
 	}
-	return ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"value":"5"}`)}, nil
+	return ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"value":"5"}`), traceAttributes: a.attributes}, nil
 }
 
 type mcpToolAuthority struct {
@@ -100,6 +102,52 @@ func TestMCPToolPlaneUsesOfficialInMemoryProtocolAndDefinitionScope(t *testing.T
 	}
 	if _, err := session.CallTool(context.Background(), "web_search", json.RawMessage(`{}`), "action-stable-2"); !isToolErrorKind(err, ToolErrorAuthorization) {
 		t.Fatalf("unallowlisted call err=%v", err)
+	}
+}
+
+func TestMCPToolPlaneRoundTripsActionTraceAttributes(t *testing.T) {
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchEvidence := testMCPAction("search_evidence")
+	searchEvidence.attributes = []agentobs.Attribute{
+		agentobs.Bool(TraceKeyDenseCompleted, true),
+		agentobs.Int64(TraceKeyRelevanceFilteredCount, 2),
+		agentobs.String(TraceKeyRelevanceFilteredIDs, `["chunk_a","chunk_b"]`),
+	}
+	registry, err := NewMCPToolRegistry(
+		MCPToolRegistration{Action: testMCPAction("calculate"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("current_time"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: searchEvidence, Scheduling: agentcatalog.ToolOrderedSync},
+		testDelegationMCPRegistration(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := NewMCPToolHost(catalog, registry, &mcpToolAuthority{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := host.OpenAttempt(context.Background(), AttemptToolScope{
+		Definition: agentcatalog.MustParseReference("chat.leader@1"),
+		Attempt:    Attempt{RunID: "run", JobID: "job", AttemptNo: 1, LeaseToken: "lease"}, RemainingActions: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	result, err := session.CallTool(context.Background(), "search_evidence", json.RawMessage(`{}`), "decision:1/action:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Trace attributes an Action sets on its ActionResult (e.g. RAG retrieval
+	// diagnostics) must survive the in-process MCP JSON-RPC round trip
+	// (mcp_tool_plane.go's executeMCPTool -> CallTool), not just a direct
+	// registry.Resolve invocation, or every search_evidence call routed
+	// through the MCP Tool Plane silently loses its trace attributes.
+	if !reflect.DeepEqual(result.traceAttributes, searchEvidence.attributes) {
+		t.Fatalf("traceAttributes=%+v want=%+v", result.traceAttributes, searchEvidence.attributes)
 	}
 }
 
