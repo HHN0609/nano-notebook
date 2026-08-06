@@ -15,6 +15,30 @@ func (noopDefinitionExecutor) ExecuteAttempt(context.Context, Attempt) AttemptRe
 	return AttemptResolution{Disposition: AttemptCompleted}
 }
 
+// TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel locks in
+// the production scheduling decision: calculate, current_time, and
+// search_evidence are read-only and side-effect-free, so a batch made up
+// only of these is eligible for Controller's concurrent execution path.
+// web_search stays ordered_sync because it calls an external, rate-limited
+// provider that concurrent calls would need their own accounting for.
+func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testing.T) {
+	capabilities := NanoToolCapabilities()
+	want := map[string]agentcatalog.ToolScheduling{
+		"calculate":       agentcatalog.ToolParallel,
+		"current_time":    agentcatalog.ToolParallel,
+		"search_evidence": agentcatalog.ToolParallel,
+		"web_search":      agentcatalog.ToolOrderedSync,
+	}
+	if len(capabilities) != len(want) {
+		t.Fatalf("capabilities=%+v", capabilities)
+	}
+	for name, scheduling := range want {
+		if got := capabilities[name].Scheduling; got != scheduling {
+			t.Fatalf("%s scheduling=%q want=%q", name, got, scheduling)
+		}
+	}
+}
+
 func TestExecutorRegistryResolvesExactDefinitionAndPolicyWithoutRole(t *testing.T) {
 	registry := newTestExecutorRegistry(t)
 	binding, err := registry.Resolve(agentcatalog.MustParseReference("chat.leader@1"))

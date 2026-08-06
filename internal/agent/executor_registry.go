@@ -113,11 +113,16 @@ func (r *ExecutorRegistry) Resolve(reference agentcatalog.Reference) (ResolvedEx
 	}, nil
 }
 
+// NanoToolCapabilities declares each tool's execution scheduling. calculate,
+// current_time, and search_evidence are read-only and side-effect-free, so
+// a batch made up only of these can run concurrently. web_search stays
+// ordered_sync: it calls an external, rate-limited provider, and batching
+// concurrent calls to it needs its own rate-limit accounting first.
 func NanoToolCapabilities() map[string]agentcatalog.ToolCapability {
 	return map[string]agentcatalog.ToolCapability{
-		"calculate":       {Scheduling: agentcatalog.ToolOrderedSync},
-		"current_time":    {Scheduling: agentcatalog.ToolOrderedSync},
-		"search_evidence": {Scheduling: agentcatalog.ToolOrderedSync},
+		"calculate":       {Scheduling: agentcatalog.ToolParallel},
+		"current_time":    {Scheduling: agentcatalog.ToolParallel},
+		"search_evidence": {Scheduling: agentcatalog.ToolParallel},
 		"web_search":      {Scheduling: agentcatalog.ToolOrderedSync},
 	}
 }

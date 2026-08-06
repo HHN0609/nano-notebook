@@ -147,9 +147,9 @@ func runSuite(args []string, output io.Writer) error {
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
 	webSearchTool := agent.NewWebSearchAction(searchProvider)
 	mcpToolRegistrations := []agent.MCPToolRegistration{
-		{Action: calculateTool, Scheduling: agentcatalog.ToolOrderedSync},
-		{Action: currentTimeTool, Scheduling: agentcatalog.ToolOrderedSync},
-		{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolOrderedSync},
+		{Action: calculateTool, Scheduling: agentcatalog.ToolParallel},
+		{Action: currentTimeTool, Scheduling: agentcatalog.ToolParallel},
+		{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolParallel},
 		{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync},
 	}
 	configuredDelegationTools, err := agent.NewConfiguredDelegationToolRegistrations(
