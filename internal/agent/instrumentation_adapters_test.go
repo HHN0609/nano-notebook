@@ -219,10 +219,11 @@ func TestSearchEvidenceActionRecordsRAGMetadataWithoutQueryOrEvidenceBodies(t *t
 		Candidates: []retrieval.EvidenceCandidate{{ID: "chunk_a", SourceID: "src_a", RevisionID: "evr_a", Preview: "secret evidence"}},
 		Degraded:   true, Degradations: []string{"reranker_unavailable"},
 		Diagnostics: retrieval.SearchDiagnostics{
-			Dense:        retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_a", "chunk_b"}},
-			BM25:         retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_b"}},
-			Fused:        retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_b", "chunk_a"}},
-			EvidenceLoad: retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_a"}},
+			Dense:             retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_a", "chunk_b"}},
+			BM25:              retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_b"}},
+			Fused:             retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_b", "chunk_a"}},
+			EvidenceLoad:      retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_a"}},
+			RelevanceFiltered: []string{"chunk_b"},
 		},
 	}}
 	action := NewSearchEvidenceAction(backend)
@@ -238,7 +239,9 @@ func TestSearchEvidenceActionRecordsRAGMetadataWithoutQueryOrEvidenceBodies(t *t
 	if stringAttribute(start, TraceKeySearchPurpose) != "compare stated methods" ||
 		stringAttribute(terminal, TraceKeyDenseCandidateIDs) != `["chunk_a","chunk_b"]` ||
 		stringAttribute(terminal, TraceKeyRRFTransitionIDs) != `["chunk_b","chunk_a"]` ||
-		stringAttribute(terminal, TraceKeyRetrievalDegradations) != `["reranker_unavailable"]` {
+		stringAttribute(terminal, TraceKeyRetrievalDegradations) != `["reranker_unavailable"]` ||
+		stringAttribute(terminal, TraceKeyRelevanceFilteredIDs) != `["chunk_b"]` ||
+		int64Attribute(terminal, TraceKeyRelevanceFilteredCount) != 1 {
 		t.Fatalf("RAG records=%#v", records)
 	}
 	for _, record := range records[len(records)-2:] {

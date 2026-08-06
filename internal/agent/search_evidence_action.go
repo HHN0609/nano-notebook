@@ -99,6 +99,8 @@ func searchEvidenceTraceAttributes(result retrieval.SearchResult) []agentobs.Att
 		agentobs.Int64(TraceKeyEvidenceLoadDuration, diagnostics.EvidenceLoad.DurationNanoseconds),
 		agentobs.String(TraceKeyRerankTransitionIDs, traceIdentityList(diagnostics.Rerank.CandidateIDs)),
 		agentobs.Int64(TraceKeyRerankDuration, diagnostics.Rerank.DurationNanoseconds),
+		agentobs.Int64(TraceKeyRelevanceFilteredCount, int64(len(diagnostics.RelevanceFiltered))),
+		agentobs.String(TraceKeyRelevanceFilteredIDs, traceIdentityList(diagnostics.RelevanceFiltered)),
 		agentobs.Int64(TraceKeySelectedEvidenceCount, int64(len(result.Candidates))),
 		agentobs.Bool(TraceKeyRetrievalDegraded, result.Degraded),
 		agentobs.String(TraceKeyRetrievalDegradations, traceIdentityList(result.Degradations)),

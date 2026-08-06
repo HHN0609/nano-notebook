@@ -120,6 +120,8 @@ const (
 	TraceKeyRRFTransitionIDs             = "nano.rag.rrf.candidate_ids"
 	TraceKeyEvidenceLoadIDs              = "nano.rag.evidence_load.candidate_ids"
 	TraceKeyRerankTransitionIDs          = "nano.rag.rerank.candidate_ids"
+	TraceKeyRelevanceFilteredCount       = "nano.rag.relevance_filter.count"
+	TraceKeyRelevanceFilteredIDs         = "nano.rag.relevance_filter.candidate_ids"
 	TraceKeySelectedEvidenceCount        = "nano.rag.selected_evidence.count"
 	TraceKeyRetrievalDegraded            = "nano.rag.retrieval.degraded"
 	TraceKeyRetrievalDegradations        = "nano.rag.retrieval.degradations"
