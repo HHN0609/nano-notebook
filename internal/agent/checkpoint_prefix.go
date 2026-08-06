@@ -87,22 +87,31 @@ func LoadCheckpointPrefix(ctx context.Context, checkpoints []Checkpoint) (Checkp
 				return CheckpointPrefix{}, invalidCheckpoint("Action Result has no proposal")
 			}
 			proposal := &prefix.Proposals[len(prefix.Proposals)-1]
-			missingIndex := firstMissingResult(*proposal)
-			if missingIndex < 0 || checkpoint.DecisionNo != proposal.DecisionNo || checkpoint.ActionIndex == nil || *checkpoint.ActionIndex != missingIndex {
+			// Results within a proposal's batch may be accepted in any order
+			// (not just the first still-missing index): a parallel
+			// ToolBatchExecutor may finish and commit sibling actions before
+			// an earlier-index action completes. Model context is built by
+			// iterating proposal.Actions in index order regardless of commit
+			// order, so this does not affect what the model sees.
+			index := -1
+			if checkpoint.ActionIndex != nil {
+				index = *checkpoint.ActionIndex
+			}
+			if checkpoint.DecisionNo != proposal.DecisionNo || index < 0 || index >= len(proposal.Actions) || proposal.Actions[index].Result != nil {
 				return CheckpointPrefix{}, invalidCheckpoint("Action Result is out of order")
 			}
 			var payload actionResultCheckpointPayload
-			if err := json.Unmarshal(checkpoint.Payload, &payload); err != nil || payload.ActionID != proposal.Actions[missingIndex].ActionID {
+			if err := json.Unmarshal(checkpoint.Payload, &payload); err != nil || payload.ActionID != proposal.Actions[index].ActionID {
 				return CheckpointPrefix{}, invalidCheckpoint("invalid Action Result payload")
 			}
 			result := ActionResult{Status: payload.Status, Output: payload.Output, ErrorCode: payload.ErrorCode}
-			expected, err := NewActionResultCheckpoint(proposal.DecisionNo, missingIndex, proposal.Actions[missingIndex].ActionID, result)
+			expected, err := NewActionResultCheckpoint(proposal.DecisionNo, index, proposal.Actions[index].ActionID, result)
 			if err != nil || !checkpointMatches(checkpoint, expected) {
 				return CheckpointPrefix{}, invalidCheckpoint("Action Result identity or payload mismatch")
 			}
 			copyResult := result
 			copyResult.Output = append(json.RawMessage(nil), result.Output...)
-			proposal.Actions[missingIndex].Result = &copyResult
+			proposal.Actions[index].Result = &copyResult
 		case CheckpointFinalDraft:
 			if hasIncompleteProposal(prefix) || checkpoint.DecisionNo != nextDecision {
 				return CheckpointPrefix{}, invalidCheckpoint("unexpected Final Draft decision %d", checkpoint.DecisionNo)

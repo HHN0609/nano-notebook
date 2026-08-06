@@ -102,6 +102,76 @@ func TestLoadCheckpointPrefixReconstructsAcceptedOutcomes(t *testing.T) {
 	}
 }
 
+// TestLoadCheckpointPrefixAcceptsOutOfOrderActionResults proves that Action
+// Results within a proposal's batch may be committed in any order — not
+// just index 0, 1, 2, ... — which is required for a parallel
+// ToolBatchExecutor to commit whichever sibling actions finish first without
+// waiting for an earlier-index action that is still running or retrying.
+// The reconstructed proposal.Actions slice must still be in index order
+// regardless of commit order, since that is what model context is built
+// from.
+func TestLoadCheckpointPrefixAcceptsOutOfOrderActionResults(t *testing.T) {
+	proposal, err := NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "current_time", Input: json.RawMessage(`{}`)},
+		{Name: "calculate", Input: json.RawMessage(`{"operation":"add","operands":["1","2"]}`)},
+		{Name: "calculate", Input: json.RawMessage(`{"operation":"add","operands":["3","4"]}`)},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result0, err := NewActionResultCheckpoint(1, 0, "decision:1/action:0", ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"time_zone":"UTC"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result1, err := NewActionResultCheckpoint(1, 1, "decision:1/action:1", ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"value":"3"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result2, err := NewActionResultCheckpoint(1, 2, "decision:1/action:2", ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"value":"7"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Commit order is 2, then 0, then 1 — the reverse-ish of index order,
+	// simulating index 0's action still being retried while its siblings
+	// already finished.
+	checkpoints := []Checkpoint{
+		{SequenceNo: 1, PendingCheckpoint: proposal},
+		{SequenceNo: 2, PendingCheckpoint: result2},
+		{SequenceNo: 3, PendingCheckpoint: result0},
+		{SequenceNo: 4, PendingCheckpoint: result1},
+	}
+	for length := 0; length <= len(checkpoints); length++ {
+		if _, err := LoadCheckpointPrefix(context.Background(), checkpoints[:length]); err != nil {
+			t.Fatalf("legal out-of-order prefix length %d: %v", length, err)
+		}
+	}
+	prefix, err := LoadCheckpointPrefix(context.Background(), checkpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := prefix.Proposals[0].Actions
+	if len(actions) != 3 {
+		t.Fatalf("actions = %+v", actions)
+	}
+	if actions[0].Result == nil || string(actions[0].Result.Output) != `{"time_zone":"UTC"}` {
+		t.Fatalf("action 0 = %+v", actions[0])
+	}
+	if actions[1].Result == nil || string(actions[1].Result.Output) != `{"value":"3"}` {
+		t.Fatalf("action 1 = %+v", actions[1])
+	}
+	if actions[2].Result == nil || string(actions[2].Result.Output) != `{"value":"7"}` {
+		t.Fatalf("action 2 = %+v", actions[2])
+	}
+
+	// A second Result for an index that already has one is still rejected,
+	// whether or not it repeats an earlier value — this preserves the
+	// original "duplicate result" invariant under the relaxed ordering.
+	duplicate := append(append([]Checkpoint(nil), checkpoints...), Checkpoint{SequenceNo: 5, PendingCheckpoint: result0})
+	if _, err := LoadCheckpointPrefix(context.Background(), duplicate); !errors.Is(err, ErrCheckpointInvalid) {
+		t.Fatalf("duplicate result at committed index: err = %v, want ErrCheckpointInvalid", err)
+	}
+}
+
 func TestLoadCheckpointPrefixRejectsIllegalDurableHistory(t *testing.T) {
 	proposal, _ := NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
 		{Name: "current_time", Input: json.RawMessage(`{}`)},
@@ -112,6 +182,7 @@ func TestLoadCheckpointPrefixRejectsIllegalDurableHistory(t *testing.T) {
 	final1, _ := NewFinalDraftCheckpoint(1, models.FinalDraft{Text: "Done."})
 	final2, _ := NewFinalDraftCheckpoint(2, models.FinalDraft{Text: "Done."})
 	proposal2, _ := NewProposalCheckpoint(2, models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "current_time", Input: json.RawMessage(`{}`)}}})
+	resultOutOfRange, _ := NewActionResultCheckpoint(1, 5, "decision:1/action:5", ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{}`)})
 	badHash := proposal
 	badHash.PayloadSHA256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	tests := []struct {
@@ -120,8 +191,8 @@ func TestLoadCheckpointPrefixRejectsIllegalDurableHistory(t *testing.T) {
 	}{
 		{name: "sequence gap", checkpoints: []Checkpoint{{SequenceNo: 2, PendingCheckpoint: proposal}}},
 		{name: "result without proposal", checkpoints: []Checkpoint{{SequenceNo: 1, PendingCheckpoint: result0}}},
-		{name: "skipped action", checkpoints: []Checkpoint{{SequenceNo: 1, PendingCheckpoint: proposal}, {SequenceNo: 2, PendingCheckpoint: result1}}},
-		{name: "next decision before completed batch", checkpoints: []Checkpoint{{SequenceNo: 1, PendingCheckpoint: proposal}, {SequenceNo: 2, PendingCheckpoint: final2}}},
+		{name: "result index out of range", checkpoints: []Checkpoint{{SequenceNo: 1, PendingCheckpoint: proposal}, {SequenceNo: 2, PendingCheckpoint: resultOutOfRange}}},
+		{name: "next decision before completed batch", checkpoints: []Checkpoint{{SequenceNo: 1, PendingCheckpoint: proposal}, {SequenceNo: 2, PendingCheckpoint: result1}, {SequenceNo: 3, PendingCheckpoint: final2}}},
 		{name: "decision gap", checkpoints: []Checkpoint{{SequenceNo: 1, PendingCheckpoint: final2}}},
 		{name: "outcome after final", checkpoints: []Checkpoint{{SequenceNo: 1, PendingCheckpoint: final1}, {SequenceNo: 2, PendingCheckpoint: proposal2}}},
 		{name: "payload hash conflict", checkpoints: []Checkpoint{{SequenceNo: 1, PendingCheckpoint: badHash}}},
