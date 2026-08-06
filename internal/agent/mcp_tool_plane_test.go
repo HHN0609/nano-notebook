@@ -105,6 +105,47 @@ func TestMCPToolPlaneUsesOfficialInMemoryProtocolAndDefinitionScope(t *testing.T
 	}
 }
 
+func TestMCPToolRegistryAcceptsParallelScheduling(t *testing.T) {
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchEvidence := testMCPAction("search_evidence")
+	registry, err := NewMCPToolRegistry(
+		MCPToolRegistration{Action: testMCPAction("calculate"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("current_time"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: searchEvidence, Scheduling: agentcatalog.ToolParallel},
+		MCPToolRegistration{Action: testMCPAction("web_search"), Scheduling: agentcatalog.ToolOrderedSync},
+		testDelegationMCPRegistration(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, ok := registry.Resolve("search_evidence")
+	if !ok || tool.Scheduling != agentcatalog.ToolParallel {
+		t.Fatalf("search_evidence tool=%+v found=%t", tool, ok)
+	}
+	host, err := NewMCPToolHost(catalog, registry, &mcpToolAuthority{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := host.OpenAttempt(context.Background(), AttemptToolScope{
+		Definition: agentcatalog.MustParseReference("chat.leader@1"),
+		Attempt:    Attempt{RunID: "run-parallel", JobID: "job-parallel", AttemptNo: 1, LeaseToken: "lease-parallel"}, RemainingActions: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	result, err := session.CallTool(context.Background(), "search_evidence", json.RawMessage(`{}`), "action-parallel-1")
+	if err != nil || result.Status != ActionSucceeded {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(searchEvidence.calls) != 1 {
+		t.Fatalf("calls=%+v", searchEvidence.calls)
+	}
+}
+
 func TestMCPToolPlaneRoundTripsActionTraceAttributes(t *testing.T) {
 	catalog, err := agentcatalog.LoadEmbedded()
 	if err != nil {

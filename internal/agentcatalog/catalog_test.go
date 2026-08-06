@@ -233,6 +233,32 @@ func TestValidateBindingsAllowsOnlyCapabilityNarrowing(t *testing.T) {
 	}
 }
 
+func TestValidateBindingsAcceptsParallelToolScheduling(t *testing.T) {
+	catalog, err := LoadFS(minimalCatalogFS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := Bindings{
+		Prompts: map[Reference]bool{MustParseReference("prompt.test@1"): true},
+		Tools:   map[string]ToolCapability{"tool": {Scheduling: ToolParallel}},
+		Executors: map[string]ExecutorCapability{
+			"test": {
+				PromptPurposes: map[string]bool{"main": true}, Tools: map[string]bool{"tool": true},
+				Contracts: map[Reference]bool{MustParseReference("input.test@1"): true, MustParseReference("result.test@1"): true},
+				MaxLimits: Limits{ModelCalls: 1, Actions: 1, ActionBatch: 1, ContextBytes: 1024, ResultBytes: 1024, Attempts: 1},
+			},
+		},
+	}
+	if err := catalog.ValidateBindings(bindings); err != nil {
+		t.Fatal(err)
+	}
+
+	bindings.Tools = map[string]ToolCapability{"tool": {Scheduling: ToolExclusiveDelegation}}
+	if err := catalog.ValidateBindings(bindings); err == nil || !strings.Contains(strings.ToLower(err.Error()), "scheduling") {
+		t.Fatalf("exclusive_delegation on a regular tool binding err=%v", err)
+	}
+}
+
 func TestGeneratedDelegationToolNameIsDeterministicAndBounded(t *testing.T) {
 	reference := MustParseReference("research.source-discovery@1")
 	name, err := DelegationToolName(reference)

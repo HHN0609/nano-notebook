@@ -87,10 +87,10 @@ func NewMCPToolRegistry(registrations ...MCPToolRegistration) (*MCPToolRegistry,
 	actions := make([]Action, 0, len(registrations))
 	for _, registration := range registrations {
 		if registration.Action == nil ||
-			(registration.Scheduling != agentcatalog.ToolOrderedSync && registration.Scheduling != agentcatalog.ToolExclusiveDelegation) {
+			(registration.Scheduling != agentcatalog.ToolOrderedSync && registration.Scheduling != agentcatalog.ToolParallel && registration.Scheduling != agentcatalog.ToolExclusiveDelegation) {
 			return nil, errors.New("invalid MCP Tool registration")
 		}
-		if registration.Scheduling == agentcatalog.ToolOrderedSync {
+		if registration.Scheduling == agentcatalog.ToolOrderedSync || registration.Scheduling == agentcatalog.ToolParallel {
 			actions = append(actions, registration.Action)
 		}
 	}
@@ -113,7 +113,7 @@ func NewMCPToolRegistry(registrations ...MCPToolRegistration) (*MCPToolRegistry,
 		if _, duplicate := registry.byName[definition.Name]; duplicate {
 			return nil, fmt.Errorf("duplicate MCP Tool %q", definition.Name)
 		}
-		if registration.Scheduling == agentcatalog.ToolOrderedSync {
+		if registration.Scheduling == agentcatalog.ToolOrderedSync || registration.Scheduling == agentcatalog.ToolParallel {
 			if _, ok := validated.Resolve(definition.Name); !ok {
 				return nil, fmt.Errorf("MCP Tool %q was not validated", definition.Name)
 			}

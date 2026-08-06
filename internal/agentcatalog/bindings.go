@@ -10,6 +10,7 @@ type ToolScheduling string
 
 const (
 	ToolOrderedSync         ToolScheduling = "ordered_sync"
+	ToolParallel            ToolScheduling = "parallel"
 	ToolExclusiveDelegation ToolScheduling = "exclusive_delegation"
 )
 
@@ -64,7 +65,7 @@ func (c Catalog) ValidateBindings(bindings Bindings) error {
 			if !exists || !capability.Tools[tool] {
 				return fmt.Errorf("definition %s references unbound tool %q", reference, tool)
 			}
-			if toolCapability.Scheduling != ToolOrderedSync {
+			if toolCapability.Scheduling != ToolOrderedSync && toolCapability.Scheduling != ToolParallel {
 				return fmt.Errorf("tool %q has unsupported scheduling %q", tool, toolCapability.Scheduling)
 			}
 		}
