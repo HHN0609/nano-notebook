@@ -466,9 +466,6 @@ func (c *Controller) executeAction(
 	proposal AcceptedProposal,
 	action AcceptedAction,
 ) error {
-	if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
-		return c.handleRuntimeError(ctx, attempt, err)
-	}
 	var executor Action
 	if toolSession == nil {
 		var ok bool
@@ -522,9 +519,6 @@ func (c *Controller) executeAction(
 	}
 	if len(checkpoint.Payload) > execution.ActionResultByteLimit || usedResultBytes+len(checkpoint.Payload) > execution.ActionResultsByteLimit {
 		return c.fail(ctx, attempt, ErrorAgentBudgetExhausted, errors.New("Action Result byte budget exceeded"))
-	}
-	if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
-		return c.handleRuntimeError(ctx, attempt, err)
 	}
 	if _, err := c.runtime.AppendCheckpoint(ctx, attempt, checkpoint); err != nil {
 		return c.handleRuntimeError(ctx, attempt, err)
