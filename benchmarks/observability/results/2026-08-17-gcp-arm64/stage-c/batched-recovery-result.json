@@ -1,0 +1,1 @@
+{"schema_version":1,"consumer_instances":4,"start_lag_batches":6609,"recovery_ms":16921,"end_lag_batches":0,"raw_records_after_recovery":17992856,"unique_traces_after_recovery":1166210,"producer_dropped_records":0,"consumer_restarts":0,"measured_record_loss":0}
