@@ -8,6 +8,81 @@ rule_files:
 evaluation_interval: 30s
 
 tests:
+  # --- Trace pipeline lag: sustained backlog fires ---
+  - interval: 1m
+    input_series:
+      - series: 'nano_agent_trace_consumer_lag_records{partition="0"}'
+        values: "1001x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NanoAgentTraceConsumerLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: ticket
+            exp_annotations:
+              summary: "Agent Trace Kafka consumer lag or oldest-message age is sustained above the provisional limit"
+              runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+
+  # --- Trace pipeline freshness: delayed searchable data fires ---
+  - interval: 1m
+    input_series:
+      - series: 'nano_agent_trace_searchable_freshness_seconds{}'
+        values: "6x12"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NanoAgentTraceSearchableFreshnessHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "Kafka-acknowledged Trace data is more than five seconds from searchable ClickHouse state"
+              runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+
+  # --- Trace projection: raw and summary watermarks stay separated ---
+  - interval: 1m
+    input_series:
+      - series: 'nano_agent_trace_raw_summary_watermark_gap_seconds{}'
+        values: "6x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NanoAgentTraceProjectionWatermarksDiverged
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "ClickHouse raw Trace records remain ahead of summary projections"
+              runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+
+  # --- Trace processor: quarantine spike fires ---
+  - interval: 1m
+    input_series:
+      - series: 'nano_agent_trace_processor_messages_total{result="quarantined"}'
+        values: "0+60x15"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: NanoAgentTraceProcessorFailures
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "Agent Trace persistence, quarantine, or offset commits are failing"
+              runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+
+  # --- ClickHouse: sustained insert failures fire ---
+  - interval: 1m
+    input_series:
+      - series: 'nano_clickhouse_requests_total{operation="insert",outcome="error"}'
+        values: "0+60x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NanoClickHouseOperationErrors
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "ClickHouse Trace insert or analytics query errors are sustained"
+              runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+
   # --- Task success rate: true positive (fast burn) ---
   - interval: 30s
     input_series:

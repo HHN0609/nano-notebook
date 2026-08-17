@@ -98,6 +98,51 @@ groups:
           summary: "A metric is receiving label values outside its allowlist — instrumentation defect, not normal operation (PRD criterion 13)"
           runbook: "docs/engineering/BACKEND_ENGINEERING.md#sprint-12-alert-runbook-nanometricslabelrejected"
 
+  - name: nano_trace_analytics_pipeline
+    rules:
+      - alert: NanoAgentTraceConsumerLagHigh
+        expr: max(nano_agent_trace_consumer_lag_records) > 1000 or max(nano_agent_trace_oldest_message_age_seconds) > 5
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Agent Trace Kafka consumer lag or oldest-message age is sustained above the provisional limit"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+      - alert: NanoAgentTraceSearchableFreshnessHigh
+        expr: max(nano_agent_trace_searchable_freshness_seconds) > 5
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Kafka-acknowledged Trace data is more than five seconds from searchable ClickHouse state"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+      - alert: NanoAgentTraceProjectionWatermarksDiverged
+        expr: max(nano_agent_trace_raw_summary_watermark_gap_seconds) > 5
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "ClickHouse raw Trace records remain ahead of summary projections"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+      - alert: NanoAgentTraceProcessorFailures
+        expr: sum(rate(nano_agent_trace_processor_messages_total{result=~"retry|quarantined"}[5m])) > 0.1 or increase(nano_agent_trace_offset_commit_failures_total[10m]) > 0
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: "Agent Trace persistence, quarantine, or offset commits are failing"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+      - alert: NanoClickHouseOperationErrors
+        expr: sum(rate(nano_clickhouse_requests_total{outcome="error"}[5m])) > 0.05
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: "ClickHouse Trace insert or analytics query errors are sustained"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+      - alert: NanoTraceAnalyticsAPIUnhealthy
+        expr: sum(rate(nano_http_requests_total{route="/api/admin/trace-analytics/",code=~"5.."}[5m])) / clamp_min(sum(rate(nano_http_requests_total{route="/api/admin/trace-analytics/"}[5m])), 0.001) > 0.05 or histogram_quantile(0.95, sum by (le) (rate(nano_http_request_duration_seconds_bucket{route="/api/admin/trace-analytics/"}[5m]))) > 2
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "Trace Analytics API error ratio or p95 latency exceeds its provisional limit"
+          runbook: "docs/engineering/BACKEND_ENGINEERING.md#trace-analytics-pipeline-runbook"
+
   - name: nano_leaks
     rules:
       # Live heap keyed alert (PRD criteria 53, 67): requires sustained

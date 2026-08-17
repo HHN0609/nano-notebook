@@ -153,6 +153,68 @@
         { "expr": "topk(10, sum by (route, code) (rate(nano_http_requests_total[5m])))", "legendFormat": "{{route}} [{{code}}]" }
       ],
       "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 12,
+      "title": "Agent Trace Kafka lag and oldest message age",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "nano_agent_trace_consumer_lag_records", "legendFormat": "partition {{partition}} lag" },
+        { "expr": "nano_agent_trace_oldest_message_age_seconds", "legendFormat": "partition {{partition}} age" }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Trace Processor results and quarantine",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "sum by (result) (rate(nano_agent_trace_processor_messages_total[5m]))", "legendFormat": "{{result}}" },
+        { "expr": "rate(nano_agent_trace_offset_commit_failures_total[5m])", "legendFormat": "offset commit failures" }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Kafka to searchable ClickHouse freshness",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [{ "expr": "nano_agent_trace_searchable_freshness_seconds", "legendFormat": "freshness {{instance}}" }],
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 5 }] } } }
+    },
+    {
+      "id": 15,
+      "title": "ClickHouse insert/query rate, errors, and p95",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "sum by (operation, outcome) (rate(nano_clickhouse_requests_total[5m]))", "legendFormat": "{{operation}} {{outcome}}" },
+        { "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(nano_clickhouse_request_duration_seconds_bucket[5m])))", "legendFormat": "{{operation}} p95" }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Trace Analytics API error rate and p95",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        { "expr": "sum(rate(nano_http_requests_total{route=\"/api/admin/trace-analytics/\",code=~\"5..\"}[5m])) / clamp_min(sum(rate(nano_http_requests_total{route=\"/api/admin/trace-analytics/\"}[5m])), 0.001)", "legendFormat": "error ratio" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(nano_http_request_duration_seconds_bucket{route=\"/api/admin/trace-analytics/\"}[5m])))", "legendFormat": "p95" }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Raw to summary projection watermark gap",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 54 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [{ "expr": "nano_agent_trace_raw_summary_watermark_gap_seconds", "legendFormat": "gap {{instance}}" }],
+      "fieldConfig": { "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 5 }] } } }
     }
   ]
 }

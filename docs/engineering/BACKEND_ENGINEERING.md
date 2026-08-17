@@ -377,3 +377,38 @@ committed/rolled back on every path) before assuming the pool just needs a
 higher `MaxConns`; `internal/app/db.go` and each service's pool
 configuration set `MaxConns` deliberately low to catch leaks early rather
 than paper over them with a bigger pool.
+
+## Trace analytics pipeline runbook
+
+Use the product Trace Analytics page to investigate Agent/model/tool behavior;
+use the Grafana operations dashboard to decide whether those numbers are
+trustworthy. A product anomaly with healthy lag, freshness, Processor, and
+ClickHouse panels is an Agent/runtime investigation. An infrastructure panel
+in alert state means the product dashboard can be stale or incomplete and the
+pipeline must be repaired first.
+
+1. Check `nano_agent_trace_consumer_lag_records` and
+   `nano_agent_trace_oldest_message_age_seconds` by partition. If only one
+   partition grows, inspect that keyed workload; if all grow, check Processor
+   capacity and Kafka connectivity.
+2. Check `nano_agent_trace_processor_messages_total{result}`. `retry` leaves
+   the source offset authoritative; `quarantined` means the immutable source
+   coordinates and payload were durably moved to the quarantine topic. Never
+   manually advance an offset to clear the graph.
+3. Check `nano_agent_trace_searchable_freshness_seconds` and
+   `nano_agent_trace_raw_summary_watermark_gap_seconds`. Above five seconds,
+   the product page shows a stale-data warning; a persistent raw/summary gap
+   means raw retention advanced while its summary projection did not. Compare
+   with ClickHouse insert errors before changing Kafka settings.
+4. Check `nano_clickhouse_requests_total` and
+   `nano_clickhouse_request_duration_seconds`. For storage pressure, inspect
+   ClickHouse `system.parts`, `system.merges`, `system.disks`, and
+   `system.query_log`; do not add Trace or Notebook IDs to Prometheus labels.
+5. Check the Analytics API route metrics. A failing API with healthy
+   ClickHouse queries points to Control Plane auth/proxying; failing ClickHouse
+   query metrics point to aggregate SQL or warehouse capacity.
+
+After recovery, verify one active Run reaches terminal state in Analytics,
+then replay the same Kafka message and confirm Run counts do not change. Keep
+provisional thresholds under review using the frozen-query benchmark; do not
+loosen the 30-day query bound to silence latency alerts.
