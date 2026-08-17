@@ -383,6 +383,108 @@ func TestControllerResumesFirstIncompleteActionWithoutRepeatingAcceptedResult(t 
 	}
 }
 
+func TestControllerReconcilesUnknownNonReplaySafeActionAfterCrash(t *testing.T) {
+	executionOrder := make([]string, 0, 1)
+	action := &recordingAction{name: "record", order: &executionOrder}
+	registry, err := NewActionRegistry(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	runtime.execution.Attempt.AttemptNo = 2
+	proposal, err := NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{{
+		Name: "record", Input: json.RawMessage(`{"value":"completion-unknown"}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.checkpoints = []Checkpoint{{SequenceNo: 1, PendingCheckpoint: proposal}}
+	model := &decisionModelStub{decisions: []models.ModelDecision{{Final: &models.FinalDraft{Text: "Recovered."}}}}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(executionOrder) != 0 {
+		t.Fatalf("non-replay-safe Action executed after crash: %v", executionOrder)
+	}
+	prefix, err := LoadCheckpointPrefix(context.Background(), runtime.checkpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := prefix.Proposals[0].Actions[0].Result
+	if result == nil || result.Status != ActionDomainError || result.ErrorCode != ErrorActionInterrupted {
+		t.Fatalf("closing Result=%+v", result)
+	}
+}
+
+func TestControllerReplaysExplicitlySafeActionAfterCrash(t *testing.T) {
+	executionOrder := make([]string, 0, 1)
+	action := &recordingAction{name: "record", order: &executionOrder, crashReplaySafe: true}
+	registry, err := NewActionRegistry(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	runtime.execution.Attempt.AttemptNo = 2
+	proposal, err := NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{{
+		Name: "record", Input: json.RawMessage(`{"value":"safe-replay"}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.checkpoints = []Checkpoint{{SequenceNo: 1, PendingCheckpoint: proposal}}
+	model := &decisionModelStub{decisions: []models.ModelDecision{{Final: &models.FinalDraft{Text: "Recovered."}}}}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(executionOrder) != 1 || executionOrder[0] != "safe-replay" {
+		t.Fatalf("safe replay execution=%v", executionOrder)
+	}
+}
+
+func TestControllerCompactsAndRetriesContextOverflowOnce(t *testing.T) {
+	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &[]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	base.execution.ModelContext.Policy.OverflowRetryLimit = 1
+	runtime := &contextPreparationRuntimeStub{controllerRuntimeStub: base}
+	model := &decisionModelStub{
+		errors:    []error{&models.ModelError{Kind: models.ErrorContextOverflow, Err: errors.New("private Provider body")}, nil},
+		decisions: []models.ModelDecision{{Final: &models.FinalDraft{Text: "Recovered after Compaction."}}},
+	}
+	if err := NewController(runtime, model, registry).Execute(context.Background(), base.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) != 2 || len(runtime.triggerReasons) != 2 || runtime.triggerReasons[0] != "" ||
+		runtime.triggerReasons[1] != CompactionTriggerProviderOverflow || len(runtime.published) != 1 {
+		t.Fatalf("requests=%d triggers=%v published=%v", len(model.requests), runtime.triggerReasons, runtime.published)
+	}
+}
+
+func TestControllerStopsAfterSecondContextOverflow(t *testing.T) {
+	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &[]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	base.execution.ModelContext.Policy.OverflowRetryLimit = 1
+	runtime := &contextPreparationRuntimeStub{controllerRuntimeStub: base}
+	model := &decisionModelStub{errors: []error{
+		&models.ModelError{Kind: models.ErrorContextOverflow, Err: errors.New("first")},
+		&models.ModelError{Kind: models.ErrorContextOverflow, Err: errors.New("second")},
+	}}
+	err = NewController(runtime, model, registry).Execute(context.Background(), base.execution.Attempt)
+	if !errors.Is(err, ErrContextBudgetExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(model.requests) != 2 || len(runtime.failed) != 1 || runtime.failed[0] != ErrContextBudgetExceeded.Error() {
+		t.Fatalf("requests=%d failed=%v", len(model.requests), runtime.failed)
+	}
+}
+
 func TestControllerRejectsOverCapacityBatchAndUsesActionDisabledFinalDecision(t *testing.T) {
 	executionOrder := make([]string, 0)
 	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &executionOrder})
@@ -834,6 +936,16 @@ type queryContextControllerRuntimeStub struct {
 	composerCalls int
 }
 
+type contextPreparationRuntimeStub struct {
+	*controllerRuntimeStub
+	triggerReasons []string
+}
+
+func (r *contextPreparationRuntimeStub) PrepareDecisionRequest(_ context.Context, execution Execution, _ CheckpointPrefix, definitions []models.ActionDefinition, _ DecisionModel, triggerReason string) (models.ModelRequest, error) {
+	r.triggerReasons = append(r.triggerReasons, triggerReason)
+	return models.ModelRequest{Model: execution.Model, ActionDefinitions: cloneActionDefinitions(definitions)}, nil
+}
+
 type queryContextTraceRuntimeStub struct {
 	*queryContextControllerRuntimeStub
 	tracer       *agentobs.Tracer
@@ -961,13 +1073,16 @@ func boolRecordAttribute(record agentobs.Record, key string) bool {
 }
 
 type recordingAction struct {
-	name     string
-	order    *[]string
-	calls    int
-	started  chan<- struct{}
-	proceed  <-chan struct{}
-	attempts []Attempt
+	name            string
+	order           *[]string
+	calls           int
+	started         chan<- struct{}
+	proceed         <-chan struct{}
+	attempts        []Attempt
+	crashReplaySafe bool
 }
+
+func (a *recordingAction) CrashReplaySafe() bool { return a.crashReplaySafe }
 
 type toolErrorAction struct {
 	name string

@@ -18,7 +18,7 @@ import (
 
 const maxMCPToolNameLength = 128
 
-//go:embed definitions/*.json model-policies/*.json contracts/*.schema.json releases/*.json
+//go:embed definitions/*.json model-policies/*.json provider-capabilities/*.json model-context-policies/*.json contracts/*.schema.json releases/*.json
 var embeddedFiles embed.FS
 
 type Reference struct {
@@ -125,6 +125,56 @@ func (p ModelPolicy) Reference() Reference {
 	return Reference{Identity: p.Identity, Version: p.Version}
 }
 
+type ProviderModelCapability struct {
+	Identity            string `json:"identity"`
+	Version             int    `json:"version"`
+	ProviderModel       string `json:"provider_model"`
+	ResolvedModel       string `json:"resolved_model"`
+	ContextWindowTokens int    `json:"context_window_tokens"`
+	MaxInputTokens      int    `json:"max_input_tokens"`
+	MaxOutputTokens     int    `json:"max_output_tokens"`
+	TokenizerIdentity   string `json:"tokenizer_identity"`
+	TokenizerVersion    string `json:"tokenizer_version"`
+	InvocationMode      string `json:"invocation_mode"`
+	SHA256              string `json:"-"`
+	SourcePath          string `json:"-"`
+}
+
+func (c ProviderModelCapability) Reference() Reference {
+	return Reference{Identity: c.Identity, Version: c.Version}
+}
+
+type ModelContextPolicy struct {
+	Identity               string    `json:"identity"`
+	Version                int       `json:"version"`
+	InvocationModelPolicy  Reference `json:"invocation_model_policy"`
+	ProviderCapability     Reference `json:"provider_capability"`
+	PinnedMaxOutputTokens  int       `json:"pinned_max_output_tokens"`
+	SoftInputLimitTokens   int       `json:"soft_input_limit_tokens"`
+	EstimationSafetyTokens int       `json:"estimation_safety_tokens"`
+	KeepRecentTokens       int       `json:"keep_recent_tokens"`
+	SummaryMaxOutputTokens int       `json:"summary_max_output_tokens"`
+	OverflowRetryLimit     int       `json:"overflow_retry_limit"`
+	SHA256                 string    `json:"-"`
+	SourcePath             string    `json:"-"`
+}
+
+func (p ModelContextPolicy) Reference() Reference {
+	return Reference{Identity: p.Identity, Version: p.Version}
+}
+
+type ModelContextBudgets struct {
+	HardInputTokens         int
+	SafeInputTokens         int
+	CompactionTriggerTokens int
+}
+
+type ResolvedModelContextPolicy struct {
+	Policy     ModelContextPolicy
+	Capability ProviderModelCapability
+	Budgets    ModelContextBudgets
+}
+
 type ContractVersion struct {
 	Identity   string          `json:"identity"`
 	Version    int             `json:"version"`
@@ -150,10 +200,13 @@ func (m ReleaseManifest) Reference() Reference {
 }
 
 type Catalog struct {
-	definitions   map[Reference]Definition
-	modelPolicies map[Reference]ModelPolicy
-	contracts     map[Reference]ContractVersion
-	releases      map[Reference]ReleaseManifest
+	definitions          map[Reference]Definition
+	modelPolicies        map[Reference]ModelPolicy
+	providerCapabilities map[Reference]ProviderModelCapability
+	modelContextPolicies map[Reference]ModelContextPolicy
+	contextByInvocation  map[Reference]Reference
+	contracts            map[Reference]ContractVersion
+	releases             map[Reference]ReleaseManifest
 }
 
 func LoadEmbedded() (Catalog, error) {
@@ -170,10 +223,13 @@ func MustLoadEmbedded() Catalog {
 
 func LoadFS(source fs.FS) (Catalog, error) {
 	catalog := Catalog{
-		definitions:   make(map[Reference]Definition),
-		modelPolicies: make(map[Reference]ModelPolicy),
-		contracts:     make(map[Reference]ContractVersion),
-		releases:      make(map[Reference]ReleaseManifest),
+		definitions:          make(map[Reference]Definition),
+		modelPolicies:        make(map[Reference]ModelPolicy),
+		providerCapabilities: make(map[Reference]ProviderModelCapability),
+		modelContextPolicies: make(map[Reference]ModelContextPolicy),
+		contextByInvocation:  make(map[Reference]Reference),
+		contracts:            make(map[Reference]ContractVersion),
+		releases:             make(map[Reference]ReleaseManifest),
 	}
 	if err := loadKind(source, "definitions/*.json", func(filePath string, payload []byte) error {
 		var value Definition
@@ -190,6 +246,24 @@ func LoadFS(source fs.FS) (Catalog, error) {
 			return fmt.Errorf("model policy %s: %w", filePath, err)
 		}
 		return catalog.addModelPolicy(filePath, value)
+	}); err != nil {
+		return Catalog{}, err
+	}
+	if err := loadKind(source, "provider-capabilities/*.json", func(filePath string, payload []byte) error {
+		var value ProviderModelCapability
+		if err := decodeStrict(payload, &value); err != nil {
+			return fmt.Errorf("provider capability %s: %w", filePath, err)
+		}
+		return catalog.addProviderCapability(filePath, value)
+	}); err != nil {
+		return Catalog{}, err
+	}
+	if err := loadKind(source, "model-context-policies/*.json", func(filePath string, payload []byte) error {
+		var value ModelContextPolicy
+		if err := decodeStrict(payload, &value); err != nil {
+			return fmt.Errorf("model context policy %s: %w", filePath, err)
+		}
+		return catalog.addModelContextPolicy(filePath, value)
 	}); err != nil {
 		return Catalog{}, err
 	}
@@ -238,6 +312,24 @@ func (c Catalog) ModelPolicies() []ModelPolicy {
 	return values
 }
 
+func (c Catalog) ProviderCapabilities() []ProviderModelCapability {
+	values := make([]ProviderModelCapability, 0, len(c.providerCapabilities))
+	for _, value := range c.providerCapabilities {
+		values = append(values, value)
+	}
+	sort.Slice(values, func(i, j int) bool { return lessReference(values[i].Reference(), values[j].Reference()) })
+	return values
+}
+
+func (c Catalog) ModelContextPolicies() []ModelContextPolicy {
+	values := make([]ModelContextPolicy, 0, len(c.modelContextPolicies))
+	for _, value := range c.modelContextPolicies {
+		values = append(values, value)
+	}
+	sort.Slice(values, func(i, j int) bool { return lessReference(values[i].Reference(), values[j].Reference()) })
+	return values
+}
+
 func (c Catalog) Contracts() []ContractVersion {
 	values := make([]ContractVersion, 0, len(c.contracts))
 	for _, value := range c.contracts {
@@ -266,6 +358,28 @@ func (c Catalog) ResolveDefinition(reference Reference) (Definition, bool) {
 func (c Catalog) ResolveModelPolicy(reference Reference) (ModelPolicy, bool) {
 	value, ok := c.modelPolicies[reference]
 	return value, ok
+}
+
+func (c Catalog) ResolveProviderCapability(reference Reference) (ProviderModelCapability, bool) {
+	value, ok := c.providerCapabilities[reference]
+	return value, ok
+}
+
+func (c Catalog) ResolveModelContextPolicy(invocationPolicy Reference) (ResolvedModelContextPolicy, error) {
+	contextReference, ok := c.contextByInvocation[invocationPolicy]
+	if !ok {
+		return ResolvedModelContextPolicy{}, fmt.Errorf("Model Policy %s has no Model Context Policy", invocationPolicy)
+	}
+	policy := c.modelContextPolicies[contextReference]
+	capability, ok := c.providerCapabilities[policy.ProviderCapability]
+	if !ok {
+		return ResolvedModelContextPolicy{}, fmt.Errorf("Model Context Policy %s has no Provider Capability", contextReference)
+	}
+	budgets, err := deriveModelContextBudgets(policy, capability)
+	if err != nil {
+		return ResolvedModelContextPolicy{}, err
+	}
+	return ResolvedModelContextPolicy{Policy: policy, Capability: capability, Budgets: budgets}, nil
 }
 
 func (c Catalog) ResolveContract(reference Reference) (ContractVersion, bool) {
@@ -337,6 +451,37 @@ func (c *Catalog) addModelPolicy(filePath string, value ModelPolicy) error {
 	return addUnique(c.modelPolicies, value.Reference(), value, "model policy")
 }
 
+func (c *Catalog) addProviderCapability(filePath string, value ProviderModelCapability) error {
+	if !validIdentifier(value.Identity) || value.Version < 1 || strings.TrimSpace(value.ProviderModel) == "" ||
+		strings.TrimSpace(value.ResolvedModel) == "" || value.ContextWindowTokens < 1 || value.MaxInputTokens < 1 ||
+		value.MaxOutputTokens < 1 || value.MaxInputTokens > value.ContextWindowTokens ||
+		strings.TrimSpace(value.TokenizerIdentity) == "" || strings.TrimSpace(value.TokenizerVersion) == "" ||
+		strings.TrimSpace(value.InvocationMode) == "" {
+		return fmt.Errorf("provider capability %s is invalid", filePath)
+	}
+	if err := validatePath(filePath, value.Reference(), ".json"); err != nil {
+		return err
+	}
+	value.SourcePath = filePath
+	value.SHA256 = canonicalHash(value)
+	return addUnique(c.providerCapabilities, value.Reference(), value, "provider capability")
+}
+
+func (c *Catalog) addModelContextPolicy(filePath string, value ModelContextPolicy) error {
+	if !validIdentifier(value.Identity) || value.Version < 1 || validateReference(value.InvocationModelPolicy) != nil ||
+		validateReference(value.ProviderCapability) != nil || value.PinnedMaxOutputTokens < 1 ||
+		value.SoftInputLimitTokens < 1 || value.EstimationSafetyTokens < 1 || value.KeepRecentTokens < 1 ||
+		value.SummaryMaxOutputTokens < 1 || value.OverflowRetryLimit < 1 {
+		return fmt.Errorf("model context policy %s is invalid", filePath)
+	}
+	if err := validatePath(filePath, value.Reference(), ".json"); err != nil {
+		return err
+	}
+	value.SourcePath = filePath
+	value.SHA256 = canonicalHash(value)
+	return addUnique(c.modelContextPolicies, value.Reference(), value, "model context policy")
+}
+
 func (c *Catalog) addContract(filePath string, value ContractVersion) error {
 	if !validIdentifier(value.Identity) || value.Version < 1 || len(value.Schema) == 0 || !json.Valid(value.Schema) {
 		return fmt.Errorf("contract %s is invalid", filePath)
@@ -371,6 +516,31 @@ func (c *Catalog) addRelease(filePath string, value ReleaseManifest) error {
 }
 
 func (c Catalog) validateReferences() error {
+	for reference, policy := range c.modelContextPolicies {
+		invocation, ok := c.modelPolicies[policy.InvocationModelPolicy]
+		if !ok {
+			return fmt.Errorf("model context policy %s references missing Model Policy %s", reference, policy.InvocationModelPolicy)
+		}
+		capability, ok := c.providerCapabilities[policy.ProviderCapability]
+		if !ok {
+			return fmt.Errorf("model context policy %s references missing Provider Capability %s", reference, policy.ProviderCapability)
+		}
+		if invocation.ProviderModel != capability.ProviderModel || invocation.MaxOutputTokens != policy.PinnedMaxOutputTokens {
+			return fmt.Errorf("model context policy %s contradicts invocation model or output limit", reference)
+		}
+		if _, err := deriveModelContextBudgets(policy, capability); err != nil {
+			return fmt.Errorf("model context policy %s: %w", reference, err)
+		}
+		if prior, duplicate := c.contextByInvocation[policy.InvocationModelPolicy]; duplicate {
+			return fmt.Errorf("Model Policy %s has multiple Context Policies %s and %s", policy.InvocationModelPolicy, prior, reference)
+		}
+		c.contextByInvocation[policy.InvocationModelPolicy] = reference
+	}
+	for reference := range c.modelPolicies {
+		if _, ok := c.contextByInvocation[reference]; !ok {
+			return fmt.Errorf("Model Policy %s has no Model Context Policy", reference)
+		}
+	}
 	for reference, definition := range c.definitions {
 		if _, ok := c.modelPolicies[definition.ModelPolicy]; !ok {
 			return fmt.Errorf("definition %s references missing model policy %s", reference, definition.ModelPolicy)
@@ -403,6 +573,25 @@ func (c Catalog) validateReferences() error {
 		}
 	}
 	return nil
+}
+
+func deriveModelContextBudgets(policy ModelContextPolicy, capability ProviderModelCapability) (ModelContextBudgets, error) {
+	if policy.PinnedMaxOutputTokens > capability.MaxOutputTokens || policy.SummaryMaxOutputTokens > capability.MaxOutputTokens {
+		return ModelContextBudgets{}, errors.New("output limit exceeds Provider Capability")
+	}
+	hard := capability.MaxInputTokens
+	if windowBudget := capability.ContextWindowTokens - policy.PinnedMaxOutputTokens; windowBudget < hard {
+		hard = windowBudget
+	}
+	safe := hard - policy.EstimationSafetyTokens
+	if hard < 1 || safe < 1 || policy.SoftInputLimitTokens > safe || policy.KeepRecentTokens >= policy.SoftInputLimitTokens {
+		return ModelContextBudgets{}, errors.New("input, safety, soft, or suffix limits are contradictory")
+	}
+	trigger := safe
+	if policy.SoftInputLimitTokens < trigger {
+		trigger = policy.SoftInputLimitTokens
+	}
+	return ModelContextBudgets{HardInputTokens: hard, SafeInputTokens: safe, CompactionTriggerTokens: trigger}, nil
 }
 
 func (c Catalog) validateTopology(reference Reference, ancestors map[Reference]bool, depth int) error {

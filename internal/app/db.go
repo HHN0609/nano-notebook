@@ -857,6 +857,49 @@ create table if not exists agent_model_policy_versions (
 	primary key (policy_identity,policy_version)
 );
 
+create table if not exists provider_model_capability_versions (
+	capability_identity text not null check (char_length(capability_identity) between 3 and 255),
+	capability_version integer not null check (capability_version > 0),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	provider_model text not null check (char_length(provider_model) between 1 and 255),
+	resolved_model text not null check (char_length(resolved_model) between 1 and 255),
+	context_window_tokens integer not null check (context_window_tokens > 0),
+	max_input_tokens integer not null check (max_input_tokens > 0 and max_input_tokens <= context_window_tokens),
+	max_output_tokens integer not null check (max_output_tokens > 0),
+	tokenizer_identity text not null check (char_length(tokenizer_identity) between 1 and 255),
+	tokenizer_version text not null check (char_length(tokenizer_version) between 1 and 255),
+	invocation_mode text not null check (char_length(invocation_mode) between 1 and 64),
+	canonical_payload jsonb not null check (jsonb_typeof(canonical_payload)='object'),
+	source_path text not null check (char_length(source_path) between 1 and 500),
+	registered_at timestamptz not null default now(),
+	primary key (capability_identity,capability_version)
+);
+
+create table if not exists agent_model_context_policy_versions (
+	context_policy_identity text not null check (char_length(context_policy_identity) between 3 and 255),
+	context_policy_version integer not null check (context_policy_version > 0),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	model_policy_identity text not null,
+	model_policy_version integer not null,
+	capability_identity text not null,
+	capability_version integer not null,
+	pinned_max_output_tokens integer not null check (pinned_max_output_tokens > 0),
+	soft_input_limit_tokens integer not null check (soft_input_limit_tokens > 0),
+	estimation_safety_tokens integer not null check (estimation_safety_tokens > 0),
+	keep_recent_tokens integer not null check (keep_recent_tokens > 0),
+	summary_max_output_tokens integer not null check (summary_max_output_tokens > 0),
+	overflow_retry_limit integer not null check (overflow_retry_limit > 0),
+	canonical_payload jsonb not null check (jsonb_typeof(canonical_payload)='object'),
+	source_path text not null check (char_length(source_path) between 1 and 500),
+	registered_at timestamptz not null default now(),
+	primary key (context_policy_identity,context_policy_version),
+	unique (model_policy_identity,model_policy_version),
+	foreign key (model_policy_identity,model_policy_version)
+		references agent_model_policy_versions(policy_identity,policy_version),
+	foreign key (capability_identity,capability_version)
+		references provider_model_capability_versions(capability_identity,capability_version)
+);
+
 create table if not exists agent_definition_versions (
 	definition_identity text not null check (char_length(definition_identity) between 3 and 255),
 	definition_version integer not null check (definition_version > 0),
@@ -911,6 +954,12 @@ create trigger agent_contract_versions_immutable before update or delete on agen
 drop trigger if exists agent_model_policy_versions_immutable on agent_model_policy_versions;
 create trigger agent_model_policy_versions_immutable before update or delete on agent_model_policy_versions
 	for each row execute function nano_reject_agent_catalog_mutation();
+drop trigger if exists provider_model_capability_versions_immutable on provider_model_capability_versions;
+create trigger provider_model_capability_versions_immutable before update or delete on provider_model_capability_versions
+	for each row execute function nano_reject_agent_catalog_mutation();
+drop trigger if exists agent_model_context_policy_versions_immutable on agent_model_context_policy_versions;
+create trigger agent_model_context_policy_versions_immutable before update or delete on agent_model_context_policy_versions
+	for each row execute function nano_reject_agent_catalog_mutation();
 drop trigger if exists agent_definition_versions_immutable on agent_definition_versions;
 create trigger agent_definition_versions_immutable before update or delete on agent_definition_versions
 	for each row execute function nano_reject_agent_catalog_mutation();
@@ -918,8 +967,8 @@ drop trigger if exists agent_release_manifests_immutable on agent_release_manife
 create trigger agent_release_manifests_immutable before update or delete on agent_release_manifests
 	for each row execute function nano_reject_agent_catalog_mutation();
 
-revoke all on agent_contract_versions,agent_model_policy_versions,agent_definition_versions,agent_release_manifests from nano_app,nano_worker;
-grant select on agent_contract_versions,agent_model_policy_versions,agent_definition_versions,agent_release_manifests to nano_worker;
+revoke all on agent_contract_versions,agent_model_policy_versions,provider_model_capability_versions,agent_model_context_policy_versions,agent_definition_versions,agent_release_manifests from nano_app,nano_worker;
+grant select on agent_contract_versions,agent_model_policy_versions,provider_model_capability_versions,agent_model_context_policy_versions,agent_definition_versions,agent_release_manifests to nano_worker;
 
 create table if not exists agent_prompt_sets (
 	id text primary key check (char_length(id) between 3 and 255),
@@ -1047,6 +1096,12 @@ alter table agent_runs add column if not exists model_policy_identity text;
 alter table agent_runs add column if not exists model_policy_version integer;
 alter table agent_runs add column if not exists model_policy_sha256 text;
 alter table agent_runs add column if not exists provider_model text;
+alter table agent_runs add column if not exists provider_capability_identity text;
+alter table agent_runs add column if not exists provider_capability_version integer;
+alter table agent_runs add column if not exists provider_capability_sha256 text;
+alter table agent_runs add column if not exists model_context_policy_identity text;
+alter table agent_runs add column if not exists model_context_policy_version integer;
+alter table agent_runs add column if not exists model_context_policy_sha256 text;
 alter table agent_runs add column if not exists parent_context_manifest jsonb;
 
 alter table agent_runs add column if not exists time_zone text not null default 'UTC';
@@ -1141,6 +1196,14 @@ alter table agent_runs drop constraint if exists agent_runs_model_policy_referen
 alter table agent_runs add constraint agent_runs_model_policy_reference_fkey
 	foreign key (model_policy_identity,model_policy_version)
 	references agent_model_policy_versions(policy_identity,policy_version);
+alter table agent_runs drop constraint if exists agent_runs_provider_capability_reference_fkey;
+alter table agent_runs add constraint agent_runs_provider_capability_reference_fkey
+	foreign key (provider_capability_identity,provider_capability_version)
+	references provider_model_capability_versions(capability_identity,capability_version);
+alter table agent_runs drop constraint if exists agent_runs_model_context_policy_reference_fkey;
+alter table agent_runs add constraint agent_runs_model_context_policy_reference_fkey
+	foreign key (model_context_policy_identity,model_context_policy_version)
+	references agent_model_context_policy_versions(context_policy_identity,context_policy_version);
 
 create table if not exists chat_runs (
 	id text primary key check (char_length(id) between 3 and 255),
@@ -1594,6 +1657,43 @@ create table if not exists agent_run_checkpoints (
 		or (kind = 'final_draft' and action_index is null and action_id is null)
 	)
 );
+
+create table if not exists agent_context_compactions (
+	id text primary key check (char_length(id) between 3 and 255),
+	chat_id text not null references chat_chats(id) on delete cascade,
+	predecessor_id text references agent_context_compactions(id) on delete restrict,
+	idempotency_key text not null unique check (char_length(idempotency_key) between 32 and 128),
+	summarized_through text not null check (char_length(summarized_through) between 3 and 500),
+	suffix_start text not null check (char_length(suffix_start) between 3 and 500),
+	summary_text text not null check (char_length(summary_text) > 0),
+	schema_version integer not null check (schema_version > 0),
+	summarizer_model text not null check (char_length(summarizer_model) between 1 and 255),
+	prompt_version text not null check (char_length(prompt_version) between 1 and 255),
+	provider_capability_identity text not null,
+	provider_capability_version integer not null,
+	provider_capability_sha256 text not null check (provider_capability_sha256 ~ '^[0-9a-f]{64}$'),
+	model_context_policy_identity text not null,
+	model_context_policy_version integer not null,
+	model_context_policy_sha256 text not null check (model_context_policy_sha256 ~ '^[0-9a-f]{64}$'),
+	tokenizer_identity text not null,
+	tokenizer_version text not null,
+	hard_input_tokens integer not null check (hard_input_tokens > 0),
+	safe_input_tokens integer not null check (safe_input_tokens > 0),
+	soft_trigger_tokens integer not null check (soft_trigger_tokens > 0),
+	keep_recent_tokens integer not null check (keep_recent_tokens > 0),
+	summary_max_output_tokens integer not null check (summary_max_output_tokens > 0),
+	before_tokens integer not null check (before_tokens > 0),
+	after_tokens integer not null check (after_tokens > 0),
+	trigger_reason text not null check (trigger_reason in ('threshold','provider_overflow')),
+	created_at timestamptz not null default now(),
+	foreign key (provider_capability_identity,provider_capability_version)
+		references provider_model_capability_versions(capability_identity,capability_version),
+	foreign key (model_context_policy_identity,model_context_policy_version)
+		references agent_model_context_policy_versions(context_policy_identity,context_policy_version)
+);
+
+create index if not exists agent_context_compactions_chat_latest_idx
+	on agent_context_compactions(chat_id,created_at desc,id desc);
 
 create table if not exists agent_traces (
 	trace_id text primary key check (char_length(trace_id) between 1 and 160),
@@ -2087,6 +2187,7 @@ alter table agent_draft_citations enable row level security;
 alter table agent_draft_source_references enable row level security;
 alter table chat_citations enable row level security;
 alter table agent_run_checkpoints enable row level security;
+alter table agent_context_compactions enable row level security;
 alter table agent_traces enable row level security;
 alter table agent_trace_records enable row level security;
 alter table agent_trace_refs enable row level security;
@@ -2130,6 +2231,7 @@ grant select, insert, update, delete on
 	chat_citations,
 	agent_jobs
 to nano_app;
+grant select on agent_context_compactions to nano_app;
 grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_app;
 grant select(parent_run_id,child_run_id,state,completed_at,consumed_at,error_code) on agent_run_delegations to nano_app;
 grant update(state,error_code,completed_at,updated_at) on agent_run_delegations to nano_app;
@@ -2183,6 +2285,7 @@ grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 grant select, insert, update, delete on chat_source_selections to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
 grant select, insert on agent_run_checkpoints to nano_worker;
+grant select, insert on agent_context_compactions to nano_worker;
 revoke all on agent_traces, agent_trace_records from nano_app, nano_worker;
 grant insert on agent_traces, agent_trace_records to nano_app;
 grant select, insert on agent_traces, agent_trace_records to nano_worker;
@@ -2975,6 +3078,22 @@ drop policy if exists agent_run_checkpoints_worker_append on agent_run_checkpoin
 create policy agent_run_checkpoints_worker_append on agent_run_checkpoints
 	for insert to nano_worker
 	with check (true);
+
+drop policy if exists agent_context_compactions_owner_read on agent_context_compactions;
+create policy agent_context_compactions_owner_read on agent_context_compactions
+	for select to nano_app using (
+		exists (
+			select 1 from chat_chats c
+			where c.id=agent_context_compactions.chat_id
+			  and c.creator_user_id=nullif(current_setting('app.principal_id', true), '')
+		)
+	);
+drop policy if exists agent_context_compactions_worker_read on agent_context_compactions;
+create policy agent_context_compactions_worker_read on agent_context_compactions
+	for select to nano_worker using (true);
+drop policy if exists agent_context_compactions_worker_append on agent_context_compactions;
+create policy agent_context_compactions_worker_append on agent_context_compactions
+	for insert to nano_worker with check (true);
 
 drop policy if exists agent_traces_app_insert on agent_traces;
 create policy agent_traces_app_insert on agent_traces

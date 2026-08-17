@@ -14,6 +14,7 @@ import (
 const (
 	ErrorAgentBudgetExhausted = "agent_budget_exhausted"
 	ErrorAgentTraceInvalid    = "agent_trace_invalid"
+	ErrorActionInterrupted    = "action_interrupted"
 )
 
 type ControllerRuntime interface {
@@ -40,6 +41,14 @@ type ActionRetryTraceRuntime interface {
 
 type ReplayTraceRuntime interface {
 	ReplayStager() ReplayStager
+}
+
+type ContextPreparationRuntime interface {
+	PrepareDecisionRequest(context.Context, Execution, CheckpointPrefix, []models.ActionDefinition, DecisionModel, string) (models.ModelRequest, error)
+}
+
+type ContextPreparationTraceRuntime interface {
+	PrepareDecisionRequestTraced(context.Context, *agentobs.Tracer, Execution, CheckpointPrefix, []models.ActionDefinition, DecisionModel, string) (models.ModelRequest, error)
 }
 
 // QueryContextRuntime is implemented by runtimes that must force their
@@ -130,6 +139,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 	}
 	forceFinalDecision := false
+	recoveryBoundary := true
 	for {
 		prefix, err := c.runtime.LoadCheckpointPrefix(ctx, attempt)
 		if err != nil {
@@ -139,6 +149,17 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			return c.runtime.PublishFinal(ctx, attempt, *prefix.Final)
 		}
 		if proposal, pending, ok := incompleteActions(prefix); ok {
+			if recoveryBoundary && attempt.AttemptNo > 1 {
+				closed, closeErr := c.closeUnknownRecoveredActions(ctx, toolSession, attempt, proposal, pending)
+				if closeErr != nil {
+					return closeErr
+				}
+				recoveryBoundary = false
+				if closed {
+					continue
+				}
+			}
+			recoveryBoundary = false
 			action := pending[0]
 			if c.isExclusiveDelegation(toolSession, action.Name) && execution.ExistingChildCount == 0 {
 				return c.executeDelegationAction(ctx, tracer, toolSession, attempt, execution, action)
@@ -154,6 +175,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			}
 			continue
 		}
+		recoveryBoundary = false
 
 		remainingActions := execution.ActionLimit - prefix.AcceptedActions
 		actionCapable := !forceFinalDecision && len(prefix.Proposals) < execution.ActionDecisionLimit && remainingActions > 0
@@ -189,26 +211,55 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 				continue
 			}
 		}
-		request, err := c.runtime.BuildDecisionRequest(ctx, execution, prefix, definitions)
-		if err != nil {
-			return c.fail(ctx, attempt, "context_failed", err)
-		}
-		request.InvocationPolicy = execution.ModelInvocation
-		if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
-			return c.handleRuntimeError(ctx, attempt, err)
-		}
 		var outcome models.ModelOutcome
-		if tracer != nil {
-			decisionNo := prefix.AcceptedDecisions + 1
-			modelIdentity := TraceModelStartIdentity(attempt.RunID, attempt.AttemptNo, decisionNo)
-			outcome, err = InvokeDecisionModel(ctx, tracer, c.model, request, decisionNo, ModelTraceOptions{
-				StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
-				DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: c.replayStager(),
-				Role: RoleLeader, Prompt: composerPromptTraceRef(execution.PromptVersion),
-				Metrics: c.metrics,
-			})
-		} else {
-			outcome, err = c.model.Decide(ctx, request)
+		overflowRecoveryAttempt := 0
+		for {
+			triggerReason := ""
+			if overflowRecoveryAttempt > 0 {
+				triggerReason = CompactionTriggerProviderOverflow
+			}
+			var request models.ModelRequest
+			if contextRuntime, ok := c.runtime.(ContextPreparationTraceRuntime); ok && tracer != nil {
+				request, err = contextRuntime.PrepareDecisionRequestTraced(ctx, tracer, execution, prefix, definitions, c.model, triggerReason)
+			} else if contextRuntime, ok := c.runtime.(ContextPreparationRuntime); ok {
+				request, err = contextRuntime.PrepareDecisionRequest(ctx, execution, prefix, definitions, c.model, triggerReason)
+			} else {
+				request, err = c.runtime.BuildDecisionRequest(ctx, execution, prefix, definitions)
+			}
+			if err != nil {
+				if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
+					return result
+				}
+				return c.fail(ctx, attempt, "context_failed", err)
+			}
+			request.ContextTelemetry.OverflowRecoveryAttempt = overflowRecoveryAttempt
+			request.InvocationPolicy = execution.ModelInvocation
+			if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
+				return c.handleRuntimeError(ctx, attempt, err)
+			}
+			if tracer != nil {
+				decisionNo := prefix.AcceptedDecisions + 1
+				modelIdentity := TraceModelStartIdentity(attempt.RunID, attempt.AttemptNo, decisionNo)
+				if overflowRecoveryAttempt > 0 {
+					modelIdentity = fmt.Sprintf("%s/overflow-recovery/%d", modelIdentity, overflowRecoveryAttempt)
+				}
+				outcome, err = InvokeDecisionModel(ctx, tracer, c.model, request, decisionNo, ModelTraceOptions{
+					StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
+					DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: c.replayStager(),
+					Role: RoleLeader, Prompt: composerPromptTraceRef(execution.PromptVersion),
+					Metrics: c.metrics,
+				})
+			} else {
+				outcome, err = c.model.Decide(ctx, request)
+			}
+			if !isModelContextOverflow(err) {
+				break
+			}
+			limit := execution.ModelContext.Policy.OverflowRetryLimit
+			if _, ok := c.runtime.(ContextPreparationRuntime); !ok || overflowRecoveryAttempt >= limit {
+				return c.fail(ctx, attempt, ErrContextBudgetExceeded.Error(), ErrContextBudgetExceeded)
+			}
+			overflowRecoveryAttempt++
 		}
 		if err != nil {
 			return c.handleModelError(ctx, attempt, err)
@@ -278,6 +329,54 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 		forceFinalDecision = false
 	}
+}
+
+func isModelContextOverflow(err error) bool {
+	var modelErr *models.ModelError
+	return errors.As(err, &modelErr) && modelErr.Kind == models.ErrorContextOverflow
+}
+
+type CrashReplayPolicy interface {
+	CrashReplaySafe() bool
+}
+
+func (c *Controller) closeUnknownRecoveredActions(
+	ctx context.Context,
+	session *MCPAttemptSession,
+	attempt Attempt,
+	proposal AcceptedProposal,
+	pending []AcceptedAction,
+) (bool, error) {
+	closed := false
+	for _, action := range pending {
+		if c.actionCrashReplaySafe(session, action.Name) {
+			continue
+		}
+		checkpoint, err := NewActionResultCheckpoint(proposal.DecisionNo, action.Index, action.ActionID, ActionResult{
+			Status: ActionDomainError, ErrorCode: ErrorActionInterrupted,
+		})
+		if err != nil {
+			return false, c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
+		}
+		if _, err := c.runtime.AppendCheckpoint(ctx, attempt, checkpoint); err != nil {
+			return false, c.handleRuntimeError(ctx, attempt, err)
+		}
+		closed = true
+	}
+	return closed, nil
+}
+
+func (c *Controller) actionCrashReplaySafe(session *MCPAttemptSession, name string) bool {
+	if session != nil {
+		tool, ok := session.byName[name]
+		return ok && tool.CrashReplaySafe
+	}
+	action, ok := c.registry.Resolve(name)
+	if !ok {
+		return false
+	}
+	policy, ok := action.(CrashReplayPolicy)
+	return ok && policy.CrashReplaySafe()
 }
 
 func (c *Controller) acceptContextualizedSearch(

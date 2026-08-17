@@ -54,6 +54,7 @@ func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model Dec
 		agentobs.Bool(semconv.ActionDefinitionsKey, len(request.ActionDefinitions) > 0),
 		agentobs.Int64(semconv.ActionDefinitionCountKey, int64(len(request.ActionDefinitions))),
 	}
+	startAttributes = append(startAttributes, modelContextTraceAttributes(request.ContextTelemetry)...)
 	if options.Role != "" {
 		startAttributes = append(startAttributes, agentobs.String(TraceKeyAgentRole, string(options.Role)))
 	}
@@ -107,6 +108,38 @@ func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model Dec
 		}
 		return terminal
 	})
+}
+
+func modelContextTraceAttributes(metadata models.ModelContextTelemetry) []agentobs.Attribute {
+	if metadata.ProviderCapabilityIdentity == "" && metadata.ContextPolicyIdentity == "" {
+		return nil
+	}
+	attributes := []agentobs.Attribute{
+		agentobs.String(TraceKeyProviderCapability, metadata.ProviderCapabilityIdentity),
+		agentobs.String(TraceKeyContextPolicy, metadata.ContextPolicyIdentity),
+		agentobs.Int64(TraceKeyContextWindowTokens, int64(metadata.ContextWindowTokens)),
+		agentobs.Int64(TraceKeyProviderMaxInputTokens, int64(metadata.ProviderMaxInputTokens)),
+		agentobs.Int64(TraceKeyProviderMaxOutputTokens, int64(metadata.ProviderMaxOutputTokens)),
+		agentobs.Int64(TraceKeyPinnedMaxOutputTokens, int64(metadata.PinnedMaxOutputTokens)),
+		agentobs.Int64(TraceKeyEstimationSafetyTokens, int64(metadata.EstimationSafetyTokens)),
+		agentobs.Int64(TraceKeyHardInputTokens, int64(metadata.HardInputTokens)),
+		agentobs.Int64(TraceKeySafeInputTokens, int64(metadata.SafeInputTokens)),
+		agentobs.Int64(TraceKeyCompactionTriggerTokens, int64(metadata.CompactionTriggerTokens)),
+		agentobs.Int64(TraceKeyContextInputTokens, int64(metadata.InputTokens)),
+		agentobs.String(TraceKeyContextInputTokenSource, metadata.InputTokenSource),
+		agentobs.Int64(TraceKeyExactSuffixTokens, int64(metadata.ExactSuffixTokens)),
+		agentobs.Int64(TraceKeyOverflowRecoveryAttempt, int64(metadata.OverflowRecoveryAttempt)),
+	}
+	if metadata.CompactionID != "" {
+		attributes = append(attributes,
+			agentobs.String(TraceKeyCompactionID, metadata.CompactionID),
+			agentobs.String(TraceKeySummarizedThrough, metadata.SummarizedThrough),
+			agentobs.String(TraceKeyCompactionTriggerReason, metadata.CompactionTriggerReason),
+			agentobs.Int64(TraceKeyBeforeCompactionTokens, int64(metadata.BeforeCompactionTokens)),
+			agentobs.Int64(TraceKeyAfterCompactionTokens, int64(metadata.AfterCompactionTokens)),
+		)
+	}
+	return attributes
 }
 
 type ActionTraceOptions struct {

@@ -48,6 +48,29 @@ type ModelRequest struct {
 	ActionDefinitions  []ActionDefinition
 	RequiredActionName string
 	InvocationPolicy   ModelInvocationPolicy
+	ContextTelemetry   ModelContextTelemetry
+}
+
+type ModelContextTelemetry struct {
+	ProviderCapabilityIdentity string
+	ContextPolicyIdentity      string
+	ContextWindowTokens        int
+	ProviderMaxInputTokens     int
+	ProviderMaxOutputTokens    int
+	PinnedMaxOutputTokens      int
+	EstimationSafetyTokens     int
+	HardInputTokens            int
+	SafeInputTokens            int
+	CompactionTriggerTokens    int
+	InputTokens                int
+	InputTokenSource           string
+	ExactSuffixTokens          int
+	CompactionID               string
+	SummarizedThrough          string
+	CompactionTriggerReason    string
+	BeforeCompactionTokens     int
+	AfterCompactionTokens      int
+	OverflowRecoveryAttempt    int
 }
 
 type ModelInvocationPolicy struct {
@@ -62,6 +85,7 @@ const (
 	ErrorTimeout         ErrorKind = "model_timeout"
 	ErrorUnavailable     ErrorKind = "model_unavailable"
 	ErrorInvalidResponse ErrorKind = "model_invalid_response"
+	ErrorContextOverflow ErrorKind = "model_context_overflow"
 )
 
 type ModelError struct {
@@ -269,6 +293,9 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost response too large")}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if providerContextOverflow(response.StatusCode, responseBody) {
+			return ModelOutcome{}, &ModelError{Kind: ErrorContextOverflow, Err: errors.New("Provider context limit exceeded")}
+		}
 		return ModelOutcome{}, &ModelError{Kind: ErrorUnavailable, Err: fmt.Errorf("Bifrost status %d", response.StatusCode)}
 	}
 	var decoded struct {
@@ -382,6 +409,19 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		return ModelOutcome{ModelDecision: decision, Metadata: metadata}, nil
 	}
 	return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost response has no assistant decision")}
+}
+
+func providerContextOverflow(statusCode int, body []byte) bool {
+	if statusCode != http.StatusBadRequest && statusCode != http.StatusRequestEntityTooLarge {
+		return false
+	}
+	value := strings.ToLower(string(body))
+	for _, marker := range []string{"context_length_exceeded", "context window", "maximum context", "too many tokens"} {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func modelErrorResultKind(err error) ModelResultKind {

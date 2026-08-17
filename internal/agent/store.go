@@ -839,6 +839,7 @@ type ConfiguredChatAdmission struct {
 	InputMessageID  string
 	Definition      agentcatalog.Definition
 	ModelPolicy     agentcatalog.ModelPolicy
+	ModelContext    agentcatalog.ResolvedModelContextPolicy
 	DeadlineAt      time.Time
 	ContextManifest json.RawMessage
 }
@@ -852,6 +853,10 @@ func (s *Store) CreateConfiguredChatQueued(ctx context.Context, command Configur
 		strings.TrimSpace(command.ChatID) == "" || strings.TrimSpace(command.InputMessageID) == "" ||
 		command.Definition.Reference().Identity == "" || len(command.Definition.SHA256) != 64 ||
 		command.ModelPolicy.Reference() != command.Definition.ModelPolicy || len(command.ModelPolicy.SHA256) != 64 ||
+		command.ModelContext.Policy.InvocationModelPolicy != command.ModelPolicy.Reference() ||
+		command.ModelContext.Policy.PinnedMaxOutputTokens != command.ModelPolicy.MaxOutputTokens ||
+		command.ModelContext.Capability.ProviderModel != command.ModelPolicy.ProviderModel ||
+		len(command.ModelContext.Policy.SHA256) != 64 || len(command.ModelContext.Capability.SHA256) != 64 ||
 		!command.DeadlineAt.After(time.Now()) {
 		return errors.New("invalid configured Chat admission")
 	}
@@ -871,11 +876,15 @@ func (s *Store) CreateConfiguredChatQueued(ctx context.Context, command Configur
 	if _, err := s.db.Exec(ctx, `
 		insert into agent_runs(
 			id,user_id,status,runtime_kind,tree_id,definition_identity,definition_version,definition_sha256,
-			executor_identity,model_policy_identity,model_policy_version,model_policy_sha256,provider_model,parent_context_manifest
-		) values($1,$2,'queued','configured',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+			executor_identity,model_policy_identity,model_policy_version,model_policy_sha256,provider_model,
+			provider_capability_identity,provider_capability_version,provider_capability_sha256,
+			model_context_policy_identity,model_context_policy_version,model_context_policy_sha256,parent_context_manifest
+		) values($1,$2,'queued','configured',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
 	`, command.RunID, command.UserID, treeID,
 		command.Definition.Identity, command.Definition.Version, command.Definition.SHA256, command.Definition.Executor,
 		command.ModelPolicy.Identity, command.ModelPolicy.Version, command.ModelPolicy.SHA256, command.ModelPolicy.ProviderModel,
+		command.ModelContext.Capability.Identity, command.ModelContext.Capability.Version, command.ModelContext.Capability.SHA256,
+		command.ModelContext.Policy.Identity, command.ModelContext.Policy.Version, command.ModelContext.Policy.SHA256,
 		string(manifest)); err != nil {
 		return err
 	}

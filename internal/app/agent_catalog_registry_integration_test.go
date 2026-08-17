@@ -26,13 +26,15 @@ func TestAgentCatalogRegistersIdempotentlyAndSelectsExactRelease(t *testing.T) {
 		t.Fatalf("manifest=%+v err=%v", manifest, err)
 	}
 	for table, want := range map[string]int{
-		"agent_definition_versions":   1,
-		"agent_model_policy_versions": 1,
-		"agent_contract_versions":     2,
-		"agent_release_manifests":     1,
+		"agent_definition_versions":           1,
+		"agent_model_policy_versions":         1,
+		"provider_model_capability_versions":  1,
+		"agent_model_context_policy_versions": 1,
+		"agent_contract_versions":             2,
+		"agent_release_manifests":             1,
 	} {
 		var count int
-		if err := api.db.Pool().QueryRow(ctx, "select count(*) from "+table+" where source_path like 'definitions/%' or source_path like 'model-policies/%' or source_path like 'contracts/%' or source_path like 'releases/%'").Scan(&count); err != nil || count < want {
+		if err := api.db.Pool().QueryRow(ctx, "select count(*) from "+table+" where source_path like 'definitions/%' or source_path like 'model-policies/%' or source_path like 'provider-capabilities/%' or source_path like 'model-context-policies/%' or source_path like 'contracts/%' or source_path like 'releases/%'").Scan(&count); err != nil || count < want {
 			t.Fatalf("%s count=%d want-at-least=%d err=%v", table, count, want, err)
 		}
 	}
@@ -60,11 +62,13 @@ func TestAgentCatalogReadinessRejectsUnregisteredOrMutableReleaseSelector(t *tes
 func testAgentCatalog(t *testing.T, providerModel string) agentcatalog.Catalog {
 	t.Helper()
 	files := fstest.MapFS{
-		"definitions/agent.test.v1.json":       catalogMapFile(`{"identity":"agent.test","version":1,"executor":"test","model_policy":"model.test@1","prompts":{"main":"prompt.test@1"},"contracts":{"input":"input.test@1","result":"result.test@1"},"tools":["tool"],"children":[],"limits":{"model_calls":1,"actions":1,"action_batch":1,"context_bytes":1024,"result_bytes":1024,"attempts":1}}`),
-		"model-policies/model.test.v1.json":    catalogMapFile(`{"identity":"model.test","version":1,"provider_model":"` + providerModel + `","temperature":0,"max_output_tokens":128,"timeout_ms":1000}`),
-		"contracts/input.test.v1.schema.json":  catalogMapFile(`{"identity":"input.test","version":1,"schema":{"type":"object","additionalProperties":false}}`),
-		"contracts/result.test.v1.schema.json": catalogMapFile(`{"identity":"result.test","version":1,"schema":{"type":"object","additionalProperties":false}}`),
-		"releases/nano.test.v1.json":           catalogMapFile(`{"identity":"nano.test","version":1,"roots":{"test":"agent.test@1"}}`),
+		"definitions/agent.test.v1.json":               catalogMapFile(`{"identity":"agent.test","version":1,"executor":"test","model_policy":"model.test@1","prompts":{"main":"prompt.test@1"},"contracts":{"input":"input.test@1","result":"result.test@1"},"tools":["tool"],"children":[],"limits":{"model_calls":1,"actions":1,"action_batch":1,"context_bytes":1024,"result_bytes":1024,"attempts":1}}`),
+		"model-policies/model.test.v1.json":            catalogMapFile(`{"identity":"model.test","version":1,"provider_model":"` + providerModel + `","temperature":0,"max_output_tokens":128,"timeout_ms":1000}`),
+		"provider-capabilities/provider.model.v1.json": catalogMapFile(`{"identity":"provider.model","version":1,"provider_model":"` + providerModel + `","resolved_model":"model-1","context_window_tokens":1000,"max_input_tokens":900,"max_output_tokens":200,"tokenizer_identity":"test-tokenizer","tokenizer_version":"1","invocation_mode":"non_thinking"}`),
+		"model-context-policies/context.test.v1.json":  catalogMapFile(`{"identity":"context.test","version":1,"invocation_model_policy":"model.test@1","provider_capability":"provider.model@1","pinned_max_output_tokens":128,"soft_input_limit_tokens":700,"estimation_safety_tokens":100,"keep_recent_tokens":200,"summary_max_output_tokens":100,"overflow_retry_limit":1}`),
+		"contracts/input.test.v1.schema.json":          catalogMapFile(`{"identity":"input.test","version":1,"schema":{"type":"object","additionalProperties":false}}`),
+		"contracts/result.test.v1.schema.json":         catalogMapFile(`{"identity":"result.test","version":1,"schema":{"type":"object","additionalProperties":false}}`),
+		"releases/nano.test.v1.json":                   catalogMapFile(`{"identity":"nano.test","version":1,"roots":{"test":"agent.test@1"}}`),
 	}
 	catalog, err := agentcatalog.LoadFS(files)
 	if err != nil {

@@ -1,0 +1,12 @@
+{
+  "identity": "aliyun.qwen-plus-2025-07-28",
+  "version": 1,
+  "provider_model": "aliyun/qwen-plus",
+  "resolved_model": "qwen-plus-2025-07-28",
+  "context_window_tokens": 1000000,
+  "max_input_tokens": 997952,
+  "max_output_tokens": 32768,
+  "tokenizer_identity": "qwen3",
+  "tokenizer_version": "2025-07-28",
+  "invocation_mode": "non_thinking"
+}

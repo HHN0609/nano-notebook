@@ -65,17 +65,19 @@ func (e *ToolCallError) Unwrap() error {
 }
 
 type MCPToolRegistration struct {
-	Action     Action
-	Scheduling agentcatalog.ToolScheduling
+	Action          Action
+	Scheduling      agentcatalog.ToolScheduling
+	CrashReplaySafe bool
 }
 
 type MaterializedMCPTool struct {
-	Name        string
-	Description string
-	InputSchema json.RawMessage
-	Scheduling  agentcatalog.ToolScheduling
-	SHA256      string
-	Action      Action
+	Name            string
+	Description     string
+	InputSchema     json.RawMessage
+	Scheduling      agentcatalog.ToolScheduling
+	CrashReplaySafe bool
+	SHA256          string
+	Action          Action
 }
 
 type MCPToolRegistry struct {
@@ -123,7 +125,8 @@ func NewMCPToolRegistry(registrations ...MCPToolRegistration) (*MCPToolRegistry,
 		tool := MaterializedMCPTool{
 			Name: definition.Name, Description: strings.TrimSpace(definition.Description),
 			InputSchema: append(json.RawMessage(nil), definition.InputSchema...),
-			Scheduling:  registration.Scheduling, Action: registration.Action,
+			Scheduling:  registration.Scheduling, CrashReplaySafe: registration.CrashReplaySafe,
+			Action: registration.Action,
 		}
 		tool.SHA256, err = materializedToolSHA256(tool)
 		if err != nil {
@@ -652,11 +655,12 @@ func decodeMCPToolEnvelope(value any) (mcpToolEnvelope, error) {
 
 func materializedToolSHA256(tool MaterializedMCPTool) (string, error) {
 	canonical := struct {
-		Name        string                      `json:"name"`
-		Description string                      `json:"description"`
-		InputSchema json.RawMessage             `json:"input_schema"`
-		Scheduling  agentcatalog.ToolScheduling `json:"scheduling"`
-	}{tool.Name, tool.Description, tool.InputSchema, tool.Scheduling}
+		Name            string                      `json:"name"`
+		Description     string                      `json:"description"`
+		InputSchema     json.RawMessage             `json:"input_schema"`
+		Scheduling      agentcatalog.ToolScheduling `json:"scheduling"`
+		CrashReplaySafe bool                        `json:"crash_replay_safe"`
+	}{tool.Name, tool.Description, tool.InputSchema, tool.Scheduling, tool.CrashReplaySafe}
 	payload, err := json.Marshal(canonical)
 	if err != nil {
 		return "", err

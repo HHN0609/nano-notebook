@@ -448,9 +448,10 @@ func TestConfiguredChatAdmissionPinsTransitiveDefinitionAndPolicy(t *testing.T) 
 	catalog, _ := agentcatalog.LoadEmbedded()
 	definition, _ := catalog.ResolveDefinition(agentcatalog.MustParseReference("chat.leader@1"))
 	policy, _ := catalog.ResolveModelPolicy(definition.ModelPolicy)
+	modelContext, _ := catalog.ResolveModelContextPolicy(policy.Reference())
 	command := agent.ConfiguredChatAdmission{
 		RunID: "run_configured_admission", UserID: userID, ChatID: chatID, InputMessageID: inputMessageID,
-		Definition: definition, ModelPolicy: policy, DeadlineAt: definitionAdmissionDeadline(),
+		Definition: definition, ModelPolicy: policy, ModelContext: modelContext, DeadlineAt: definitionAdmissionDeadline(),
 		ContextManifest: json.RawMessage(`{"time_zone":"Asia/Shanghai"}`),
 	}
 	traceScope, err := agent.NewTraceScope(agent.DiscardTraceSink{})
@@ -485,16 +486,20 @@ func TestConfiguredChatAdmissionPinsTransitiveDefinitionAndPolicy(t *testing.T) 
 		t.Fatal(err)
 	}
 	_ = traceScope.PublishAfterCommit(ctx)
-	var runtimeKind, definitionHash, policyHash, providerModel, executor string
+	var runtimeKind, definitionHash, policyHash, providerModel, executor, capabilityHash, contextPolicyHash string
 	var role, executorVersion *string
 	if err := api.db.Pool().QueryRow(ctx, `
-		select runtime_kind,definition_sha256,model_policy_sha256,provider_model,executor_identity,agent_role,executor_version
+		select runtime_kind,definition_sha256,model_policy_sha256,provider_model,executor_identity,agent_role,executor_version,
+			provider_capability_sha256,model_context_policy_sha256
 		from agent_runs where id=$1
-	`, command.RunID).Scan(&runtimeKind, &definitionHash, &policyHash, &providerModel, &executor, &role, &executorVersion); err != nil {
+	`, command.RunID).Scan(&runtimeKind, &definitionHash, &policyHash, &providerModel, &executor, &role, &executorVersion,
+		&capabilityHash, &contextPolicyHash); err != nil {
 		t.Fatal(err)
 	}
-	if runtimeKind != "configured" || definitionHash != definition.SHA256 || policyHash != policy.SHA256 || providerModel != policy.ProviderModel || executor != definition.Executor || role != nil || executorVersion != nil {
-		t.Fatalf("kind=%s definition=%s policy=%s model=%s executor=%s role=%v version=%v", runtimeKind, definitionHash, policyHash, providerModel, executor, role, executorVersion)
+	if runtimeKind != "configured" || definitionHash != definition.SHA256 || policyHash != policy.SHA256 ||
+		capabilityHash != modelContext.Capability.SHA256 || contextPolicyHash != modelContext.Policy.SHA256 ||
+		providerModel != policy.ProviderModel || executor != definition.Executor || role != nil || executorVersion != nil {
+		t.Fatalf("kind=%s definition=%s policy=%s capability=%s context=%s model=%s executor=%s role=%v version=%v", runtimeKind, definitionHash, policyHash, capabilityHash, contextPolicyHash, providerModel, executor, role, executorVersion)
 	}
 }
 
@@ -512,10 +517,11 @@ func TestPostgresRuntimeLoadsConfiguredChatRootWithoutLegacyFields(t *testing.T)
 	catalog, _ := agentcatalog.LoadEmbedded()
 	definition, _ := catalog.ResolveDefinition(agentcatalog.MustParseReference("chat.leader@1"))
 	policy, _ := catalog.ResolveModelPolicy(definition.ModelPolicy)
+	modelContext, _ := catalog.ResolveModelContextPolicy(policy.Reference())
 	deadline := definitionAdmissionDeadline()
 	command := agent.ConfiguredChatAdmission{
 		RunID: "run_configured_load", UserID: userID, ChatID: chatID, InputMessageID: "msg_configured_load",
-		Definition: definition, ModelPolicy: policy, DeadlineAt: deadline,
+		Definition: definition, ModelPolicy: policy, ModelContext: modelContext, DeadlineAt: deadline,
 		ContextManifest: json.RawMessage(`{"time_zone":"Asia/Shanghai"}`),
 	}
 	traceScope, err := agent.NewTraceScope(agent.DiscardTraceSink{})
@@ -561,6 +567,11 @@ func TestPostgresRuntimeLoadsConfiguredChatRootWithoutLegacyFields(t *testing.T)
 	}
 	if execution.MemberRole != "owner" || execution.ExistingChildCount != 0 {
 		t.Fatalf("configured delegation policy fields=%q/%d", execution.MemberRole, execution.ExistingChildCount)
+	}
+	if execution.ModelContext.Capability.SHA256 != modelContext.Capability.SHA256 ||
+		execution.ModelContext.Policy.SHA256 != modelContext.Policy.SHA256 ||
+		execution.ModelContext.Budgets.CompactionTriggerTokens != 98_304 {
+		t.Fatalf("configured Model Context pin=%+v", execution.ModelContext)
 	}
 	if execution.ActionDecisionLimit != definition.Limits.ModelCalls-1 || execution.FinalDecisionLimit != 1 ||
 		execution.ActionLimit != definition.Limits.Actions || execution.ActionBatchLimit != definition.Limits.ActionBatch ||

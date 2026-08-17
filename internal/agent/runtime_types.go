@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
 
@@ -14,6 +15,7 @@ type Execution struct {
 	InputMessageID         string
 	Model                  string
 	ModelInvocation        models.ModelInvocationPolicy
+	ModelContext           agentcatalog.ResolvedModelContextPolicy
 	PromptVersion          string
 	AgentConfigID          string
 	TimeZone               string

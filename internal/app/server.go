@@ -80,12 +80,14 @@ type configuredChatAgent struct {
 	Release    agentcatalog.Reference
 	Definition agentcatalog.Definition
 	Policy     agentcatalog.ModelPolicy
+	Context    agentcatalog.ResolvedModelContextPolicy
 }
 
 type configuredStudioAgent struct {
 	Release    agentcatalog.Reference
 	Definition agentcatalog.Definition
 	Policy     agentcatalog.ModelPolicy
+	Context    agentcatalog.ResolvedModelContextPolicy
 }
 
 func NewServer(cfg Config, db *DB) *Server {
@@ -129,7 +131,11 @@ func NewServer(cfg Config, db *DB) *Server {
 	if !ok {
 		panic(fmt.Errorf("Agent Definition %s has unknown Model Policy %s", root, definition.ModelPolicy))
 	}
-	chatAgent = &configuredChatAgent{Release: cfg.AgentRelease, Definition: definition, Policy: policy}
+	modelContext, err := cfg.AgentCatalog.ResolveModelContextPolicy(policy.Reference())
+	if err != nil {
+		panic(err)
+	}
+	chatAgent = &configuredChatAgent{Release: cfg.AgentRelease, Definition: definition, Policy: policy, Context: modelContext}
 	for kind, purpose := range map[studio.Kind]string{
 		studio.KindReport: "studio_report", studio.KindFlashcards: "studio_flashcards",
 		studio.KindMindMap: "studio_mind_map", studio.KindDataTable: "studio_data_table",
@@ -146,7 +152,11 @@ func NewServer(cfg Config, db *DB) *Server {
 		if !exists {
 			panic(fmt.Errorf("Studio Agent Definition %s has unknown Model Policy %s", studioRoot, studioDefinition.ModelPolicy))
 		}
-		studioAgents[kind] = configuredStudioAgent{Release: cfg.AgentRelease, Definition: studioDefinition, Policy: studioPolicy}
+		studioContext, contextErr := cfg.AgentCatalog.ResolveModelContextPolicy(studioPolicy.Reference())
+		if contextErr != nil {
+			panic(contextErr)
+		}
+		studioAgents[kind] = configuredStudioAgent{Release: cfg.AgentRelease, Definition: studioDefinition, Policy: studioPolicy, Context: studioContext}
 	}
 	s := &Server{
 		cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(),
@@ -1119,7 +1129,7 @@ func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, source
 		}
 		hash := requestHash([]byte(sourceRunID + "\x00" + timeZone + "\x00" + s.chatAgent.Release.String()))
 		run, _, err = store.RetryConfiguredQueued(r.Context(), userID, sourceRunID, key, hash, jobID, agent.ConfiguredChatAdmission{
-			RunID: runID, UserID: userID, Definition: s.chatAgent.Definition, ModelPolicy: s.chatAgent.Policy,
+			RunID: runID, UserID: userID, Definition: s.chatAgent.Definition, ModelPolicy: s.chatAgent.Policy, ModelContext: s.chatAgent.Context,
 			DeadlineAt: time.Now().Add(s.cfg.AgentRun.Deadline), ContextManifest: manifest,
 		})
 		return err
@@ -1382,7 +1392,7 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		}
 		if err := agentStore.CreateConfiguredChatQueued(r.Context(), agent.ConfiguredChatAdmission{
 			RunID: runID, UserID: userID, ChatID: chatID, InputMessageID: req.ID,
-			Definition: s.chatAgent.Definition, ModelPolicy: s.chatAgent.Policy,
+			Definition: s.chatAgent.Definition, ModelPolicy: s.chatAgent.Policy, ModelContext: s.chatAgent.Context,
 			DeadlineAt: time.Now().Add(s.cfg.AgentRun.Deadline), ContextManifest: manifest,
 		}); err != nil {
 			return err

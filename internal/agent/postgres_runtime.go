@@ -154,6 +154,14 @@ const executionSelectFrom = `
 		m.role,
 		(select count(*) from agent_run_delegations child_link where child_link.parent_run_id=tree.root_agent_run_id),
 		r.runtime_kind='configured',policy.temperature,policy.max_output_tokens,policy.timeout_ms,
+		r.model_context_policy_identity,r.model_context_policy_version,r.model_context_policy_sha256,
+		context_policy.model_policy_identity,context_policy.model_policy_version,
+		r.provider_capability_identity,r.provider_capability_version,r.provider_capability_sha256,
+		capability.resolved_model,capability.context_window_tokens,capability.max_input_tokens,capability.max_output_tokens,
+		capability.tokenizer_identity,capability.tokenizer_version,capability.invocation_mode,
+		context_policy.pinned_max_output_tokens,context_policy.soft_input_limit_tokens,
+		context_policy.estimation_safety_tokens,context_policy.keep_recent_tokens,
+		context_policy.summary_max_output_tokens,context_policy.overflow_retry_limit,
 		coalesce(r.deadline_at,tree.absolute_deadline) > now()
 	from agent_runs r
 	join agent_jobs j on j.run_id = r.id
@@ -163,6 +171,19 @@ const executionSelectFrom = `
 	left join agent_model_policy_versions policy
 		on policy.policy_identity=r.model_policy_identity and policy.policy_version=r.model_policy_version
 		and policy.canonical_sha256=r.model_policy_sha256 and policy.provider_model=r.provider_model
+	left join agent_model_context_policy_versions context_policy
+		on context_policy.context_policy_identity=r.model_context_policy_identity
+		and context_policy.context_policy_version=r.model_context_policy_version
+		and context_policy.canonical_sha256=r.model_context_policy_sha256
+		and context_policy.model_policy_identity=r.model_policy_identity
+		and context_policy.model_policy_version=r.model_policy_version
+	left join provider_model_capability_versions capability
+		on capability.capability_identity=r.provider_capability_identity
+		and capability.capability_version=r.provider_capability_version
+		and capability.canonical_sha256=r.provider_capability_sha256
+		and capability.capability_identity=context_policy.capability_identity
+		and capability.capability_version=context_policy.capability_version
+		and capability.provider_model=r.provider_model
 	join chat_chats c on c.id=coalesce(r.chat_id,product.chat_id) and c.creator_user_id=coalesce(r.user_id,product.user_id)
 	join notebook_memberships m on m.notebook_id=c.notebook_id and m.user_id=coalesce(r.user_id,product.user_id)
 `
@@ -178,6 +199,12 @@ func (r *PostgresRuntime) loadExecutionRow(ctx context.Context, tx pgx.Tx, where
 	var configured bool
 	var temperature *float64
 	var maxOutputTokens, timeoutMS *int
+	var contextIdentity, contextSHA, capabilityIdentity, capabilitySHA *string
+	var invocationPolicyIdentity *string
+	var resolvedModel, tokenizerIdentity, tokenizerVersion, invocationMode *string
+	var contextVersion, capabilityVersion, invocationPolicyVersion *int
+	var contextWindow, providerMaxInput, providerMaxOutput *int
+	var pinnedOutput, softInput, safety, keepRecent, summaryOutput, overflowLimit *int
 	args := append([]any{GroundedPromptVersion, BarePromptVersion}, whereArgs...)
 	err := tx.QueryRow(ctx, executionSelectFrom+whereSQL, args...).Scan(
 		&execution.RunID, &execution.ChatID, &execution.UserID, &execution.InputMessageID, &execution.Model,
@@ -188,6 +215,12 @@ func (r *PostgresRuntime) loadExecutionRow(ctx context.Context, tx pgx.Tx, where
 		&execution.SelectedSourceCount,
 		&execution.MemberRole, &execution.ExistingChildCount,
 		&configured, &temperature, &maxOutputTokens, &timeoutMS,
+		&contextIdentity, &contextVersion, &contextSHA,
+		&invocationPolicyIdentity, &invocationPolicyVersion,
+		&capabilityIdentity, &capabilityVersion, &capabilitySHA,
+		&resolvedModel, &contextWindow, &providerMaxInput, &providerMaxOutput,
+		&tokenizerIdentity, &tokenizerVersion, &invocationMode,
+		&pinnedOutput, &softInput, &safety, &keepRecent, &summaryOutput, &overflowLimit,
 		&deadlineValid,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -197,11 +230,48 @@ func (r *PostgresRuntime) loadExecutionRow(ctx context.Context, tx pgx.Tx, where
 		return Execution{}, false, err
 	}
 	if configured {
-		if temperature == nil || maxOutputTokens == nil || timeoutMS == nil {
+		if temperature == nil || maxOutputTokens == nil || timeoutMS == nil || contextIdentity == nil || contextVersion == nil ||
+			contextSHA == nil || invocationPolicyIdentity == nil || invocationPolicyVersion == nil ||
+			capabilityIdentity == nil || capabilityVersion == nil || capabilitySHA == nil ||
+			resolvedModel == nil || contextWindow == nil || providerMaxInput == nil || providerMaxOutput == nil ||
+			tokenizerIdentity == nil || tokenizerVersion == nil || invocationMode == nil || pinnedOutput == nil ||
+			softInput == nil || safety == nil || keepRecent == nil || summaryOutput == nil || overflowLimit == nil {
 			return Execution{}, false, errors.New("configured Model Policy pin is invalid")
 		}
 		execution.ModelInvocation = models.ModelInvocationPolicy{
 			Temperature: temperature, MaxOutputTokens: *maxOutputTokens, Timeout: time.Duration(*timeoutMS) * time.Millisecond,
+		}
+		hardInput := *providerMaxInput
+		if windowInput := *contextWindow - *pinnedOutput; windowInput < hardInput {
+			hardInput = windowInput
+		}
+		safeInput := hardInput - *safety
+		if *pinnedOutput != *maxOutputTokens || *pinnedOutput > *providerMaxOutput || hardInput < 1 || safeInput < 1 ||
+			*softInput > safeInput || *keepRecent >= *softInput || *summaryOutput > *providerMaxOutput || *overflowLimit < 1 {
+			return Execution{}, false, errors.New("configured Model Context Policy pin is invalid")
+		}
+		trigger := safeInput
+		if *softInput < trigger {
+			trigger = *softInput
+		}
+		execution.ModelContext = agentcatalog.ResolvedModelContextPolicy{
+			Policy: agentcatalog.ModelContextPolicy{
+				Identity: *contextIdentity, Version: *contextVersion,
+				InvocationModelPolicy: agentcatalog.Reference{Identity: *invocationPolicyIdentity, Version: *invocationPolicyVersion},
+				ProviderCapability:    agentcatalog.Reference{Identity: *capabilityIdentity, Version: *capabilityVersion},
+				PinnedMaxOutputTokens: *pinnedOutput, SoftInputLimitTokens: *softInput,
+				EstimationSafetyTokens: *safety, KeepRecentTokens: *keepRecent,
+				SummaryMaxOutputTokens: *summaryOutput, OverflowRetryLimit: *overflowLimit, SHA256: *contextSHA,
+			},
+			Capability: agentcatalog.ProviderModelCapability{
+				Identity: *capabilityIdentity, Version: *capabilityVersion, ProviderModel: execution.Model,
+				ResolvedModel: *resolvedModel, ContextWindowTokens: *contextWindow, MaxInputTokens: *providerMaxInput,
+				MaxOutputTokens: *providerMaxOutput, TokenizerIdentity: *tokenizerIdentity,
+				TokenizerVersion: *tokenizerVersion, InvocationMode: *invocationMode, SHA256: *capabilitySHA,
+			},
+			Budgets: agentcatalog.ModelContextBudgets{
+				HardInputTokens: hardInput, SafeInputTokens: safeInput, CompactionTriggerTokens: trigger,
+			},
 		}
 	}
 	return execution, deadlineValid, nil
@@ -255,54 +325,11 @@ func (r *PostgresRuntime) LoadForReplay(ctx context.Context, runID string) (Exec
 }
 
 func (r *PostgresRuntime) Build(ctx context.Context, execution Execution) (models.ModelRequest, error) {
-	tx, err := r.workerTx(ctx)
+	prefix, err := r.LoadCheckpointPrefix(ctx, execution.Attempt)
 	if err != nil {
 		return models.ModelRequest{}, err
 	}
-	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `
-		with cutoff as (
-			select id, created_at
-			from chat_messages
-			where id = $2 and chat_id = $1
-		),
-		recent as (
-			select m.id, m.role, m.content, m.created_at
-			from chat_messages m, cutoff c
-			where m.chat_id = $1 and (m.created_at, m.id) <= (c.created_at, c.id)
-			order by m.created_at desc, m.id desc
-			limit 20
-		)
-		select role, content
-		from recent
-		order by created_at, id`, execution.ChatID, execution.InputMessageID)
-	if err != nil {
-		return models.ModelRequest{}, err
-	}
-	defer rows.Close()
-	messages := make([]models.ModelMessage, 0, 21)
-	systemPrompt := r.systemPrompt
-	if execution.SelectedSourceCount > 0 && systemPrompt == BareSystemPrompt {
-		systemPrompt = GroundedSystemPrompt
-	}
-	messages = append(messages, models.ModelMessage{Role: models.RoleSystem, Content: systemPrompt})
-	for rows.Next() {
-		var message models.ModelMessage
-		if err := rows.Scan(&message.Role, &message.Content); err != nil {
-			return models.ModelRequest{}, err
-		}
-		messages = append(messages, message)
-	}
-	if err := rows.Err(); err != nil {
-		return models.ModelRequest{}, err
-	}
-	if len(messages) == 1 {
-		return models.ModelRequest{}, errors.New("Run context has no durable Messages")
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return models.ModelRequest{}, err
-	}
-	return models.ModelRequest{Model: execution.Model, Messages: messages}, nil
+	return r.BuildDecisionRequest(ctx, execution, prefix, nil)
 }
 
 func (r *PostgresRuntime) PublishFinal(ctx context.Context, attempt Attempt, draft models.FinalDraft) error {
