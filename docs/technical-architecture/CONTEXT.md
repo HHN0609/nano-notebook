@@ -376,6 +376,10 @@ _Avoid_: Agent state, product audit record
 The retained internal execution record with exactly one Trace and one root Trace Span per Agent Run, following that Run's lifecycle and reconstructing every started execution attempt independently of Operational Telemetry sampling or expiry, including work with no observed completion or accepted Checkpoint. It is restricted developer data, remains distinct from its administrative projection, and never contains or claims access to model chain of thought.
 _Avoid_: OpenTelemetry span set, admin dashboard, Member-facing trace, chain of thought
 
+**Agent Trace Processor**:
+The application-owned observability component that validates and converges Durable Agent Trace records into retained authority and query projections without owning Agent execution or generic Operational Telemetry.
+_Avoid_: OpenTelemetry Collector, Agent Worker, generic log consumer
+
 **Replay**:
 An encrypted, allow-listed, retention-bounded record of normalized content used to debug one observed Agent operation. It is loaded only through an explicit audited `platform.trace.replay` request, contains no raw Provider envelope or chain of thought, and never grants browsing access to the parent Source.
 _Avoid_: Full Source archive, raw Provider log, unbounded prompt history
