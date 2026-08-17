@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadConfigUsesDedicatedCollectorDatabaseAndPool(t *testing.T) {
 	t.Setenv("NANO_DATABASE_URL", "postgres://application-should-not-be-used")
@@ -53,5 +56,23 @@ func TestLoadConfigRejectsInvalidCollectorPoolBounds(t *testing.T) {
 
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("loadConfig accepted min connections above max")
+	}
+}
+
+func TestLoadConfigSelectsClickHouseQueryStore(t *testing.T) {
+	t.Setenv("NANO_COLLECTOR_STORE", "clickhouse")
+	t.Setenv("NANO_CLICKHOUSE_ADDR", "clickhouse-a:9000,clickhouse-b:9000")
+	t.Setenv("NANO_CLICKHOUSE_DATABASE", "nano_observability")
+	t.Setenv("NANO_CLICKHOUSE_USER", "nano_observability")
+	t.Setenv("NANO_CLICKHOUSE_PASSWORD", "password")
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.StoreBackend != "clickhouse" || len(config.ClickHouseAddr) != 2 ||
+		config.ClickHouseDatabase != "nano_observability" || config.ClickHouseUser != "nano_observability" ||
+		config.ClickHousePassword != "password" || config.ClickHouseDialTimeout != 10*time.Second {
+		t.Fatalf("config=%#v", config)
 	}
 }

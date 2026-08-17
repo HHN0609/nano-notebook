@@ -21,7 +21,7 @@ type HTTPConfig struct {
 	ServiceToken string
 	MaxBodyBytes int64
 	Readiness    func(context.Context) error
-	QueryStore   *TraceQueryStore
+	QueryStore   TraceQueries
 	QueryToken   string
 }
 
@@ -31,9 +31,15 @@ type httpHandler struct {
 	serviceToken string
 	maxBodyBytes int64
 	readiness    func(context.Context) error
-	queryStore   *TraceQueryStore
+	queryStore   TraceQueries
 	queryToken   string
 	mux          *http.ServeMux
+}
+
+type TraceQueries interface {
+	List(context.Context, TraceListQuery) (TraceListResult, error)
+	Detail(context.Context, agentobs.TraceID) (ProjectedTrace, error)
+	Replay(context.Context, agentobs.TraceID, agentobs.SpanID, string) (OpaqueReplay, error)
 }
 
 func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
