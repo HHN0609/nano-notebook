@@ -155,6 +155,8 @@ services:
     depends_on:
       observability-postgres:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     environment:
@@ -165,6 +167,10 @@ services:
       NANO_COLLECTOR_DATABASE_MAX_CONNS: "16"
       NANO_COLLECTOR_PROJECTION_DATABASE_MAX_CONNS: "4"
       NANO_COLLECTOR_QUERY_DATABASE_MAX_CONNS: "8"
+      NANO_CLICKHOUSE_ADDR: clickhouse:9000
+      NANO_CLICKHOUSE_DATABASE: nano_observability
+      NANO_CLICKHOUSE_USER: nano_observability
+      NANO_CLICKHOUSE_PASSWORD: nano-observability
       NANO_COLLECTOR_PRODUCER_ID: nano-worker
       NANO_REPLAY_STAGING_S3_ENDPOINT: minio:9000
       NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID: nano

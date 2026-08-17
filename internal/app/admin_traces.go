@@ -15,12 +15,13 @@ import (
 )
 
 const (
-	capabilityTraceRead   = "platform.trace.read"
-	capabilityTraceReplay = "platform.trace.replay"
+	capabilityTraceRead      = "platform.trace.read"
+	capabilityTraceReplay    = "platform.trace.replay"
+	capabilityTraceAnalytics = "platform.trace.analytics"
 )
 
 func (s *Server) platformCapabilities(ctx context.Context, userID string) ([]string, error) {
-	capabilities := make([]string, 0, 2)
+	capabilities := make([]string, 0, 3)
 	err := s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `select capability from platform_capability_grants where user_id = $1 order by capability`, userID)
 		if err != nil {
@@ -40,6 +41,10 @@ func (s *Server) platformCapabilities(ctx context.Context, userID string) ([]str
 }
 
 func (s *Server) adminPrincipal(w http.ResponseWriter, r *http.Request) (string, map[string]bool, bool) {
+	return s.platformCapabilityPrincipal(w, r, capabilityTraceRead, "trace_forbidden", "error.trace_forbidden")
+}
+
+func (s *Server) platformCapabilityPrincipal(w http.ResponseWriter, r *http.Request, required, code, message string) (string, map[string]bool, bool) {
 	user, ok := s.currentUser(r)
 	if !ok {
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
@@ -54,11 +59,84 @@ func (s *Server) adminPrincipal(w http.ResponseWriter, r *http.Request) (string,
 	for _, capability := range capabilities {
 		grants[capability] = true
 	}
-	if !grants[capabilityTraceRead] {
-		writeError(w, r, http.StatusForbidden, "trace_forbidden", "error.trace_forbidden")
+	if !grants[required] {
+		writeError(w, r, http.StatusForbidden, code, message)
 		return user.ID, grants, false
 	}
 	return user.ID, grants, true
+}
+
+func (s *Server) adminTraceAnalyticsQuery(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	if _, _, ok := s.platformCapabilityPrincipal(w, r, capabilityTraceAnalytics, "trace_analytics_forbidden", "error.trace_analytics_forbidden"); !ok {
+		return
+	}
+	if s.adminTraceAnalytics == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "trace_analytics_temporarily_unavailable", "error.trace_temporarily_unavailable")
+		return
+	}
+	kind := collector.TraceAnalyticsQueryKind(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/admin/trace-analytics/"), "/"))
+	query, err := parseAdminTraceAnalyticsQuery(r, kind)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_trace_analytics_query", "error.bad_request")
+		return
+	}
+	var result any
+	switch kind {
+	case collector.TraceAnalyticsOverview:
+		result, err = s.adminTraceAnalytics.Overview(r.Context(), query)
+	case collector.TraceAnalyticsTimeseries:
+		result, err = s.adminTraceAnalytics.Timeseries(r.Context(), query)
+	case collector.TraceAnalyticsLatency:
+		result, err = s.adminTraceAnalytics.Latency(r.Context(), query)
+	case collector.TraceAnalyticsBreakdowns:
+		result, err = s.adminTraceAnalytics.Breakdowns(r.Context(), query)
+	case collector.TraceAnalyticsTools:
+		result, err = s.adminTraceAnalytics.Tools(r.Context(), query)
+	default:
+		writeError(w, r, http.StatusNotFound, "not_found", "error.not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "trace_analytics_temporarily_unavailable", "error.trace_temporarily_unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func parseAdminTraceAnalyticsQuery(r *http.Request, kind collector.TraceAnalyticsQueryKind) (collector.TraceAnalyticsQuery, error) {
+	values := r.URL.Query()
+	query := collector.TraceAnalyticsQuery{
+		Bucket:    collector.AnalyticsBucket(strings.TrimSpace(values.Get("bucket"))),
+		AgentName: strings.TrimSpace(values.Get("agent")), ModelName: strings.TrimSpace(values.Get("model")),
+		Status: strings.TrimSpace(values.Get("status")), WorkloadKind: collector.WorkloadKind(strings.TrimSpace(values.Get("workload"))),
+		GroupBy: collector.AnalyticsDimension(strings.TrimSpace(values.Get("group_by"))),
+	}
+	if value := values.Get("limit"); value != "" {
+		limit, err := strconv.Atoi(value)
+		if err != nil {
+			return collector.TraceAnalyticsQuery{}, err
+		}
+		query.Limit = limit
+	}
+	after, err := parseAdminTime(values.Get("started_after"))
+	if err != nil {
+		return collector.TraceAnalyticsQuery{}, err
+	}
+	before, err := parseAdminTime(values.Get("started_before"))
+	if err != nil {
+		return collector.TraceAnalyticsQuery{}, err
+	}
+	if after != nil {
+		query.StartedAfterUnixNano = *after
+	}
+	if before != nil {
+		query.StartedBeforeUnixNano = *before
+	}
+	return collector.NormalizeTraceAnalyticsQuery(time.Now(), kind, query)
 }
 
 func (s *Server) adminTraceList(w http.ResponseWriter, r *http.Request) {

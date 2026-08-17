@@ -22,9 +22,18 @@ func TestClickHouseMigrationsDefineDurableRawRecordContract(t *testing.T) {
 		"CODEC(ZSTD(3))",
 		"create table if not exists obs_trace_summaries",
 		"models Array(LowCardinality(String))",
+		"providers Array(LowCardinality(String))",
+		"cached_tokens Nullable(Int64)",
+		"error_code LowCardinality(String)",
+		"delegation_targets Array(LowCardinality(String))",
+		"rag_degradations Array(LowCardinality(String))",
 		"projected_sequence UInt32",
 		"ENGINE = ReplacingMergeTree(ingest_version)",
 		"ORDER BY trace_id",
+		"create table if not exists obs_span_analytics",
+		"tool_name LowCardinality(String)",
+		"retryable Nullable(Bool)",
+		"ORDER BY (notebook_id, trace_id, span_id)",
 	} {
 		if !strings.Contains(sql, required) {
 			t.Errorf("ClickHouse migrations are missing %q", required)

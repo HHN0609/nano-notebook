@@ -56,7 +56,7 @@ func main() {
 
 func parseGrantConfig(args []string, getenv func(string) string) (grantConfig, error) {
 	if len(args) != 3 {
-		return grantConfig{}, errors.New("usage: platform-grant <grant|revoke> <email> <platform.trace.read|platform.trace.replay>")
+		return grantConfig{}, errors.New("usage: platform-grant <grant|revoke> <email> <platform.trace.read|platform.trace.replay|platform.trace.analytics>")
 	}
 	config := grantConfig{
 		DatabaseURL: getenv("NANO_DATABASE_URL"), Action: strings.ToLower(strings.TrimSpace(args[0])),
@@ -66,7 +66,7 @@ func parseGrantConfig(args []string, getenv func(string) string) (grantConfig, e
 		config.DatabaseURL = "postgres://nano:nano@localhost:55432/nano?sslmode=disable"
 	}
 	if (config.Action != "grant" && config.Action != "revoke") || !strings.Contains(config.Email, "@") ||
-		(config.Capability != "platform.trace.read" && config.Capability != "platform.trace.replay") {
+		(config.Capability != "platform.trace.read" && config.Capability != "platform.trace.replay" && config.Capability != "platform.trace.analytics") {
 		return grantConfig{}, errors.New("platform capability grant arguments are invalid")
 	}
 	return config, nil

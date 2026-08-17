@@ -43,37 +43,39 @@ type SourceSnapshotStore interface {
 }
 
 type Config struct {
-	CookieSecure       bool
-	Version            string
-	DefaultModel       string
-	AgentRun           agent.RunConfig
-	AgentConfiguration agent.AgentConfigurationSet
-	AgentCatalog       agentcatalog.Catalog
-	AgentRelease       agentcatalog.Reference
-	AdminTraces        collector.QueryClient
-	ReplaySealer       *replay.Sealer
-	TraceSink          agent.TraceSink
-	SourceUploads      SourceUploadStore
-	SourceFetcher      fetcher.SnapshotFetcher
-	SourceSnapshots    SourceSnapshotStore
-	Metrics            *metrics.Catalog
+	CookieSecure        bool
+	Version             string
+	DefaultModel        string
+	AgentRun            agent.RunConfig
+	AgentConfiguration  agent.AgentConfigurationSet
+	AgentCatalog        agentcatalog.Catalog
+	AgentRelease        agentcatalog.Reference
+	AdminTraces         collector.QueryClient
+	AdminTraceAnalytics collector.AnalyticsQueryClient
+	ReplaySealer        *replay.Sealer
+	TraceSink           agent.TraceSink
+	SourceUploads       SourceUploadStore
+	SourceFetcher       fetcher.SnapshotFetcher
+	SourceSnapshots     SourceSnapshotStore
+	Metrics             *metrics.Catalog
 }
 
 type Server struct {
-	cfg           Config
-	db            *DB
-	identity      *identity.Store
-	notebookStore *notebook.Store
-	mux           *http.ServeMux
-	runHub        *runHub
-	discoveryHub  *runHub
-	sourceHub     *runHub
-	adminTraces   collector.QueryClient
-	replaySealer  *replay.Sealer
-	chatAgent     *configuredChatAgent
-	studioAgents  map[studio.Kind]configuredStudioAgent
-	metrics       *metrics.Catalog
-	taskMetrics   *agent.TaskMetricsRecorder
+	cfg                 Config
+	db                  *DB
+	identity            *identity.Store
+	notebookStore       *notebook.Store
+	mux                 *http.ServeMux
+	runHub              *runHub
+	discoveryHub        *runHub
+	sourceHub           *runHub
+	adminTraces         collector.QueryClient
+	adminTraceAnalytics collector.AnalyticsQueryClient
+	replaySealer        *replay.Sealer
+	chatAgent           *configuredChatAgent
+	studioAgents        map[studio.Kind]configuredStudioAgent
+	metrics             *metrics.Catalog
+	taskMetrics         *agent.TaskMetricsRecorder
 }
 
 type configuredChatAgent struct {
@@ -151,7 +153,7 @@ func NewServer(cfg Config, db *DB) *Server {
 	s := &Server{
 		cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(),
 		runHub: newRunHubWithMetrics(cfg.Metrics), discoveryHub: newRunHubWithMetrics(cfg.Metrics), sourceHub: newRunHubWithMetrics(cfg.Metrics),
-		adminTraces: cfg.AdminTraces, replaySealer: cfg.ReplaySealer,
+		adminTraces: cfg.AdminTraces, adminTraceAnalytics: cfg.AdminTraceAnalytics, replaySealer: cfg.ReplaySealer,
 		chatAgent: chatAgent, studioAgents: studioAgents,
 		metrics: cfg.Metrics, taskMetrics: agent.NewTaskMetricsRecorder(cfg.Metrics),
 	}
@@ -208,6 +210,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/agent-runs/", s.agentRunByID)
 	s.mux.HandleFunc("/api/admin/traces", s.adminTraceList)
 	s.mux.HandleFunc("/api/admin/traces/", s.adminTraceByID)
+	s.mux.HandleFunc("/api/admin/trace-analytics/", s.adminTraceAnalyticsQuery)
 }
 
 func (s *Server) citationByID(w http.ResponseWriter, r *http.Request) {

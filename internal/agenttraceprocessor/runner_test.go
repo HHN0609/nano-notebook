@@ -5,8 +5,12 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agenttraceprocessor"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestRunnerCommitsProcessedMessagesInOrderAndReleasesRebalance(t *testing.T) {
@@ -84,6 +88,42 @@ func TestRunnerDoesNotCommitStoredSuffixPastFailedPartitionOffset(t *testing.T) 
 	if len(consumer.committed) != 0 {
 		t.Fatalf("committed suffix past failed offset: %v", consumer.committed)
 	}
+}
+
+func TestRunnerRecordsBoundedKafkaToSearchableMetrics(t *testing.T) {
+	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	consumer := &fakeConsumer{polls: [][]agenttraceprocessor.Message{{{
+		Topic: traceTopic, Partition: 3, Offset: 7, HighWatermark: 10, Timestamp: now.Add(-2 * time.Second), Value: []byte("payload"),
+	}}}}
+	registry := metrics.NewRegistry()
+	catalog := metrics.NewCatalog(registry)
+	runner, err := agenttraceprocessor.NewRunner(agenttraceprocessor.RunnerConfig{
+		Consumer: consumer, Handler: &fakeHandler{disposition: agenttraceprocessor.Commit}, Metrics: catalog, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := metricFloat(t, catalog.AgentTraceConsumerLag.WithLabelValues("3")); got != 2 {
+		t.Fatalf("partition lag=%v", got)
+	}
+	if got := metricFloat(t, catalog.AgentTraceSearchableFreshness); got != 2 {
+		t.Fatalf("searchable freshness=%v", got)
+	}
+}
+
+func metricFloat(t *testing.T, metric prometheus.Metric) float64 {
+	t.Helper()
+	value := &dto.Metric{}
+	if err := metric.Write(value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Counter != nil {
+		return value.Counter.GetValue()
+	}
+	return value.Gauge.GetValue()
 }
 
 func newRunner(t *testing.T, consumer agenttraceprocessor.Consumer, handler agenttraceprocessor.Handler) *agenttraceprocessor.Runner {

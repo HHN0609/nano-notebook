@@ -169,7 +169,7 @@ func main() {
 		CookieSecure: config.CookieSecure, Version: config.Version, DefaultModel: config.DefaultModel,
 		AgentRun: runConfig, AgentConfiguration: agentConfiguration,
 		AgentCatalog: definitionCatalog, AgentRelease: config.AgentRelease,
-		AdminTraces: queryClient, ReplaySealer: replaySealer, TraceSink: traceExporter,
+		AdminTraces: queryClient, AdminTraceAnalytics: queryClient, ReplaySealer: replaySealer, TraceSink: traceExporter,
 		SourceUploads: sourceStore,
 		SourceFetcher: remoteFetcher, SourceSnapshots: sourceStore,
 		Metrics: metricsCatalog,

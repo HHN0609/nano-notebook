@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -21,14 +22,16 @@ type FranzConsumerConfig struct {
 	FetchMaxWait     time.Duration
 	SessionTimeout   time.Duration
 	RebalanceTimeout time.Duration
+	Metrics          *metrics.Catalog
 }
 
 // FranzConsumer keeps a polled batch rebalance-fenced until every message is
 // committed. A transiently failed suffix is returned again by the next Poll.
 type FranzConsumer struct {
-	client         *kgo.Client
-	maxPollRecords int
-	pending        []*kgo.Record
+	client                *kgo.Client
+	maxPollRecords        int
+	pending               []*kgo.Record
+	pendingHighWatermarks map[string]int64
 }
 
 // defaultConsumerResetOffset makes a fresh projection group rebuild from the
@@ -54,7 +57,7 @@ func NewFranzConsumer(config FranzConsumerConfig) (*FranzConsumer, error) {
 		config.FetchMaxWait <= 0 || config.SessionTimeout <= 0 || config.RebalanceTimeout <= 0 {
 		return nil, errors.New("Agent Trace Kafka Consumer configuration is incomplete or unbounded")
 	}
-	client, err := kgo.NewClient(
+	options := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
 		kgo.ClientID(config.ClientID),
 		kgo.ConsumerGroup(config.GroupID),
@@ -66,11 +69,25 @@ func NewFranzConsumer(config FranzConsumerConfig) (*FranzConsumer, error) {
 		kgo.FetchMaxWait(config.FetchMaxWait),
 		kgo.SessionTimeout(config.SessionTimeout),
 		kgo.RebalanceTimeout(config.RebalanceTimeout),
-	)
+	}
+	if config.Metrics != nil {
+		options = append(options,
+			kgo.OnPartitionsAssigned(func(context.Context, *kgo.Client, map[string][]int32) {
+				config.Metrics.AgentTraceConsumerRebalances.WithLabelValues("assigned").Inc()
+			}),
+			kgo.OnPartitionsRevoked(func(context.Context, *kgo.Client, map[string][]int32) {
+				config.Metrics.AgentTraceConsumerRebalances.WithLabelValues("revoked").Inc()
+			}),
+			kgo.OnPartitionsLost(func(context.Context, *kgo.Client, map[string][]int32) {
+				config.Metrics.AgentTraceConsumerRebalances.WithLabelValues("lost").Inc()
+			}),
+		)
+	}
+	client, err := kgo.NewClient(options...)
 	if err != nil {
 		return nil, fmt.Errorf("create Agent Trace Kafka Consumer: %w", err)
 	}
-	return &FranzConsumer{client: client, maxPollRecords: config.MaxPollRecords}, nil
+	return &FranzConsumer{client: client, maxPollRecords: config.MaxPollRecords, pendingHighWatermarks: make(map[string]int64)}, nil
 }
 
 func (c *FranzConsumer) Ping(ctx context.Context) error {
@@ -95,11 +112,20 @@ func (c *FranzConsumer) Poll(ctx context.Context) ([]Message, error) {
 			return nil, errors.Join(joined...)
 		}
 		c.pending = fetches.Records()
+		fetches.EachPartition(func(partition kgo.FetchTopicPartition) {
+			c.pendingHighWatermarks[fmt.Sprintf("%s/%d", partition.Topic, partition.Partition)] = partition.HighWatermark
+		})
 	}
 	messages := make([]Message, len(c.pending))
 	for index, record := range c.pending {
+		key := fmt.Sprintf("%s/%d", record.Topic, record.Partition)
+		highWatermark := c.pendingHighWatermarks[key]
+		if highWatermark < record.Offset+1 {
+			highWatermark = record.Offset + 1
+		}
 		messages[index] = Message{
 			Topic: record.Topic, Partition: record.Partition, Offset: record.Offset,
+			HighWatermark: highWatermark, Timestamp: record.Timestamp,
 			Key: append([]byte(nil), record.Key...), Value: append([]byte(nil), record.Value...),
 		}
 	}
@@ -141,6 +167,9 @@ func (c *FranzConsumer) Commit(ctx context.Context, messages []Message) error {
 		}
 	}
 	c.pending = remaining
+	if len(c.pending) == 0 {
+		clear(c.pendingHighWatermarks)
+	}
 	return nil
 }
 

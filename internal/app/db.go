@@ -161,11 +161,15 @@ create index if not exists identity_auth_attempts_recent_idx
 
 create table if not exists platform_capability_grants (
 	user_id text not null references identity_users(id) on delete cascade,
-	capability text not null check (capability in ('platform.trace.read', 'platform.trace.replay')),
+	capability text not null check (capability in ('platform.trace.read', 'platform.trace.replay', 'platform.trace.analytics')),
 	granted_by text,
 	granted_at timestamptz not null default now(),
 	primary key (user_id, capability)
 );
+
+alter table platform_capability_grants drop constraint if exists platform_capability_grants_capability_check;
+alter table platform_capability_grants add constraint platform_capability_grants_capability_check
+	check (capability in ('platform.trace.read', 'platform.trace.replay', 'platform.trace.analytics'));
 
 create table if not exists platform_replay_access_audit (
 	id text primary key,

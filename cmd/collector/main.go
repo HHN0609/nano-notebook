@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
@@ -183,6 +184,18 @@ func run(ctx context.Context, config collectorConfig) error {
 		return fmt.Errorf("open Collector query database: %w", err)
 	}
 	defer queryPool.Close()
+	analyticsConnection, err := openClickHouseConnection(config)
+	if err != nil {
+		return fmt.Errorf("open Collector analytics ClickHouse: %w", err)
+	}
+	defer analyticsConnection.Close()
+	if err := collector.RunClickHouseMigrations(ctx, analyticsConnection); err != nil {
+		return fmt.Errorf("run Collector analytics ClickHouse migrations: %w", err)
+	}
+	analyticsStore, err := collector.NewClickHouseTraceAnalyticsQueryStore(analyticsConnection)
+	if err != nil {
+		return err
+	}
 	if err := collector.RunMigrations(ctx, pool); err != nil {
 		return fmt.Errorf("run Collector migrations: %w", err)
 	}
@@ -200,6 +213,7 @@ func run(ctx context.Context, config collectorConfig) error {
 
 	metricsRegistry := metrics.NewRegistry()
 	metricsCatalog := metrics.NewCatalog(metricsRegistry)
+	instrumentedAnalyticsStore := collector.WithTraceAnalyticsMetrics(analyticsStore, metricsCatalog)
 	metricsAddr := env("NANO_COLLECTOR_METRICS_ADDR", "0.0.0.0:9093")
 	metricsServer := metrics.NewAdminServer(metricsAddr, metricsRegistry)
 	go func() {
@@ -217,31 +231,15 @@ func run(ctx context.Context, config collectorConfig) error {
 	go metrics.ObservePoolStats(ctx, metricsCatalog, "collector_query", 15*time.Second, poolStatFunc(queryPool))
 	go metrics.ObserveProjectionQueueStats(ctx, metricsCatalog, 15*time.Second, projectionQueueStatFunc(projectionPool))
 
-	return runCollectorService(ctx, config, pool, projectionPool, queryPool)
+	return runCollectorService(ctx, config, pool, projectionPool, queryPool, instrumentedAnalyticsStore)
 }
 
 func runClickHouseCollector(ctx context.Context, config collectorConfig) error {
-	connection, err := clickhouse.Open(&clickhouse.Options{
-		Addr: config.ClickHouseAddr,
-		Auth: clickhouse.Auth{
-			Database: config.ClickHouseDatabase,
-			Username: config.ClickHouseUser,
-			Password: config.ClickHousePassword,
-		},
-		Compression:     &clickhouse.Compression{Method: clickhouse.CompressionZSTD},
-		DialTimeout:     config.ClickHouseDialTimeout,
-		MaxOpenConns:    config.ClickHouseMaxOpenConns,
-		MaxIdleConns:    config.ClickHouseMaxIdleConns,
-		ConnMaxLifetime: time.Hour,
-		BlockBufferSize: 10,
-	})
+	connection, err := openClickHouseConnection(config)
 	if err != nil {
 		return fmt.Errorf("open Collector ClickHouse: %w", err)
 	}
 	defer connection.Close()
-	if err := connection.Ping(ctx); err != nil {
-		return fmt.Errorf("ping Collector ClickHouse: %w", err)
-	}
 	if err := collector.RunClickHouseMigrations(ctx, connection); err != nil {
 		return fmt.Errorf("run Collector ClickHouse migrations: %w", err)
 	}
@@ -259,9 +257,13 @@ func runClickHouseCollector(ctx context.Context, config collectorConfig) error {
 	if err != nil {
 		return err
 	}
+	analyticsStore, err := collector.NewClickHouseTraceAnalyticsQueryStore(connection)
+	if err != nil {
+		return err
+	}
 	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
 		Ingestor: ingestor, ServiceToken: config.ServiceToken, MaxBodyBytes: config.MaxBodyBytes,
-		QueryStore: queryStore, QueryToken: config.QueryToken, Readiness: connection.Ping,
+		QueryStore: queryStore, AnalyticsStore: analyticsStore, QueryToken: config.QueryToken, Readiness: connection.Ping,
 	})
 	if err != nil {
 		return err
@@ -290,6 +292,23 @@ func runClickHouseCollector(ctx context.Context, config collectorConfig) error {
 	slog.Info("Collector listening", "addr", config.Addr, "store", config.StoreBackend,
 		"query_database_max_connections", config.ClickHouseMaxOpenConns)
 	return service.Run(ctx, listener)
+}
+
+func openClickHouseConnection(config collectorConfig) (driver.Conn, error) {
+	return clickhouse.Open(&clickhouse.Options{
+		Addr: config.ClickHouseAddr,
+		Auth: clickhouse.Auth{
+			Database: config.ClickHouseDatabase,
+			Username: config.ClickHouseUser,
+			Password: config.ClickHousePassword,
+		},
+		Compression:     &clickhouse.Compression{Method: clickhouse.CompressionZSTD},
+		DialTimeout:     config.ClickHouseDialTimeout,
+		MaxOpenConns:    config.ClickHouseMaxOpenConns,
+		MaxIdleConns:    config.ClickHouseMaxIdleConns,
+		ConnMaxLifetime: time.Hour,
+		BlockBufferSize: 10,
+	})
 }
 
 func poolStatFunc(pool *pgxpool.Pool) func() metrics.PoolStat {
@@ -337,7 +356,7 @@ func openCollectorPool(ctx context.Context, databaseURL string, maxConns, minCon
 	return pool, nil
 }
 
-func runCollectorService(ctx context.Context, config collectorConfig, pool, projectionPool, queryPool *pgxpool.Pool) error {
+func runCollectorService(ctx context.Context, config collectorConfig, pool, projectionPool, queryPool *pgxpool.Pool, analyticsStore collector.TraceAnalyticsQueries) error {
 	stagingObjects, err := objectstore.NewS3Store(config.ReplayStagingS3)
 	if err != nil {
 		return fmt.Errorf("configure Collector staging object Store: %w", err)
@@ -384,7 +403,7 @@ func runCollectorService(ctx context.Context, config collectorConfig, pool, proj
 	}
 	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
 		Ingestor: ingestor, Purger: purger, ServiceToken: config.ServiceToken, MaxBodyBytes: config.MaxBodyBytes,
-		QueryStore: queryStore, QueryToken: config.QueryToken,
+		QueryStore: queryStore, AnalyticsStore: analyticsStore, QueryToken: config.QueryToken,
 		Readiness: func(readyCtx context.Context) error {
 			return errors.Join(pool.Ping(readyCtx), projectionPool.Ping(readyCtx), queryPool.Ping(readyCtx), stagingObjects.CheckReady(readyCtx), replayObjects.CheckReady(readyCtx))
 		},

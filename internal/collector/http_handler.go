@@ -16,24 +16,26 @@ import (
 )
 
 type HTTPConfig struct {
-	Ingestor     *Ingestor
-	Purger       *Purger
-	ServiceToken string
-	MaxBodyBytes int64
-	Readiness    func(context.Context) error
-	QueryStore   TraceQueries
-	QueryToken   string
+	Ingestor       *Ingestor
+	Purger         *Purger
+	ServiceToken   string
+	MaxBodyBytes   int64
+	Readiness      func(context.Context) error
+	QueryStore     TraceQueries
+	AnalyticsStore TraceAnalyticsQueries
+	QueryToken     string
 }
 
 type httpHandler struct {
-	ingestor     *Ingestor
-	purger       *Purger
-	serviceToken string
-	maxBodyBytes int64
-	readiness    func(context.Context) error
-	queryStore   TraceQueries
-	queryToken   string
-	mux          *http.ServeMux
+	ingestor       *Ingestor
+	purger         *Purger
+	serviceToken   string
+	maxBodyBytes   int64
+	readiness      func(context.Context) error
+	queryStore     TraceQueries
+	analyticsStore TraceAnalyticsQueries
+	queryToken     string
+	mux            *http.ServeMux
 }
 
 type TraceQueries interface {
@@ -42,17 +44,26 @@ type TraceQueries interface {
 	Replay(context.Context, agentobs.TraceID, agentobs.SpanID, string) (OpaqueReplay, error)
 }
 
+type TraceAnalyticsQueries interface {
+	Overview(context.Context, TraceAnalyticsQuery) (TraceAnalyticsOverviewResult, error)
+	Timeseries(context.Context, TraceAnalyticsQuery) (TraceAnalyticsTimeseriesResult, error)
+	Latency(context.Context, TraceAnalyticsQuery) (TraceAnalyticsLatencyResult, error)
+	Breakdowns(context.Context, TraceAnalyticsQuery) (TraceAnalyticsBreakdownResult, error)
+	Tools(context.Context, TraceAnalyticsQuery) (TraceAnalyticsToolsResult, error)
+}
+
 func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 	if config.Ingestor == nil || strings.TrimSpace(config.ServiceToken) == "" || config.MaxBodyBytes < 1 {
 		return nil, errors.New("Collector HTTP configuration is incomplete")
 	}
-	if config.QueryStore != nil && strings.TrimSpace(config.QueryToken) == "" {
+	if (config.QueryStore != nil || config.AnalyticsStore != nil) && strings.TrimSpace(config.QueryToken) == "" {
 		return nil, errors.New("Collector Query HTTP credential is required")
 	}
 	handler := &httpHandler{
 		ingestor: config.Ingestor, serviceToken: config.ServiceToken, maxBodyBytes: config.MaxBodyBytes,
 		purger: config.Purger, readiness: config.Readiness, queryStore: config.QueryStore,
-		queryToken: config.QueryToken, mux: http.NewServeMux(),
+		analyticsStore: config.AnalyticsStore,
+		queryToken:     config.QueryToken, mux: http.NewServeMux(),
 	}
 	handler.mux.HandleFunc("/internal/agent-observability/v1/batches", handler.batches)
 	handler.mux.HandleFunc("/internal/agent-observability/v2/batches", handler.batches)
@@ -60,7 +71,74 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 	handler.mux.HandleFunc("/internal/agent-observability/v1/health", handler.health)
 	handler.mux.HandleFunc("/internal/agent-observability/v1/traces", handler.traces)
 	handler.mux.HandleFunc("/internal/agent-observability/v1/traces/", handler.traceByID)
+	handler.mux.HandleFunc("/internal/agent-observability/v1/trace-analytics/", handler.traceAnalytics)
 	return handler, nil
+}
+
+func (h *httpHandler) traceAnalytics(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizedWith(r, h.queryToken) {
+		writeHTTPJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unauthorized"}})
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeHTTPJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	if h.analyticsStore == nil {
+		writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "collector_unavailable"}})
+		return
+	}
+	query, err := parseTraceAnalyticsHTTPQuery(r)
+	if err != nil {
+		writeHTTPJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_query"}})
+		return
+	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/internal/agent-observability/v1/trace-analytics/"), "/")
+	var result any
+	switch TraceAnalyticsQueryKind(path) {
+	case TraceAnalyticsOverview:
+		result, err = h.analyticsStore.Overview(r.Context(), query)
+	case TraceAnalyticsTimeseries:
+		result, err = h.analyticsStore.Timeseries(r.Context(), query)
+	case TraceAnalyticsLatency:
+		result, err = h.analyticsStore.Latency(r.Context(), query)
+	case TraceAnalyticsBreakdowns:
+		result, err = h.analyticsStore.Breakdowns(r.Context(), query)
+	case TraceAnalyticsTools:
+		result, err = h.analyticsStore.Tools(r.Context(), query)
+	default:
+		writeHTTPJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "not_found"}})
+		return
+	}
+	if err != nil {
+		writeHTTPJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_query"}})
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, result)
+}
+
+func parseTraceAnalyticsHTTPQuery(r *http.Request) (TraceAnalyticsQuery, error) {
+	values := r.URL.Query()
+	query := TraceAnalyticsQuery{
+		Bucket: AnalyticsBucket(values.Get("bucket")), AgentName: values.Get("agent"), ModelName: values.Get("model"),
+		Status: values.Get("status"), WorkloadKind: WorkloadKind(values.Get("workload_kind")), GroupBy: AnalyticsDimension(values.Get("group_by")),
+	}
+	var err error
+	after, err := parseOptionalInt64(values.Get("started_after_unix_nano"))
+	if err == nil {
+		before, beforeErr := parseOptionalInt64(values.Get("started_before_unix_nano"))
+		err = beforeErr
+		if after != nil {
+			query.StartedAfterUnixNano = *after
+		}
+		if before != nil {
+			query.StartedBeforeUnixNano = *before
+		}
+	}
+	if err == nil {
+		query.Limit, err = parseOptionalInt(values.Get("limit"), 0)
+	}
+	return query, err
 }
 
 func (h *httpHandler) traces(w http.ResponseWriter, r *http.Request) {

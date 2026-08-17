@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agenttraceprocessor"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -44,6 +46,7 @@ type config struct {
 	RebalanceTimeout       time.Duration
 	ReplayStagingS3        objectstore.S3Config
 	ReplayS3               objectstore.S3Config
+	MetricsAddr            string
 }
 
 func main() {
@@ -144,6 +147,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 			SecretAccessKey: value("NANO_REPLAY_S3_SECRET_ACCESS_KEY", ""), Bucket: value("NANO_REPLAY_S3_BUCKET", ""),
 			Region: value("NANO_REPLAY_S3_REGION", "us-east-1"),
 		},
+		MetricsAddr: value("NANO_AGENT_TRACE_PROCESSOR_METRICS_ADDR", "0.0.0.0:9096"),
 	}
 	postgresInvalid := parsed.StoreBackend == "postgres" && (parsed.DatabaseURL == "" || parsed.DatabaseMaxConns < 1 || parsed.DatabaseMaxConns > 256)
 	clickHouseInvalid := parsed.StoreBackend == "clickhouse" &&
@@ -156,13 +160,26 @@ func loadConfig(getenv func(string) string) (config, error) {
 		parsed.GroupID == "" || parsed.ClientID == "" || parsed.ProducerIDPrefix == "" || parsed.MaxPollRecords < 1 ||
 		parsed.FetchMaxBytes < 1 || parsed.FetchMaxWait <= 0 || parsed.SessionTimeout <= 0 || parsed.RebalanceTimeout <= 0 ||
 		parsed.ReplayStagingS3.Endpoint == "" || parsed.ReplayStagingS3.AccessKeyID == "" || parsed.ReplayStagingS3.SecretAccessKey == "" || parsed.ReplayStagingS3.Bucket == "" ||
-		parsed.ReplayS3.Endpoint == "" || parsed.ReplayS3.AccessKeyID == "" || parsed.ReplayS3.SecretAccessKey == "" || parsed.ReplayS3.Bucket == "" {
+		parsed.ReplayS3.Endpoint == "" || parsed.ReplayS3.AccessKeyID == "" || parsed.ReplayS3.SecretAccessKey == "" || parsed.ReplayS3.Bucket == "" || parsed.MetricsAddr == "" {
 		return config{}, errors.New("Agent Trace Processor configuration is incomplete or inconsistent")
 	}
 	return parsed, nil
 }
 
 func run(ctx context.Context, config config) error {
+	metricsRegistry := metrics.NewRegistry()
+	metricsCatalog := metrics.NewCatalog(metricsRegistry)
+	metricsServer := metrics.NewAdminServer(config.MetricsAddr, metricsRegistry)
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Agent Trace Processor metrics listener failed", "error", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = metricsServer.Shutdown(shutdownCtx)
+	}()
 	stagingObjects, err := objectstore.NewS3Store(config.ReplayStagingS3)
 	if err != nil {
 		return err
@@ -222,10 +239,11 @@ func run(ctx context.Context, config config) error {
 		if err := collector.RunClickHouseMigrations(ctx, connection); err != nil {
 			return fmt.Errorf("migrate Agent Trace Processor ClickHouse: %w", err)
 		}
-		store, err = collector.NewClickHouseStore(connection)
-		if err != nil {
-			return err
+		clickHouseStore, storeErr := collector.NewClickHouseStore(connection)
+		if storeErr != nil {
+			return storeErr
 		}
+		store = clickHouseStore.WithMetrics(metricsCatalog)
 	default:
 		return fmt.Errorf("unsupported Agent Trace Processor Store %q", config.StoreBackend)
 	}
@@ -237,6 +255,7 @@ func run(ctx context.Context, config config) error {
 		Brokers: config.Brokers, Topic: config.Topic, GroupID: config.GroupID, ClientID: config.ClientID,
 		MaxPollRecords: config.MaxPollRecords, FetchMaxBytes: config.FetchMaxBytes, FetchMaxWait: config.FetchMaxWait,
 		SessionTimeout: config.SessionTimeout, RebalanceTimeout: config.RebalanceTimeout,
+		Metrics: metricsCatalog,
 	})
 	if err != nil {
 		return err
@@ -260,12 +279,13 @@ func run(ctx context.Context, config config) error {
 	if err != nil {
 		return err
 	}
-	processor, err := agenttraceprocessor.New(agenttraceprocessor.Config{Topic: config.Topic, Ingestor: ingestor, Quarantine: quarantine})
+	processor, err := agenttraceprocessor.New(agenttraceprocessor.Config{Topic: config.Topic, Ingestor: ingestor, Quarantine: quarantine, Metrics: metricsCatalog})
 	if err != nil {
 		return err
 	}
 	runner, err := agenttraceprocessor.NewRunner(agenttraceprocessor.RunnerConfig{
 		Consumer: consumer, Handler: processor, RetryBackoff: 250 * time.Millisecond,
+		Metrics:     metricsCatalog,
 		ReportError: func(err error) { slog.Error("Agent Trace processing failed", "error", err) },
 	})
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 )
 
 const CodeInvalidEnvelope = "invalid_envelope"
@@ -24,11 +25,13 @@ const (
 
 // Message is the Kafka-client-neutral source record processed by this package.
 type Message struct {
-	Topic     string
-	Partition int32
-	Offset    int64
-	Key       []byte
-	Value     []byte
+	Topic         string
+	Partition     int32
+	Offset        int64
+	HighWatermark int64
+	Timestamp     time.Time
+	Key           []byte
+	Value         []byte
 }
 
 type Ingestor interface {
@@ -58,6 +61,7 @@ type Config struct {
 	Ingestor   Ingestor
 	Quarantine QuarantineWriter
 	Now        func() time.Time
+	Metrics    *metrics.Catalog
 }
 
 type Processor struct {
@@ -65,6 +69,7 @@ type Processor struct {
 	ingestor   Ingestor
 	quarantine QuarantineWriter
 	now        func() time.Time
+	metrics    *metrics.Catalog
 }
 
 func New(config Config) (*Processor, error) {
@@ -75,7 +80,7 @@ func New(config Config) (*Processor, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	return &Processor{topic: config.Topic, ingestor: config.Ingestor, quarantine: config.Quarantine, now: config.Now}, nil
+	return &Processor{topic: config.Topic, ingestor: config.Ingestor, quarantine: config.Quarantine, now: config.Now, metrics: config.Metrics}, nil
 }
 
 // Process returns Commit only after retained storage accepted the message or a
@@ -111,23 +116,29 @@ func (p *Processor) Process(ctx context.Context, message Message) (Disposition, 
 		if errors.Is(err, collector.ErrInvalidBatch) {
 			return p.quarantineMessage(ctx, message, collector.CodeInvalidChunk, err.Error())
 		}
+		p.recordMessage("retry")
 		return Retry, fmt.Errorf("persist Agent Trace message: %w", err)
 	}
 	if result.BatchID != batch.BatchID || len(result.Chunks) != 1 || result.Chunks[0].TraceID != envelope.Chunk.Trace.TraceID {
+		p.recordMessage("retry")
 		return Retry, errors.New("Agent Trace storage returned an invalid acknowledgement")
 	}
 	chunk := result.Chunks[0]
 	switch chunk.Status {
 	case collector.ChunkCommitted:
+		p.recordMessage("persisted")
 		return Commit, nil
 	case collector.ChunkRetryable:
+		p.recordMessage("retry")
 		return Retry, fmt.Errorf("Agent Trace storage requested retry: %s", chunk.Code)
 	case collector.ChunkRejected:
 		if chunk.Code == collector.CodeTombstoned {
+			p.recordMessage("tombstoned")
 			return Commit, nil
 		}
 		return p.quarantineMessage(ctx, message, chunk.Code, "Agent Trace storage permanently rejected message")
 	default:
+		p.recordMessage("retry")
 		return Retry, fmt.Errorf("Agent Trace storage returned unknown status %q", chunk.Status)
 	}
 }
@@ -139,7 +150,15 @@ func (p *Processor) quarantineMessage(ctx context.Context, message Message, code
 		Code: code, Detail: detail, ObservedAt: p.now().UTC(),
 	}
 	if err := p.quarantine.Write(ctx, entry); err != nil {
+		p.recordMessage("retry")
 		return Retry, fmt.Errorf("quarantine Agent Trace message: %w", err)
 	}
+	p.recordMessage("quarantined")
 	return Commit, nil
+}
+
+func (p *Processor) recordMessage(result string) {
+	if p != nil && p.metrics != nil {
+		p.metrics.AgentTraceProcessorMessages.WithLabelValues(result).Inc()
+	}
 }

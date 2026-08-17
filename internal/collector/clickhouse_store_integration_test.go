@@ -10,6 +10,8 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 )
 
@@ -139,6 +141,169 @@ func TestClickHouseStoreReconcilesReplayAndRejectsCanonicalConflict(t *testing.T
 	}
 	if physicalRows != 2 {
 		t.Fatalf("physical rows=%d want=2", physicalRows)
+	}
+}
+
+func TestClickHouseStoreWritesTypedTraceAndSpanAnalytics(t *testing.T) {
+	ctx := context.Background()
+	connection := openClickHouseTestConnection(t, ctx)
+	if err := collector.RunClickHouseMigrations(ctx, connection); err != nil {
+		t.Fatal(err)
+	}
+	store, err := collector.NewClickHouseStore(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suffix := fmt.Sprintf("typed-analytics-%d", time.Now().UnixNano())
+	traceID := agentobs.TraceID("trace-" + suffix)
+	rootID, modelID, toolID := agentobs.SpanID("root-"+suffix), agentobs.SpanID("model-"+suffix), agentobs.SpanID("tool-"+suffix)
+	base := time.Now().UTC()
+	record := func(sequence int, kind agentobs.RecordKind, spanID agentobs.SpanID, name string, offset time.Duration, attributes ...agentobs.Attribute) agentobs.Record {
+		item := collectorRecord(traceID, spanID, fmt.Sprintf("typed/%d", sequence), kind, name)
+		item.OccurredAt, item.Attributes = base.Add(offset), attributes
+		return item
+	}
+	rootStart := record(1, agentobs.RecordSpanStarted, rootID, semconv.AgentExecution, 0,
+		agentobs.String("nano.agent.definition", "chat.leader@1"), agentobs.String("nano.run.prompt_version", "prompt@4"),
+		agentobs.String("nano.configuration_set.id", "config@2"))
+	modelStart := record(2, agentobs.RecordSpanStarted, modelID, semconv.ModelCall, time.Millisecond,
+		agentobs.String(semconv.ModelNameKey, "requested-model"))
+	modelStart.ParentSpanID = rootID
+	modelEnd := record(3, agentobs.RecordSpanEnded, modelID, semconv.ModelCall, 2*time.Millisecond,
+		agentobs.String(semconv.ModelProviderKey, "aliyun"), agentobs.String(semconv.ModelNameKey, "selected-model"),
+		agentobs.Int64(semconv.TokenCachedKey, 7), agentobs.Int64(semconv.TokenReasoningKey, 3))
+	modelEnd.Status = agentobs.StatusOK
+	toolStart := record(4, agentobs.RecordSpanStarted, toolID, semconv.AgentAction, 3*time.Millisecond,
+		agentobs.String(semconv.ActionNameKey, "current_time"))
+	toolStart.ParentSpanID = rootID
+	toolEnd := record(5, agentobs.RecordSpanEnded, toolID, semconv.AgentAction, 5*time.Millisecond,
+		agentobs.String(semconv.ActionNameKey, "current_time"), agentobs.String(semconv.OperationStatusKey, "domain_error"),
+		agentobs.String(semconv.ErrorKindKey, "invalid_time_zone"))
+	toolEnd.Status = agentobs.StatusError
+	rootEnd := record(6, agentobs.RecordSpanEnded, rootID, semconv.AgentExecution, 6*time.Millisecond,
+		agentobs.String("nano.run.status", "failed"), agentobs.String("nano.error.code", "action_budget_exhausted"))
+	rootEnd.Status = agentobs.StatusError
+	batch := collector.Batch{ProtocolVersion: collector.ProtocolVersion, BatchID: "batch-" + suffix, ProducerID: "nano-worker", CreatedAt: base,
+		Chunks: []collector.TraceChunk{{Trace: collector.TraceDescriptor{
+			TraceID: traceID, RunID: "run-" + suffix, ChatID: "chat-" + suffix, NotebookID: "notebook-" + suffix,
+			RootSpanID: rootID, AgentName: "agent-a", SchemaVersion: 1, SemanticConventionVersion: 1,
+		}, FirstSequence: 1, Records: []collector.SequencedRecord{
+			collectorEnvelope(t, 1, rootStart), collectorEnvelope(t, 2, modelStart), collectorEnvelope(t, 3, modelEnd),
+			collectorEnvelope(t, 4, toolStart), collectorEnvelope(t, 5, toolEnd), collectorEnvelope(t, 6, rootEnd),
+		}}}}
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = collector.ContextWithKafkaSourcePosition(ctx, collector.KafkaSourcePosition{Topic: "nano.observability.agent-trace.v1", Partition: 8, Offset: time.Now().UnixNano()})
+	if _, err := ingestor.Ingest(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	var providers, delegationTargets, ragDegradations []string
+	var cached, reasoning *int64
+	var errorCode, stopReason, definition, prompt, configuration string
+	if err := connection.QueryRow(ctx, `
+		SELECT providers, cached_tokens, reasoning_tokens, error_code, stop_reason, agent_definition,
+			prompt_version, configuration_version, delegation_targets, rag_degradations
+		FROM obs_trace_summaries FINAL WHERE trace_id = ?
+	`, string(traceID)).Scan(&providers, &cached, &reasoning, &errorCode, &stopReason, &definition, &prompt, &configuration, &delegationTargets, &ragDegradations); err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || providers[0] != "aliyun" || cached == nil || *cached != 7 || reasoning == nil || *reasoning != 3 ||
+		errorCode != "action_budget_exhausted" || stopReason != "action_budget_exhausted" || definition != "chat.leader@1" ||
+		prompt != "prompt@4" || configuration != "config@2" || len(delegationTargets) != 0 || len(ragDegradations) != 0 {
+		t.Fatalf("typed summary providers=%v cached=%v reasoning=%v error=%q stop=%q definition=%q prompt=%q config=%q", providers, cached, reasoning, errorCode, stopReason, definition, prompt, configuration)
+	}
+	rows, err := connection.Query(ctx, `
+		SELECT span_kind, tool_name, provider, cached_tokens, reasoning_tokens, error_code, outcome
+		FROM obs_span_analytics FINAL WHERE trace_id = ? ORDER BY span_kind, span_id
+	`, string(traceID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type typedSpan struct {
+		kind, tool, provider, errorCode, outcome string
+		cached, reasoning                        *int64
+	}
+	var spans []typedSpan
+	for rows.Next() {
+		var span typedSpan
+		if err := rows.Scan(&span.kind, &span.tool, &span.provider, &span.cached, &span.reasoning, &span.errorCode, &span.outcome); err != nil {
+			t.Fatal(err)
+		}
+		spans = append(spans, span)
+	}
+	if len(spans) != 2 || spans[0].kind != "model" || spans[0].provider != "aliyun" || spans[1].kind != "tool" ||
+		spans[1].tool != "current_time" || spans[1].errorCode != "invalid_time_zone" || spans[1].outcome != "domain_error" {
+		t.Fatalf("typed spans=%#v", spans)
+	}
+}
+
+func TestClickHouseAnalyticsConvergesFromActiveToTerminalAcrossDuplicateDelivery(t *testing.T) {
+	ctx := context.Background()
+	connection := openClickHouseTestConnection(t, ctx)
+	if err := collector.RunClickHouseMigrations(ctx, connection); err != nil {
+		t.Fatal(err)
+	}
+	store, err := collector.NewClickHouseStore(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suffix := fmt.Sprintf("analytics-convergence-%d", time.Now().UnixNano())
+	batch := collectorBatchFor(t, suffix)
+	base := time.Now().UTC()
+	rootEnd := collectorRecord(batch.Chunks[0].Trace.TraceID, batch.Chunks[0].Trace.RootSpanID, "run/"+batch.Chunks[0].Trace.RunID+"/root/end", agentobs.RecordSpanEnded, semconv.AgentExecution)
+	rootEnd.Status = agentobs.StatusOK
+	batch.Chunks[0].Records[1].Record = rootEnd
+	for index := range batch.Chunks[0].Records {
+		batch.Chunks[0].Records[index].Record.OccurredAt = base.Add(time.Duration(index) * time.Millisecond)
+		batch.Chunks[0].Records[index] = collectorEnvelope(t, index+1, batch.Chunks[0].Records[index].Record)
+	}
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstChunk := batch.Chunks[0]
+	firstChunk.Records = append([]collector.SequencedRecord(nil), batch.Chunks[0].Records[:1]...)
+	first := collector.Batch{ProtocolVersion: batch.ProtocolVersion, BatchID: "active-" + suffix, ProducerID: batch.ProducerID, CreatedAt: batch.CreatedAt, Chunks: []collector.TraceChunk{firstChunk}}
+	firstCtx := collector.ContextWithKafkaSourcePosition(ctx, collector.KafkaSourcePosition{Topic: "nano.observability.agent-trace.v1", Partition: 9, Offset: time.Now().UnixNano()})
+	if _, err := ingestor.Ingest(firstCtx, first); err != nil {
+		t.Fatal(err)
+	}
+	analytics, err := collector.NewClickHouseTraceAnalyticsQueryStore(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := collector.TraceAnalyticsQuery{
+		StartedAfterUnixNano: base.Add(-time.Minute).UnixNano(), StartedBeforeUnixNano: base.Add(time.Minute).UnixNano(),
+		NotebookIDs: []string{batch.Chunks[0].Trace.NotebookID},
+	}
+	active, err := analytics.Overview(ctx, query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Data.RunCount != 1 || active.Data.CompletedCount != 0 || active.Data.SuccessRate != nil || active.Data.P95DurationNanoseconds != nil {
+		t.Fatalf("active overview=%#v", active.Data)
+	}
+
+	terminalChunk := batch.Chunks[0]
+	terminalChunk.FirstSequence = 2
+	terminalChunk.Records = append([]collector.SequencedRecord(nil), batch.Chunks[0].Records[1:]...)
+	terminal := collector.Batch{ProtocolVersion: batch.ProtocolVersion, BatchID: "terminal-" + suffix, ProducerID: batch.ProducerID, CreatedAt: batch.CreatedAt, Chunks: []collector.TraceChunk{terminalChunk}}
+	terminalCtx := collector.ContextWithKafkaSourcePosition(ctx, collector.KafkaSourcePosition{Topic: "nano.observability.agent-trace.v1", Partition: 9, Offset: time.Now().UnixNano()})
+	if _, err := ingestor.Ingest(terminalCtx, terminal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ingestor.Ingest(terminalCtx, terminal); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := analytics.Overview(ctx, query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Data.RunCount != 1 || completed.Data.CompletedCount != 1 || completed.Data.SuccessRate == nil || *completed.Data.SuccessRate != 1 {
+		t.Fatalf("terminal overview after duplicate=%#v", completed.Data)
 	}
 }
 

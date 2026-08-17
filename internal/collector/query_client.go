@@ -21,6 +21,14 @@ type QueryClient interface {
 	Replay(context.Context, agentobs.TraceID, agentobs.SpanID, string) (OpaqueReplay, error)
 }
 
+type AnalyticsQueryClient interface {
+	Overview(context.Context, TraceAnalyticsQuery) (TraceAnalyticsOverviewResult, error)
+	Timeseries(context.Context, TraceAnalyticsQuery) (TraceAnalyticsTimeseriesResult, error)
+	Latency(context.Context, TraceAnalyticsQuery) (TraceAnalyticsLatencyResult, error)
+	Breakdowns(context.Context, TraceAnalyticsQuery) (TraceAnalyticsBreakdownResult, error)
+	Tools(context.Context, TraceAnalyticsQuery) (TraceAnalyticsToolsResult, error)
+}
+
 type HTTPQueryClientConfig struct {
 	Endpoint         string
 	ServiceToken     string
@@ -86,6 +94,68 @@ func (c *HTTPQueryClient) Replay(ctx context.Context, traceID agentobs.TraceID, 
 	path := "/internal/agent-observability/v1/traces/" + url.PathEscape(string(traceID)) + "/replay/" + url.PathEscape(replayID) + "?span_id=" + url.QueryEscape(string(spanID))
 	err := c.get(ctx, path, &response)
 	return response.Data, err
+}
+
+func (c *HTTPQueryClient) Overview(ctx context.Context, query TraceAnalyticsQuery) (TraceAnalyticsOverviewResult, error) {
+	var result TraceAnalyticsOverviewResult
+	err := c.get(ctx, "/internal/agent-observability/v1/trace-analytics/overview?"+traceAnalyticsParameters(query).Encode(), &result)
+	return result, err
+}
+
+func (c *HTTPQueryClient) Timeseries(ctx context.Context, query TraceAnalyticsQuery) (TraceAnalyticsTimeseriesResult, error) {
+	var result TraceAnalyticsTimeseriesResult
+	err := c.get(ctx, "/internal/agent-observability/v1/trace-analytics/timeseries?"+traceAnalyticsParameters(query).Encode(), &result)
+	return result, err
+}
+
+func (c *HTTPQueryClient) Latency(ctx context.Context, query TraceAnalyticsQuery) (TraceAnalyticsLatencyResult, error) {
+	var result TraceAnalyticsLatencyResult
+	err := c.get(ctx, "/internal/agent-observability/v1/trace-analytics/latency?"+traceAnalyticsParameters(query).Encode(), &result)
+	return result, err
+}
+
+func (c *HTTPQueryClient) Breakdowns(ctx context.Context, query TraceAnalyticsQuery) (TraceAnalyticsBreakdownResult, error) {
+	var result TraceAnalyticsBreakdownResult
+	err := c.get(ctx, "/internal/agent-observability/v1/trace-analytics/breakdowns?"+traceAnalyticsParameters(query).Encode(), &result)
+	return result, err
+}
+
+func (c *HTTPQueryClient) Tools(ctx context.Context, query TraceAnalyticsQuery) (TraceAnalyticsToolsResult, error) {
+	var result TraceAnalyticsToolsResult
+	err := c.get(ctx, "/internal/agent-observability/v1/trace-analytics/tools?"+traceAnalyticsParameters(query).Encode(), &result)
+	return result, err
+}
+
+func traceAnalyticsParameters(query TraceAnalyticsQuery) url.Values {
+	parameters := url.Values{}
+	if query.StartedAfterUnixNano != 0 {
+		parameters.Set("started_after_unix_nano", strconv.FormatInt(query.StartedAfterUnixNano, 10))
+	}
+	if query.StartedBeforeUnixNano != 0 {
+		parameters.Set("started_before_unix_nano", strconv.FormatInt(query.StartedBeforeUnixNano, 10))
+	}
+	if query.Bucket != "" {
+		parameters.Set("bucket", string(query.Bucket))
+	}
+	if query.AgentName != "" {
+		parameters.Set("agent", query.AgentName)
+	}
+	if query.ModelName != "" {
+		parameters.Set("model", query.ModelName)
+	}
+	if query.Status != "" {
+		parameters.Set("status", query.Status)
+	}
+	if query.WorkloadKind != "" {
+		parameters.Set("workload_kind", string(query.WorkloadKind))
+	}
+	if query.GroupBy != "" {
+		parameters.Set("group_by", string(query.GroupBy))
+	}
+	if query.Limit > 0 {
+		parameters.Set("limit", strconv.Itoa(query.Limit))
+	}
+	return parameters
 }
 
 func (c *HTTPQueryClient) get(ctx context.Context, path string, target any) error {

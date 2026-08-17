@@ -51,6 +51,21 @@ type Catalog struct {
 	DBPoolConnections                          *prometheus.GaugeVec
 	CollectorProjectionQueueStuckRecords       *prometheus.GaugeVec
 	CollectorProjectionQueueStuckOldestSeconds *prometheus.GaugeVec
+
+	// Kafka-to-ClickHouse Trace analytics pipeline. Labels are deliberately
+	// operational and bounded; identities remain in Trace storage and logs.
+	AgentTraceProcessorMessages      *prometheus.CounterVec
+	AgentTraceProcessorBatchRecords  prometheus.Histogram
+	AgentTraceProcessorBatchBytes    prometheus.Histogram
+	AgentTraceProcessorDuration      *prometheus.HistogramVec
+	AgentTraceOffsetCommitFailures   prometheus.Counter
+	AgentTraceConsumerRebalances     *prometheus.CounterVec
+	AgentTraceConsumerLag            *prometheus.GaugeVec
+	AgentTraceOldestMessageAge       *prometheus.GaugeVec
+	AgentTraceSearchableFreshness    prometheus.Gauge
+	AgentTraceRawSummaryWatermarkGap prometheus.Gauge
+	ClickHouseRequests               *prometheus.CounterVec
+	ClickHouseRequestDuration        *prometheus.HistogramVec
 }
 
 // NewCatalog constructs and registers every metric against reg. It panics
@@ -122,6 +137,31 @@ func NewCatalog(reg *Registry) *Catalog {
 	c.CollectorProjectionQueueStuckOldestSeconds = mustGaugeVec(reg, "nano_collector_projection_queue_stuck_oldest_seconds",
 		"Age of the oldest Trace stuck in the Collector projection queue, by error code.", []string{"error_code"})
 
+	c.AgentTraceProcessorMessages = mustCounterVec(reg, "nano_agent_trace_processor_messages_total",
+		"Agent Trace Kafka messages by terminal processor result.", []string{"result"})
+	c.AgentTraceProcessorBatchRecords = mustHistogram(reg, "nano_agent_trace_processor_batch_records",
+		"Records per Agent Trace Kafka poll batch.", []float64{1, 2, 4, 8, 16, 32, 64, 128})
+	c.AgentTraceProcessorBatchBytes = mustHistogram(reg, "nano_agent_trace_processor_batch_bytes",
+		"Bytes per Agent Trace Kafka poll batch.", prometheus.ExponentialBuckets(1024, 4, 10))
+	c.AgentTraceProcessorDuration = mustHistogramVec(reg, "nano_agent_trace_processor_duration_seconds",
+		"Agent Trace message processing latency by bounded result.", []string{"result"}, HTTPDurationBuckets)
+	c.AgentTraceOffsetCommitFailures = mustCounter(reg, "nano_agent_trace_offset_commit_failures_total",
+		"Failed Agent Trace Kafka offset commits.")
+	c.AgentTraceConsumerRebalances = mustCounterVec(reg, "nano_agent_trace_consumer_rebalances_total",
+		"Agent Trace Kafka consumer group partition events.", []string{"event"})
+	c.AgentTraceConsumerLag = mustGaugeVec(reg, "nano_agent_trace_consumer_lag_records",
+		"Agent Trace Kafka high-watermark lag by partition.", []string{"partition"})
+	c.AgentTraceOldestMessageAge = mustGaugeVec(reg, "nano_agent_trace_oldest_message_age_seconds",
+		"Age of the oldest polled Agent Trace Kafka message by partition.", []string{"partition"})
+	c.AgentTraceSearchableFreshness = mustGauge(reg, "nano_agent_trace_searchable_freshness_seconds",
+		"Age from Kafka message timestamp to successful retained-store commit.")
+	c.AgentTraceRawSummaryWatermarkGap = mustGauge(reg, "nano_agent_trace_raw_summary_watermark_gap_seconds",
+		"Non-negative gap between the latest raw record and summary projection watermarks.")
+	c.ClickHouseRequests = mustCounterVec(reg, "nano_clickhouse_requests_total",
+		"ClickHouse operations by bounded operation and outcome.", []string{"operation", "outcome"})
+	c.ClickHouseRequestDuration = mustHistogramVec(reg, "nano_clickhouse_request_duration_seconds",
+		"ClickHouse operation latency by bounded operation and outcome.", []string{"operation", "outcome"}, HTTPDurationBuckets)
+
 	return c
 }
 
@@ -146,5 +186,17 @@ func mustGauge(reg *Registry, name, help string) prometheus.Gauge {
 func mustGaugeVec(reg *Registry, name, help string, labels []string) *prometheus.GaugeVec {
 	v := prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: name, Help: help}, labels)
 	reg.MustRegister(name, labels, v)
+	return v
+}
+
+func mustCounter(reg *Registry, name, help string) prometheus.Counter {
+	v := prometheus.NewCounter(prometheus.CounterOpts{Name: name, Help: help})
+	reg.MustRegister(name, nil, v)
+	return v
+}
+
+func mustHistogram(reg *Registry, name, help string, buckets []float64) prometheus.Histogram {
+	v := prometheus.NewHistogram(prometheus.HistogramOpts{Name: name, Help: help, Buckets: buckets})
+	reg.MustRegister(name, nil, v)
 	return v
 }

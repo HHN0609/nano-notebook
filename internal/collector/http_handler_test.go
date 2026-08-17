@@ -199,6 +199,61 @@ func TestHTTPHandlerReportsNotReadyWhenReadinessCheckFails(t *testing.T) {
 	}
 }
 
+func TestHTTPHandlerServesTraceAnalyticsWithQueryCredentialAndIgnoresClientScope(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	analytics := &fakeTraceAnalyticsQueries{overview: collector.TraceAnalyticsOverviewResult{
+		TraceAnalyticsMetadata: collector.TraceAnalyticsMetadata{SchemaVersion: 1, GeneratedAt: time.Unix(1_700_000_000, 0).UTC()},
+		Data:                   collector.TraceAnalyticsOverviewData{RunCount: 7},
+	}}
+	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
+		Ingestor: ingestor, ServiceToken: "collector-secret", MaxBodyBytes: 1024,
+		AnalyticsStore: analytics, QueryToken: "query-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet,
+		"/internal/agent-observability/v1/trace-analytics/overview?started_after_unix_nano=100&started_before_unix_nano=200&bucket=5m&agent=agent-a&notebook_id=attacker-scope", nil)
+	request.Header.Set("Authorization", "Bearer query-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"run_count":7`)) ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"schema_version":1`)) {
+		t.Fatalf("analytics status=%d body=%s", response.Code, response.Body.String())
+	}
+	if analytics.overviewCalls != 1 || analytics.query.StartedAfterUnixNano != 100 || analytics.query.StartedBeforeUnixNano != 200 ||
+		analytics.query.Bucket != collector.AnalyticsBucketFiveMinutes || analytics.query.AgentName != "agent-a" || len(analytics.query.NotebookIDs) != 0 {
+		t.Fatalf("analytics query=%#v calls=%d", analytics.query, analytics.overviewCalls)
+	}
+
+	denied := httptest.NewRecorder()
+	handler.ServeHTTP(denied, httptest.NewRequest(http.MethodGet, "/internal/agent-observability/v1/trace-analytics/overview", nil))
+	if denied.Code != http.StatusUnauthorized || analytics.overviewCalls != 1 {
+		t.Fatalf("denied status=%d calls=%d", denied.Code, analytics.overviewCalls)
+	}
+
+	breakdowns := httptest.NewRecorder()
+	breakdownRequest := httptest.NewRequest(http.MethodGet, "/internal/agent-observability/v1/trace-analytics/breakdowns?group_by=error_code&limit=4", nil)
+	breakdownRequest.Header.Set("Authorization", "Bearer query-secret")
+	handler.ServeHTTP(breakdowns, breakdownRequest)
+	if breakdowns.Code != http.StatusOK || analytics.breakdownCalls != 1 || analytics.query.GroupBy != collector.AnalyticsDimensionErrorCode || analytics.query.Limit != 4 {
+		t.Fatalf("breakdowns status=%d calls=%d query=%#v", breakdowns.Code, analytics.breakdownCalls, analytics.query)
+	}
+
+	tools := httptest.NewRecorder()
+	toolRequest := httptest.NewRequest(http.MethodGet, "/internal/agent-observability/v1/trace-analytics/tools?limit=6", nil)
+	toolRequest.Header.Set("Authorization", "Bearer query-secret")
+	handler.ServeHTTP(tools, toolRequest)
+	if tools.Code != http.StatusOK || analytics.toolCalls != 1 || analytics.query.Limit != 6 {
+		t.Fatalf("tools status=%d calls=%d query=%#v", tools.Code, analytics.toolCalls, analytics.query)
+	}
+}
+
 func TestHTTPHandlerRejectsOversizedBatchBeforeIngest(t *testing.T) {
 	store := collector.NewMemoryStore()
 	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
@@ -358,4 +413,36 @@ type unavailableStore struct{}
 
 func (unavailableStore) CommitTraceChunk(context.Context, collector.TraceChunk) (int, error) {
 	return 0, errors.New("database unavailable")
+}
+
+type fakeTraceAnalyticsQueries struct {
+	overviewCalls, breakdownCalls, toolCalls int
+	query                                    collector.TraceAnalyticsQuery
+	overview                                 collector.TraceAnalyticsOverviewResult
+}
+
+func (f *fakeTraceAnalyticsQueries) Overview(_ context.Context, query collector.TraceAnalyticsQuery) (collector.TraceAnalyticsOverviewResult, error) {
+	f.overviewCalls++
+	f.query = query
+	return f.overview, nil
+}
+
+func (f *fakeTraceAnalyticsQueries) Timeseries(context.Context, collector.TraceAnalyticsQuery) (collector.TraceAnalyticsTimeseriesResult, error) {
+	return collector.TraceAnalyticsTimeseriesResult{}, nil
+}
+
+func (f *fakeTraceAnalyticsQueries) Latency(context.Context, collector.TraceAnalyticsQuery) (collector.TraceAnalyticsLatencyResult, error) {
+	return collector.TraceAnalyticsLatencyResult{}, nil
+}
+
+func (f *fakeTraceAnalyticsQueries) Breakdowns(_ context.Context, query collector.TraceAnalyticsQuery) (collector.TraceAnalyticsBreakdownResult, error) {
+	f.breakdownCalls++
+	f.query = query
+	return collector.TraceAnalyticsBreakdownResult{}, nil
+}
+
+func (f *fakeTraceAnalyticsQueries) Tools(_ context.Context, query collector.TraceAnalyticsQuery) (collector.TraceAnalyticsToolsResult, error) {
+	f.toolCalls++
+	f.query = query
+	return collector.TraceAnalyticsToolsResult{}, nil
 }

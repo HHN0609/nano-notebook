@@ -25,10 +25,12 @@ func RunClickHouseMigrations(ctx context.Context, executor clickHouseMigrationEx
 // Agent Trace facts. Raw rows repeat their Trace descriptor intentionally so a
 // retained fact never depends on a mutable parent row.
 func ClickHouseMigrationsSQL() string {
-	return clickHouseRawMigrationSQL + "\n" + clickHouseSummaryMigrationSQL
+	return clickHouseRawMigrationSQL + "\n" + clickHouseSummaryMigrationSQL + "\n" + clickHouseAnalyticsColumnsMigrationSQL + "\n" + clickHouseSpanAnalyticsMigrationSQL
 }
 
-var clickHouseMigrationStatements = []string{clickHouseRawMigrationSQL, clickHouseSummaryMigrationSQL}
+var clickHouseMigrationStatements = []string{
+	clickHouseRawMigrationSQL, clickHouseSummaryMigrationSQL, clickHouseAnalyticsColumnsMigrationSQL, clickHouseSpanAnalyticsMigrationSQL,
+}
 
 const clickHouseRawMigrationSQL = `
 create table if not exists obs_trace_records_raw (
@@ -95,6 +97,19 @@ create table if not exists obs_trace_summaries (
 	cost_currency LowCardinality(String),
 	cost_source LowCardinality(String),
 	attempt_count UInt32,
+	providers Array(LowCardinality(String)),
+	cached_tokens Nullable(Int64),
+	reasoning_tokens Nullable(Int64),
+	error_code LowCardinality(String),
+	stop_reason LowCardinality(String),
+	agent_definition LowCardinality(String),
+	prompt_version LowCardinality(String),
+	configuration_version LowCardinality(String),
+	delegation_targets Array(LowCardinality(String)),
+	delegation_outcomes Array(LowCardinality(String)),
+	rag_stages Array(LowCardinality(String)),
+	rag_degradations Array(LowCardinality(String)),
+	citation_outcomes Array(LowCardinality(String)),
 	committed_sequence UInt32,
 	projected_sequence UInt32,
 	ingest_version UInt64,
@@ -103,6 +118,53 @@ create table if not exists obs_trace_summaries (
 ENGINE = ReplacingMergeTree(ingest_version)
 PARTITION BY toYYYYMM(started_at)
 ORDER BY trace_id
+TTL started_at + INTERVAL 90 DAY DELETE
+SETTINGS index_granularity = 8192;
+`
+
+const clickHouseAnalyticsColumnsMigrationSQL = `
+ALTER TABLE obs_trace_summaries
+	ADD COLUMN IF NOT EXISTS providers Array(LowCardinality(String)) AFTER attempt_count,
+	ADD COLUMN IF NOT EXISTS cached_tokens Nullable(Int64) AFTER providers,
+	ADD COLUMN IF NOT EXISTS reasoning_tokens Nullable(Int64) AFTER cached_tokens,
+	ADD COLUMN IF NOT EXISTS error_code LowCardinality(String) AFTER reasoning_tokens,
+	ADD COLUMN IF NOT EXISTS stop_reason LowCardinality(String) AFTER error_code,
+	ADD COLUMN IF NOT EXISTS agent_definition LowCardinality(String) AFTER stop_reason,
+	ADD COLUMN IF NOT EXISTS prompt_version LowCardinality(String) AFTER agent_definition,
+	ADD COLUMN IF NOT EXISTS configuration_version LowCardinality(String) AFTER prompt_version,
+	ADD COLUMN IF NOT EXISTS delegation_targets Array(LowCardinality(String)) AFTER configuration_version,
+	ADD COLUMN IF NOT EXISTS delegation_outcomes Array(LowCardinality(String)) AFTER delegation_targets,
+	ADD COLUMN IF NOT EXISTS rag_stages Array(LowCardinality(String)) AFTER delegation_outcomes,
+	ADD COLUMN IF NOT EXISTS rag_degradations Array(LowCardinality(String)) AFTER rag_stages,
+	ADD COLUMN IF NOT EXISTS citation_outcomes Array(LowCardinality(String)) AFTER rag_degradations;
+`
+
+const clickHouseSpanAnalyticsMigrationSQL = `
+create table if not exists obs_span_analytics (
+	trace_id String CODEC(ZSTD(3)),
+	notebook_id String CODEC(ZSTD(3)),
+	agent_name LowCardinality(String),
+	started_at DateTime64(9, 'UTC'),
+	span_id String CODEC(ZSTD(3)),
+	span_kind LowCardinality(String),
+	name LowCardinality(String),
+	tool_name LowCardinality(String),
+	status LowCardinality(String),
+	outcome LowCardinality(String),
+	duration_nanoseconds Nullable(Int64),
+	provider LowCardinality(String),
+	requested_model LowCardinality(String),
+	selected_model LowCardinality(String),
+	cached_tokens Nullable(Int64),
+	reasoning_tokens Nullable(Int64),
+	error_code LowCardinality(String),
+	retryable Nullable(Bool),
+	ingest_version UInt64,
+	projected_at DateTime64(9, 'UTC') DEFAULT now64(9)
+)
+ENGINE = ReplacingMergeTree(ingest_version)
+PARTITION BY toYYYYMM(started_at)
+ORDER BY (notebook_id, trace_id, span_id)
 TTL started_at + INTERVAL 90 DAY DELETE
 SETTINGS index_granularity = 8192;
 `

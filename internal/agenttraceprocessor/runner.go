@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 )
 
 type Consumer interface {
@@ -23,6 +25,8 @@ type RunnerConfig struct {
 	Handler      Handler
 	RetryBackoff time.Duration
 	ReportError  func(error)
+	Metrics      *metrics.Catalog
+	Now          func() time.Time
 }
 
 type Runner struct {
@@ -30,6 +34,8 @@ type Runner struct {
 	handler      Handler
 	retryBackoff time.Duration
 	reportError  func(error)
+	metrics      *metrics.Catalog
+	now          func() time.Time
 }
 
 func NewRunner(config RunnerConfig) (*Runner, error) {
@@ -42,9 +48,12 @@ func NewRunner(config RunnerConfig) (*Runner, error) {
 	if config.ReportError == nil {
 		config.ReportError = func(error) {}
 	}
+	if config.Now == nil {
+		config.Now = time.Now
+	}
 	return &Runner{
 		consumer: config.Consumer, handler: config.Handler,
-		retryBackoff: config.RetryBackoff, reportError: config.ReportError,
+		retryBackoff: config.RetryBackoff, reportError: config.ReportError, metrics: config.Metrics, now: config.Now,
 	}, nil
 }
 
@@ -55,6 +64,27 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	messages, err := r.consumer.Poll(ctx)
 	if err != nil {
 		return fmt.Errorf("poll Agent Trace Kafka messages: %w", err)
+	}
+	if r.metrics != nil {
+		bytes := 0
+		oldest := make(map[int32]time.Time)
+		for _, message := range messages {
+			bytes += len(message.Key) + len(message.Value)
+			partition := fmt.Sprint(message.Partition)
+			lag := message.HighWatermark - message.Offset - 1
+			if lag < 0 {
+				lag = 0
+			}
+			r.metrics.AgentTraceConsumerLag.WithLabelValues(partition).Set(float64(lag))
+			if !message.Timestamp.IsZero() && (oldest[message.Partition].IsZero() || message.Timestamp.Before(oldest[message.Partition])) {
+				oldest[message.Partition] = message.Timestamp
+			}
+		}
+		r.metrics.AgentTraceProcessorBatchRecords.Observe(float64(len(messages)))
+		r.metrics.AgentTraceProcessorBatchBytes.Observe(float64(bytes))
+		for partition, timestamp := range oldest {
+			r.metrics.AgentTraceOldestMessageAge.WithLabelValues(fmt.Sprint(partition)).Set(maxSeconds(r.now().Sub(timestamp)))
+		}
 	}
 	defer r.consumer.AllowRebalance()
 	type traceWork struct {
@@ -89,7 +119,11 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			defer wait.Done()
 			for _, messageIndex := range group.messageIndexes {
 				message := messages[messageIndex]
+				started := time.Now()
 				disposition, processErr := r.handler.Process(ctx, message)
+				if r.metrics != nil {
+					r.metrics.AgentTraceProcessorDuration.WithLabelValues(string(disposition)).Observe(time.Since(started).Seconds())
+				}
 				if processErr != nil || disposition != Commit {
 					if processErr == nil {
 						processErr = fmt.Errorf("processor returned disposition %q", disposition)
@@ -126,10 +160,27 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	}
 	if len(processed) > 0 {
 		if err := r.consumer.Commit(ctx, processed); err != nil {
+			if r.metrics != nil {
+				r.metrics.AgentTraceOffsetCommitFailures.Inc()
+			}
 			return fmt.Errorf("commit processed Agent Trace Kafka offsets: %w", err)
+		}
+		if r.metrics != nil {
+			for _, message := range processed {
+				if !message.Timestamp.IsZero() {
+					r.metrics.AgentTraceSearchableFreshness.Set(maxSeconds(r.now().Sub(message.Timestamp)))
+				}
+			}
 		}
 	}
 	return errors.Join(processingErrors...)
+}
+
+func maxSeconds(duration time.Duration) float64 {
+	if duration < 0 {
+		return 0
+	}
+	return duration.Seconds()
 }
 
 func (r *Runner) Run(ctx context.Context) error {
