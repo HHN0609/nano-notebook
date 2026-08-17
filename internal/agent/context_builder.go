@@ -11,9 +11,9 @@ import (
 const BarePromptVersion = "agent-bare-v1"
 const GroundedPromptVersion = "agent-grounded-v1"
 
-// BuildDecisionRequest combines bounded durable Chat history with completed
-// Proposal/Result checkpoints. An incomplete Action batch must be resumed by
-// the Controller before another model decision is requested.
+// BuildDecisionRequest projects the durable Chat lane through the current Run
+// with completed Proposal/Result checkpoints. An incomplete Action batch must
+// be resumed by the Controller before another model decision is requested.
 func (r *PostgresRuntime) BuildDecisionRequest(
 	ctx context.Context,
 	execution Execution,
@@ -26,55 +26,27 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 	if prefix.Final != nil {
 		return models.ModelRequest{}, errors.New("Final Draft does not require another model decision")
 	}
-	var request models.ModelRequest
-	var err error
-	if execution.PromptVersion == GroundedPromptVersion {
-		request, err = r.buildGroundedComposerRequest(ctx, execution)
-	} else {
-		request, err = r.Build(ctx, execution)
-	}
+	units, err := r.projectChatLane(ctx, execution, prefix)
 	if err != nil {
 		return models.ModelRequest{}, err
 	}
-	searchCandidates, err := r.loadSearchEvidenceModelCandidates(ctx, execution, prefix)
-	if err != nil {
-		return models.ModelRequest{}, fmt.Errorf("load search evidence model projection: %w", err)
-	}
-	for _, proposal := range prefix.Proposals {
-		if err := ctx.Err(); err != nil {
+	var activeCompaction *ContextCompaction
+	if compaction, ok, loadErr := r.loadLatestContextCompaction(ctx, execution.ChatID); loadErr != nil {
+		return models.ModelRequest{}, loadErr
+	} else if ok {
+		units, err = ApplyContextCompaction(units, compaction)
+		if err != nil {
 			return models.ModelRequest{}, err
 		}
-		proposalMessage := models.ModelMessage{
-			Role:        models.RoleAssistant,
-			ActionCalls: make([]models.ModelActionCall, 0, len(proposal.Actions)),
-		}
-		for _, action := range proposal.Actions {
-			if action.Result == nil {
-				return models.ModelRequest{}, fmt.Errorf("proposal decision %d has incomplete Action %d", proposal.DecisionNo, action.Index)
-			}
-			proposalMessage.ActionCalls = append(proposalMessage.ActionCalls, models.ModelActionCall{
-				ID: action.ActionID, Name: action.Name, Input: append([]byte(nil), action.Input...),
-			})
-		}
-		request.Messages = append(request.Messages, proposalMessage)
-		for _, action := range proposal.Actions {
-			modelResult := *action.Result
-			if action.Name == "search_evidence" && modelResult.Status == ActionSucceeded {
-				modelResult.Output, err = projectSearchEvidenceForModel(execution, modelResult.Output, searchCandidates)
-				if err != nil {
-					return models.ModelRequest{}, fmt.Errorf("project Action Result %q: %w", action.ActionID, err)
-				}
-			}
-			checkpoint, err := NewActionResultCheckpoint(proposal.DecisionNo, action.Index, action.ActionID, modelResult)
-			if err != nil {
-				return models.ModelRequest{}, fmt.Errorf("reconstruct Action Result %q: %w", action.ActionID, err)
-			}
-			request.Messages = append(request.Messages, models.ModelMessage{
-				Role: models.RoleAction, Content: string(checkpoint.Payload), ActionCallID: action.ActionID,
-			})
-		}
+		activeCompaction = &compaction
 	}
-	request.ActionDefinitions = cloneActionDefinitions(definitions)
+	request := buildProjectedRequest(execution, r.contextSystemPrompt(execution), units, definitions)
+	request.InvocationPolicy = execution.ModelInvocation
+	count, err := EstimateModelRequestTokens(request)
+	if err != nil {
+		return models.ModelRequest{}, err
+	}
+	attachContextTelemetry(&request, execution, units, count, activeCompaction)
 	return request, nil
 }
 

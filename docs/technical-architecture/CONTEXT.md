@@ -153,8 +153,12 @@ An immutable, Provider-neutral durable boundary after an Agent outcome is accept
 _Avoid_: Mutable step status, process snapshot, partial-token continuation, Durable Agent Trace
 
 **Agent Context Projection**:
-The deterministic, Provider-neutral context rebuilt for each Model Call from the pinned Agent Definition, Prompt and authorized product input plus accepted Run Checkpoints. It is bounded before Provider encoding, never depends on an in-memory or Provider-owned conversation, and fails with `context_budget_exhausted` rather than silently dropping required Contracts, Evidence, or accepted Action Results.
-_Avoid_: Agent memory service, Provider thread, raw transcript, hidden reasoning
+The deterministic, Provider-neutral context rebuilt for each Model Call from the pinned Agent Definition and Prompt plus the current Chat's single linear causal history across Agent Runs. It projects each User Message and every accepted Run Checkpoint in order, representing a completed Action round as its Assistant proposal followed by every matching Action Result; an Agent Context Compaction may summarize an older prefix while retaining a token-bounded exact suffix.
+_Avoid_: Agent memory service, Provider thread, session tree, active-branch projection, raw transcript, hidden reasoning
+
+**Agent Context Compaction**:
+An append-only, rolling summary boundary that replaces an older cross-Run Chat context prefix only inside later Agent Context Projections while the original Messages and Run Checkpoints remain durable authority. Work appended after one Compaction remains exact until the growing request crosses its pinned trigger again; a successor then summarizes the newly old prefix and preserves a new recent token-bounded suffix. A Compaction never separates an Agent Step.
+_Avoid_: History deletion, Checkpoint rewrite, message-count truncation, memory snapshot
 
 **Workload Class**:
 A fixed product category such as interactive Agent, Source Processing, or offline Eval/Reindex, used to reserve concurrency and prevent background work from starving user-facing Jobs.
@@ -295,6 +299,10 @@ _Avoid_: Authorized Tool Call, command, approved Action
 **Model Decision**:
 The Provider-neutral result presented to the Agent Controller by one completed model invocation. It contains exactly one Final Draft or one ordered Action Proposal batch.
 _Avoid_: Raw Provider response, Chat completion, chain of thought
+
+**Agent Step**:
+One Model Decision plus the complete Action batch it requests and every corresponding Action Result; a Final-only decision is a Step with no Actions. It is the indivisible unit of context continuation and compaction, not an Agent Run or infrastructure Attempt.
+_Avoid_: Agent Run, Model Call, partial Tool round
 
 **Decision Contract**:
 A versioned schema that constrains a model's structured decision without invoking an executable capability or producing an Action Result. A Provider may encode it with function-call syntax, but the Models Module normalizes it as decision data rather than an MCP Tool; `select_leader_route` is the Sprint 10 example.

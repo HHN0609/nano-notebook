@@ -1,0 +1,12 @@
+{
+  "identity": "agent.chat-qwen-plus",
+  "version": 1,
+  "invocation_model_policy": "agent.chat-default@1",
+  "provider_capability": "aliyun.qwen-plus-2025-07-28@1",
+  "pinned_max_output_tokens": 2048,
+  "soft_input_limit_tokens": 98304,
+  "estimation_safety_tokens": 4096,
+  "keep_recent_tokens": 12288,
+  "summary_max_output_tokens": 2048,
+  "overflow_retry_limit": 1
+}

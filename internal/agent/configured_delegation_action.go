@@ -215,6 +215,10 @@ func (a *configuredDelegationAction) schedule(ctx context.Context, request Actio
 	if !ok {
 		return "", errors.New("configured child Model Policy is missing")
 	}
+	childContext, err := a.catalog.ResolveModelContextPolicy(childPolicy.Reference())
+	if err != nil {
+		return "", err
+	}
 	var treeID, timeZone string
 	var relationship, authorized bool
 	if err := tx.QueryRow(ctx, `
@@ -285,10 +289,14 @@ func (a *configuredDelegationAction) schedule(ctx context.Context, request Actio
 	if _, err := tx.Exec(ctx, `
 		insert into agent_runs(
 			id,status,runtime_kind,tree_id,definition_identity,definition_version,definition_sha256,
-			executor_identity,model_policy_identity,model_policy_version,model_policy_sha256,provider_model,parent_context_manifest
-		) values($1,'queued','configured',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+			executor_identity,model_policy_identity,model_policy_version,model_policy_sha256,provider_model,
+			provider_capability_identity,provider_capability_version,provider_capability_sha256,
+			model_context_policy_identity,model_context_policy_version,model_context_policy_sha256,parent_context_manifest
+		) values($1,'queued','configured',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb)
 	`, childRunID, treeID, a.child.Identity, a.child.Version, a.child.SHA256, a.child.Executor,
-		childPolicy.Identity, childPolicy.Version, childPolicy.SHA256, childPolicy.ProviderModel, string(manifest)); err != nil {
+		childPolicy.Identity, childPolicy.Version, childPolicy.SHA256, childPolicy.ProviderModel,
+		childContext.Capability.Identity, childContext.Capability.Version, childContext.Capability.SHA256,
+		childContext.Policy.Identity, childContext.Policy.Version, childContext.Policy.SHA256, string(manifest)); err != nil {
 		return "", err
 	}
 	if _, err := tx.Exec(ctx, `insert into agent_jobs(id,kind,run_id,status) values($1,'agent_run',$2,'queued')`, childJobID, childRunID); err != nil {

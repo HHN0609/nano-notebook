@@ -275,11 +275,13 @@ func TestGeneratedDelegationToolNameIsDeterministicAndBounded(t *testing.T) {
 
 func minimalCatalogFS() fstest.MapFS {
 	return fstest.MapFS{
-		"definitions/agent.test.v1.json":       mapFile(`{"identity":"agent.test","version":1,"executor":"test","model_policy":"model.test@1","prompts":{"main":"prompt.test@1"},"contracts":{"input":"input.test@1","result":"result.test@1"},"tools":["tool"],"children":[],"limits":{"model_calls":1,"actions":1,"action_batch":1,"context_bytes":1024,"result_bytes":1024,"attempts":1},"delegation":{"description":"call test agent"}}`),
-		"model-policies/model.test.v1.json":    mapFile(`{"identity":"model.test","version":1,"provider_model":"provider/model","temperature":0,"max_output_tokens":128,"timeout_ms":1000}`),
-		"contracts/input.test.v1.schema.json":  mapFile(`{"identity":"input.test","version":1,"schema":{"type":"object","additionalProperties":false}}`),
-		"contracts/result.test.v1.schema.json": mapFile(`{"identity":"result.test","version":1,"schema":{"type":"object","additionalProperties":false}}`),
-		"releases/nano.test.v1.json":           mapFile(`{"identity":"nano.test","version":1,"roots":{"test":"agent.test@1"}}`),
+		"definitions/agent.test.v1.json":               mapFile(`{"identity":"agent.test","version":1,"executor":"test","model_policy":"model.test@1","prompts":{"main":"prompt.test@1"},"contracts":{"input":"input.test@1","result":"result.test@1"},"tools":["tool"],"children":[],"limits":{"model_calls":1,"actions":1,"action_batch":1,"context_bytes":1024,"result_bytes":1024,"attempts":1},"delegation":{"description":"call test agent"}}`),
+		"model-policies/model.test.v1.json":            mapFile(`{"identity":"model.test","version":1,"provider_model":"provider/model","temperature":0,"max_output_tokens":128,"timeout_ms":1000}`),
+		"provider-capabilities/provider.model.v1.json": mapFile(`{"identity":"provider.model","version":1,"provider_model":"provider/model","resolved_model":"model-1","context_window_tokens":1000,"max_input_tokens":900,"max_output_tokens":200,"tokenizer_identity":"test-tokenizer","tokenizer_version":"1","invocation_mode":"non_thinking"}`),
+		"model-context-policies/context.test.v1.json":  mapFile(`{"identity":"context.test","version":1,"invocation_model_policy":"model.test@1","provider_capability":"provider.model@1","pinned_max_output_tokens":128,"soft_input_limit_tokens":700,"estimation_safety_tokens":100,"keep_recent_tokens":200,"summary_max_output_tokens":100,"overflow_retry_limit":1}`),
+		"contracts/input.test.v1.schema.json":          mapFile(`{"identity":"input.test","version":1,"schema":{"type":"object","additionalProperties":false}}`),
+		"contracts/result.test.v1.schema.json":         mapFile(`{"identity":"result.test","version":1,"schema":{"type":"object","additionalProperties":false}}`),
+		"releases/nano.test.v1.json":                   mapFile(`{"identity":"nano.test","version":1,"roots":{"test":"agent.test@1"}}`),
 	}
 }
 

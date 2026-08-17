@@ -20,6 +20,7 @@ const (
 	TraceSpanPublication            = "nano.publication"
 	TraceSpanGrounding              = "nano.grounding"
 	TraceSpanQueryContextualization = "nano.rag.query_contextualization"
+	TraceSpanContextCompaction      = "nano.context.compaction"
 )
 
 func TraceAttemptStartIdentity(runID string, attemptNo int) string {
@@ -32,6 +33,13 @@ func TraceActionStartIdentity(runID string, attemptNo int, logicalActionID strin
 
 func TraceModelStartIdentity(runID string, attemptNo, decisionNo int) string {
 	return fmt.Sprintf("run/%s/attempt/%d/model/%d/start", runID, attemptNo, decisionNo)
+}
+
+func TraceCompactionStartIdentity(runID string, attemptNo int, predecessorID, triggerReason string) string {
+	if predecessorID == "" {
+		predecessorID = "root"
+	}
+	return fmt.Sprintf("run/%s/attempt/%d/context-compaction/%s/%s/start", runID, attemptNo, predecessorID, triggerReason)
 }
 
 func TraceQueryContextModelStartIdentity(runID string, attemptNo, decisionNo int) string {
@@ -90,6 +98,25 @@ const (
 	TraceKeyPromptContract               = "nano.prompt.contract"
 	TraceKeyRequestedModel               = "nano.model.requested"
 	TraceKeyModelValidationOutcome       = "nano.model.validation_outcome"
+	TraceKeyProviderCapability           = "nano.context.provider_capability"
+	TraceKeyContextPolicy                = "nano.context.policy"
+	TraceKeyContextWindowTokens          = "nano.context.window_tokens"
+	TraceKeyProviderMaxInputTokens       = "nano.context.provider_max_input_tokens"
+	TraceKeyProviderMaxOutputTokens      = "nano.context.provider_max_output_tokens"
+	TraceKeyPinnedMaxOutputTokens        = "nano.context.pinned_max_output_tokens"
+	TraceKeyEstimationSafetyTokens       = "nano.context.estimation_safety_tokens"
+	TraceKeyHardInputTokens              = "nano.context.hard_input_tokens"
+	TraceKeySafeInputTokens              = "nano.context.safe_input_tokens"
+	TraceKeyCompactionTriggerTokens      = "nano.context.compaction_trigger_tokens"
+	TraceKeyContextInputTokens           = "nano.context.input_tokens"
+	TraceKeyContextInputTokenSource      = "nano.context.input_token_source"
+	TraceKeyExactSuffixTokens            = "nano.context.exact_suffix_tokens"
+	TraceKeyCompactionID                 = "nano.context.compaction_id"
+	TraceKeySummarizedThrough            = "nano.context.summarized_through"
+	TraceKeyCompactionTriggerReason      = "nano.context.compaction_trigger_reason"
+	TraceKeyBeforeCompactionTokens       = "nano.context.before_compaction_tokens"
+	TraceKeyAfterCompactionTokens        = "nano.context.after_compaction_tokens"
+	TraceKeyOverflowRecoveryAttempt      = "nano.context.overflow_recovery_attempt"
 	TraceKeyToolName                     = "nano.tool.name"
 	TraceKeyToolReasonCode               = "nano.tool.reason_code"
 	TraceKeyParentRunID                  = "nano.delegation.parent_run_id"

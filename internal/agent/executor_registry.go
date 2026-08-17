@@ -22,10 +22,11 @@ type ExecutorRegistration struct {
 }
 
 type ResolvedExecution struct {
-	Definition  agentcatalog.Definition
-	ModelPolicy agentcatalog.ModelPolicy
-	Executor    DefinitionExecutor
-	Capability  agentcatalog.ExecutorCapability
+	Definition   agentcatalog.Definition
+	ModelPolicy  agentcatalog.ModelPolicy
+	ModelContext agentcatalog.ResolvedModelContextPolicy
+	Executor     DefinitionExecutor
+	Capability   agentcatalog.ExecutorCapability
 }
 
 type ExecutorRegistry struct {
@@ -107,8 +108,12 @@ func (r *ExecutorRegistry) Resolve(reference agentcatalog.Reference) (ResolvedEx
 	if !ok {
 		return ResolvedExecution{}, fmt.Errorf("Agent Definition %s has no Model Policy", reference)
 	}
+	modelContext, err := r.catalog.ResolveModelContextPolicy(policy.Reference())
+	if err != nil {
+		return ResolvedExecution{}, err
+	}
 	return ResolvedExecution{
-		Definition: definition, ModelPolicy: policy, Executor: registration.Executor,
+		Definition: definition, ModelPolicy: policy, ModelContext: modelContext, Executor: registration.Executor,
 		Capability: cloneExecutorCapability(registration.Capability),
 	}, nil
 }

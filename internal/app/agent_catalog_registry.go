@@ -67,6 +67,53 @@ func RegisterAgentCatalog(ctx context.Context, db *DB, catalog agentcatalog.Cata
 			return err
 		}
 	}
+	for _, capability := range catalog.ProviderCapabilities() {
+		payload, err := json.Marshal(capability)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into provider_model_capability_versions(
+				capability_identity,capability_version,canonical_sha256,provider_model,resolved_model,
+				context_window_tokens,max_input_tokens,max_output_tokens,tokenizer_identity,tokenizer_version,
+				invocation_mode,canonical_payload,source_path
+			) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)
+			on conflict(capability_identity,capability_version) do nothing
+		`, capability.Identity, capability.Version, capability.SHA256, capability.ProviderModel, capability.ResolvedModel,
+			capability.ContextWindowTokens, capability.MaxInputTokens, capability.MaxOutputTokens,
+			capability.TokenizerIdentity, capability.TokenizerVersion, capability.InvocationMode,
+			string(payload), capability.SourcePath); err != nil {
+			return fmt.Errorf("register provider capability %s: %w", capability.Reference(), err)
+		}
+		if err := verifyCatalogEntry(ctx, tx, "provider_model_capability_versions", "capability_identity", "capability_version", capability.Reference(), capability.SHA256, payload, capability.SourcePath, "provider capability"); err != nil {
+			return err
+		}
+	}
+	for _, policy := range catalog.ModelContextPolicies() {
+		payload, err := json.Marshal(policy)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into agent_model_context_policy_versions(
+				context_policy_identity,context_policy_version,canonical_sha256,
+				model_policy_identity,model_policy_version,capability_identity,capability_version,
+				pinned_max_output_tokens,soft_input_limit_tokens,estimation_safety_tokens,
+				keep_recent_tokens,summary_max_output_tokens,overflow_retry_limit,canonical_payload,source_path
+			) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15)
+			on conflict(context_policy_identity,context_policy_version) do nothing
+		`, policy.Identity, policy.Version, policy.SHA256,
+			policy.InvocationModelPolicy.Identity, policy.InvocationModelPolicy.Version,
+			policy.ProviderCapability.Identity, policy.ProviderCapability.Version,
+			policy.PinnedMaxOutputTokens, policy.SoftInputLimitTokens, policy.EstimationSafetyTokens,
+			policy.KeepRecentTokens, policy.SummaryMaxOutputTokens, policy.OverflowRetryLimit,
+			string(payload), policy.SourcePath); err != nil {
+			return fmt.Errorf("register model context policy %s: %w", policy.Reference(), err)
+		}
+		if err := verifyCatalogEntry(ctx, tx, "agent_model_context_policy_versions", "context_policy_identity", "context_policy_version", policy.Reference(), policy.SHA256, payload, policy.SourcePath, "model context policy"); err != nil {
+			return err
+		}
+	}
 	for _, definition := range catalog.Definitions() {
 		payload, err := json.Marshal(definition)
 		if err != nil {
@@ -148,6 +195,18 @@ func VerifyAgentCatalogReady(ctx context.Context, db *DB, catalog agentcatalog.C
 	for _, policy := range catalog.ModelPolicies() {
 		payload, _ := json.Marshal(policy)
 		if err := verifyCatalogEntry(ctx, db.pool, "agent_model_policy_versions", "policy_identity", "policy_version", policy.Reference(), policy.SHA256, payload, policy.SourcePath, "model policy"); err != nil {
+			return agentcatalog.ReleaseManifest{}, err
+		}
+	}
+	for _, capability := range catalog.ProviderCapabilities() {
+		payload, _ := json.Marshal(capability)
+		if err := verifyCatalogEntry(ctx, db.pool, "provider_model_capability_versions", "capability_identity", "capability_version", capability.Reference(), capability.SHA256, payload, capability.SourcePath, "provider capability"); err != nil {
+			return agentcatalog.ReleaseManifest{}, err
+		}
+	}
+	for _, policy := range catalog.ModelContextPolicies() {
+		payload, _ := json.Marshal(policy)
+		if err := verifyCatalogEntry(ctx, db.pool, "agent_model_context_policy_versions", "context_policy_identity", "context_policy_version", policy.Reference(), policy.SHA256, payload, policy.SourcePath, "model context policy"); err != nil {
 			return agentcatalog.ReleaseManifest{}, err
 		}
 	}

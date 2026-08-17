@@ -341,36 +341,46 @@ func TestWorkerPersistsTerminalInvalidBifrostResponseWithoutAssistantMessage(t *
 	}
 }
 
-func TestContextBuilderSelectsTheLatestTwentyDurableMessages(t *testing.T) {
-	api, _, _, chatID := newChatFixture(t, "context-window@example.com")
+func TestContextBuilderProjectsAllDurableUserMessagesThroughTheCurrentRun(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "context-window@example.com")
 	ctx := context.Background()
 	for i := 1; i <= 25; i++ {
-		role := "user"
-		if i%2 == 0 {
-			role = "assistant"
-		}
 		if _, err := api.db.Pool().Exec(ctx, `
 			insert into chat_messages(id, chat_id, role, content, created_at)
-			values($1, $2, $3, $4, timestamp with time zone '2026-07-14 00:00:00+00' + ($5 * interval '1 second'))`,
-			messageIDForIndex(i), chatID, role, messageContentForIndex(i), i); err != nil {
+			values($1, $2, 'user', $3, timestamp with time zone '2026-07-14 00:00:00+00' + ($4 * interval '1 second'))`,
+			messageIDForIndex(i), chatID, messageContentForIndex(i), i); err != nil {
 			t.Fatal(err)
 		}
 	}
+	currentMessageID := "0190cdd2-5f2d-7ad8-b3f5-1b588788c107"
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, currentMessageID)
 	if _, err := api.db.Pool().Exec(ctx, `
 		insert into chat_messages(id, chat_id, role, content, created_at)
-		values('msg_context_later', $1, 'user', 'must-not-enter-earlier-run', timestamp with time zone '2026-07-14 00:01:00+00')`, chatID); err != nil {
+		values('msg_context_later', $1, 'user', 'must-not-enter-earlier-run', clock_timestamp() + interval '1 day')`, chatID); err != nil {
 		t.Fatal(err)
 	}
 
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok || claimed.RunID != runID {
+		t.Fatalf("claim = %+v ok=%t err=%v", claimed, ok, err)
+	}
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "Bounded system prompt.", nil)
-	request, err := runtime.Build(ctx, agent.Execution{ChatID: chatID, InputMessageID: messageIDForIndex(25), Model: "aliyun/qwen-flash"})
+	execution, err := runtime.Load(ctx, attemptFromClaim(claimed))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(request.Messages) != 21 || request.Messages[0].Role != "system" || request.Messages[0].Content != "Bounded system prompt." {
+	prefix, err := runtime.LoadCheckpointPrefix(ctx, attemptFromClaim(claimed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := runtime.BuildDecisionRequest(ctx, execution, prefix, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Messages) != 27 || request.Messages[0].Role != "system" || request.Messages[0].Content != "Bounded system prompt." {
 		t.Fatalf("context size/system = %d/%+v", len(request.Messages), request.Messages[0])
 	}
-	if request.Messages[1].Content != "message-06" || request.Messages[20].Content != "message-25" {
+	if request.Messages[1].Content != "message-01" || request.Messages[25].Content != "message-25" || request.Messages[26].Content == "must-not-enter-earlier-run" {
 		t.Fatalf("context bounds = %q ... %q", request.Messages[1].Content, request.Messages[20].Content)
 	}
 }
@@ -496,6 +506,8 @@ func messageContentForIndex(index int) string {
 type recoveryRecordingAction struct {
 	calls []string
 }
+
+func (*recoveryRecordingAction) CrashReplaySafe() bool { return true }
 
 func (*recoveryRecordingAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{

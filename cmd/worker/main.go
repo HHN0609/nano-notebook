@@ -391,10 +391,10 @@ func main() {
 		os.Exit(1)
 	}
 	mcpToolRegistrations := []agent.MCPToolRegistration{
-		agent.MCPToolRegistration{Action: calculateTool, Scheduling: agentcatalog.ToolParallel},
-		agent.MCPToolRegistration{Action: currentTimeTool, Scheduling: agentcatalog.ToolParallel},
-		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolParallel},
-		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync},
+		agent.MCPToolRegistration{Action: calculateTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: currentTimeTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 	}
 	configuredDelegationTools, err := agent.NewConfiguredDelegationToolRegistrations(definitionCatalog, db.Pool(), agent.ResearchAvailabilityFrom(searchProvider), traceExporter)
 	if err != nil {

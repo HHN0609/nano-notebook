@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -408,6 +409,21 @@ func TestBifrostClientMapsNonSuccessStatusToUnavailable(t *testing.T) {
 		Model: "aliyun/qwen-flash", Messages: []ModelMessage{{Role: RoleUser, Content: "Unavailable."}},
 	})
 	requireModelErrorKind(t, err, ErrorUnavailable)
+}
+
+func TestBifrostClientClassifiesProviderContextOverflow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":"context_length_exceeded","message":"private detail"}}`))
+	}))
+	defer server.Close()
+	_, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "aliyun/qwen-plus", Messages: []ModelMessage{{Role: RoleUser, Content: "Overflow."}},
+	})
+	requireModelErrorKind(t, err, ErrorContextOverflow)
+	if strings.Contains(err.Error(), "private detail") {
+		t.Fatalf("Provider body leaked through classified error: %v", err)
+	}
 }
 
 func requireModelErrorKind(t *testing.T, err error, want ErrorKind) {

@@ -315,7 +315,7 @@ func TestControllerPublishesPlainTextAfterSearchReturnsNoEvidence(t *testing.T) 
 	}
 }
 
-func TestGroundedComposerRequestCarriesBoundedCompletedPairsOnEveryDecision(t *testing.T) {
+func TestGroundedComposerRequestCarriesCanonicalLinearHistoryOnEveryDecision(t *testing.T) {
 	api, attempt, _, _ := groundingFixture(t, "query-context-grounding@example.com", "src_query_context", "evr_query_context")
 	ctx := context.Background()
 	var chatID, userID string
@@ -381,30 +381,32 @@ func TestGroundedComposerRequestCarriesBoundedCompletedPairsOnEveryDecision(t *t
 			t.Fatalf("request[%d] has RequiredActionName=%q, want free tool choice on every decision", index, request.RequiredActionName)
 		}
 		if len(request.Messages) < 2 || request.Messages[0].Role != models.RoleSystem || request.Messages[1].Role != models.RoleUser {
-			t.Fatalf("request[%d] messages = %+v, want to start with [system, bounded-history+current]", index, request.Messages)
+			t.Fatalf("request[%d] messages = %+v, want canonical [system, Chat lane]", index, request.Messages)
 		}
-		requestContext := request.Messages[0].Content + "\n" + request.Messages[1].Content
+		var contextBuilder strings.Builder
+		for _, message := range request.Messages {
+			contextBuilder.WriteString(message.Content)
+			contextBuilder.WriteByte('\n')
+		}
+		requestContext := contextBuilder.String()
 		for _, required := range []string{
 			"current Message is authoritative",
 			"preserve its key terms",
 			"Do not translate ambiguous terms",
 			"copy it rather than choose an interpretation",
 			"When is launch?",
+			"completed-question-1",
 			"completed-question-2",
 			"completed-question-3",
 			"completed-question-4",
+			"UNPAIRED_OLD_TOPIC",
 		} {
 			if !strings.Contains(requestContext, required) {
 				t.Fatalf("request[%d] context is missing %q: %s", index, required, requestContext)
 			}
 		}
-		for _, forbidden := range []string{"completed-question-1", "UNPAIRED_OLD_TOPIC"} {
-			if strings.Contains(requestContext, forbidden) {
-				t.Fatalf("request[%d] context contains %q: %s", index, forbidden, requestContext)
-			}
-		}
-		if strings.Count(requestContext, "OLD_DEGREE_TOPIC") >= 1000 {
-			t.Fatalf("request[%d]: long prior answer was not bounded", index)
+		if strings.Count(requestContext, "OLD_DEGREE_TOPIC") != 1000 {
+			t.Fatalf("request[%d]: exact pre-Compaction history was truncated", index)
 		}
 	}
 	var decisionTwoContext strings.Builder
