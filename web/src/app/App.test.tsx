@@ -1555,6 +1555,56 @@ test("labels Source-processing Traces by workload instead of pretending they are
   expect(screen.getByRole("button", { name: "Open Trace job-source/attempt-2" })).toBeInTheDocument();
 });
 
+test("renders Trace Analytics with partial failure, stale coverage, and Explorer drilldown", async () => {
+  window.history.pushState(null, "", "/admin/traces/analytics?range=24h&agent=agent-a");
+  const freshThrough = new Date(Date.now() - 10_000).toISOString();
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({
+      user: { id: "usr_analytics", email: "analytics@example.com" },
+      platform_capabilities: ["platform.trace.analytics"]
+    });
+    if (url.startsWith("/api/admin/trace-analytics/overview")) return json({
+      schema_version: 1, generated_at: new Date().toISOString(), fresh_through: freshThrough,
+      filters: { started_after: "2026-08-16T00:00:00Z", started_before: "2026-08-17T00:00:00Z", workload_kind: "agent_run", agent: "agent-a" },
+      bucket: "1h", coverage: { total_samples: 10, token_samples: 6, cost_samples: 0 },
+      data: { run_count: 10, completed_count: 8, success_rate: 0.75, error_rate: 0.25, retry_rate: 0.125, p95_duration_nanoseconds: 2_000_000_000, input_tokens: 100, output_tokens: 50, total_tokens: 150, costs: [] }
+    });
+    if (url.startsWith("/api/admin/trace-analytics/timeseries")) return json({ error: { code: "trace_analytics_temporarily_unavailable" } }, 503);
+    if (url.includes("/api/admin/trace-analytics/latency")) return json({ schema_version: 1, fresh_through: freshThrough, coverage: { total_samples: 8 }, data: [{ value: "agent-a", sample_count: 8, p50_duration_nanoseconds: 1_000_000_000, p95_duration_nanoseconds: 2_000_000_000, p99_duration_nanoseconds: 3_000_000_000 }] });
+    if (url.includes("/api/admin/trace-analytics/breakdowns")) return json({ schema_version: 1, fresh_through: freshThrough, coverage: { total_samples: 10 }, data: [{ value: "agent-a", run_count: 10, completed_count: 8, success_rate: 0.75, error_rate: 0.25, retry_rate: 0.125, p95_duration_nanoseconds: 2_000_000_000 }] });
+    if (url.includes("/api/admin/trace-analytics/tools")) return json({ schema_version: 1, fresh_through: freshThrough, coverage: { total_samples: 0 }, data: [] });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  expect(await screen.findByRole("heading", { name: "Trace Analytics" })).toBeInTheDocument();
+  expect(await screen.findByText("Analytics data may be delayed")).toBeInTheDocument();
+  expect(screen.getByText("Token coverage 60%")).toBeInTheDocument();
+  expect(screen.getByText("Cost unavailable · 0% coverage")).toBeInTheDocument();
+  expect(screen.getByText("Trend is temporarily unavailable.")).toBeInTheDocument();
+  expect(screen.getByText("No tool calls in this range.")).toBeInTheDocument();
+	expect(screen.getByLabelText("Behavior dimension")).toHaveValue("provider");
+	expect(screen.getByRole("option", { name: "RAG degradation" })).toBeInTheDocument();
+
+	await userEvent.setup().click(screen.getAllByRole("button", { name: "Open Traces for agent-a" })[0]);
+  expect(window.location.pathname).toBe("/admin/traces");
+  expect(window.location.search).toContain("range=24h");
+  expect(window.location.search).toContain("agent=agent-a");
+});
+
+test("keeps Analytics hidden from a Trace-read-only operator", async () => {
+	window.history.pushState(null, "", "/admin/traces/analytics");
+	fetchHandler = async (input) => {
+		const url = String(input);
+		if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_reader", email: "reader@example.com" }, platform_capabilities: ["platform.trace.read"] });
+		return json({ error: { code: "not_found" } }, 404);
+	};
+	render(<App />);
+	expect(await screen.findByRole("heading", { name: "Analytics access restricted" })).toBeInTheDocument();
+	expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("/api/admin/trace-analytics"), expect.anything());
+});
+
 test("renders a real Trace Detail when empty repeated fields arrive as null", async () => {
   window.history.pushState(null, "", "/admin/traces/trace-null-collections");
   fetchHandler = async (input) => {

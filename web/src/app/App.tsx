@@ -517,14 +517,14 @@ function AppShell() {
   } else if (invitationRoute) {
     shell = <InvitationAcceptance t={t} onAccepted={(id) => navigate(`/notebooks/${id}`)} />;
   } else if (traceRoute) {
-    shell = <TraceDashboard locale={locale} routePath={route} canRead={capabilities.includes("platform.trace.read")} canReplay={capabilities.includes("platform.trace.replay")} onNavigate={navigate} onLibrary={() => navigate("/")} />;
+		shell = <TraceDashboard locale={locale} routePath={route} canRead={capabilities.includes("platform.trace.read")} canReplay={capabilities.includes("platform.trace.replay")} canAnalytics={capabilities.includes("platform.trace.analytics")} onNavigate={navigate} onLibrary={() => navigate("/")} />;
   } else if (notebookID) {
     shell = <Workspace t={t} onLocale={switchLocale} user={activeUser} notebookID={notebookID} onLibrary={() => navigate("/")} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
       clearAuthenticatedQueries();
       setUser(null);
     }} />;
   } else {
-    shell = <LibraryScreen t={t} locale={locale} onLocale={switchLocale} user={activeUser} canTrace={capabilities.includes("platform.trace.read")} onTraces={() => navigate("/admin/traces")} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
+		shell = <LibraryScreen t={t} locale={locale} onLocale={switchLocale} user={activeUser} canTrace={capabilities.includes("platform.trace.read") || capabilities.includes("platform.trace.analytics")} onTraces={() => navigate(capabilities.includes("platform.trace.analytics") ? "/admin/traces/analytics" : "/admin/traces")} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
       clearAuthenticatedQueries();
       setUser(null);
     }} />;

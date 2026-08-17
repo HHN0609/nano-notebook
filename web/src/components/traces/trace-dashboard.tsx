@@ -4,6 +4,7 @@ import { MaterialSymbol } from "../icons/material-symbol";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { tracePollingInterval } from "./polling";
+import { TraceAnalyticsDashboard } from "./trace-analytics-dashboard";
 import type { Attribute, ReplayReference, Span, TraceDetail, TraceListItem, TraceSummary } from "./types";
 
 type Locale = "en" | "zh";
@@ -40,12 +41,14 @@ type TraceDashboardProps = {
   routePath: string;
   canRead: boolean;
   canReplay: boolean;
+  canAnalytics: boolean;
   onNavigate: (path: string) => void;
   onLibrary: () => void;
 };
 
 export function TraceDashboard(props: TraceDashboardProps) {
   const t = copy[props.locale];
+	if (props.routePath === "/admin/traces/analytics") return <TraceAnalyticsDashboard locale={props.locale} canAnalytics={props.canAnalytics} canRead={props.canRead} onNavigate={props.onNavigate} onLibrary={props.onLibrary} />;
   if (!props.canRead) {
     return <main className="trace-shell trace-restricted"><Button variant="ghost" onClick={props.onLibrary}><MaterialSymbol name="arrow_back" size={18} />{t.library}</Button><section><h1>{t.restricted}</h1><p>{t.restrictedBody}</p></section></main>;
   }
@@ -58,8 +61,9 @@ const emptyFilters: Filters = { identity: "", agent: "", model: "", status: "", 
 
 function TraceExplorer(props: TraceDashboardProps) {
   const t = copy[props.locale];
-  const [draft, setDraft] = useState<Filters>(emptyFilters);
-  const [filters, setFilters] = useState<Filters>(emptyFilters);
+	const initialFilters = explorerFiltersFromURL();
+	const [draft, setDraft] = useState<Filters>(initialFilters);
+	const [filters, setFilters] = useState<Filters>(initialFilters);
   const [cursorStack, setCursorStack] = useState<string[]>([""]);
   const cursor = cursorStack[cursorStack.length - 1] ?? "";
   const traces = useQuery({
@@ -84,11 +88,13 @@ function TraceExplorer(props: TraceDashboardProps) {
     event.preventDefault();
     setFilters(draft);
     setCursorStack([""]);
+	replaceExplorerFilterURL(draft);
   }
 
   return (
     <main className="trace-shell">
       <TraceTopbar title={t.explorer} onBack={props.onLibrary} backLabel={t.library} />
+	  <nav className="trace-product-tabs" aria-label="Trace views">{props.canAnalytics ? <button onClick={() => props.onNavigate(`/admin/traces/analytics?${explorerFilterParameters(filters)}`)}>Analytics</button> : null}<button aria-current="page">{t.explorer}</button></nav>
       <form className="trace-filters" onSubmit={apply} aria-label="Trace filters">
         <label><span>{t.identity}</span><input value={draft.identity} onChange={(event) => setDraft({ ...draft, identity: event.target.value })} /></label>
         <label><span>{t.agent}</span><input value={draft.agent} onChange={(event) => setDraft({ ...draft, agent: event.target.value })} /></label>
@@ -96,7 +102,7 @@ function TraceExplorer(props: TraceDashboardProps) {
         <label><span>{t.status}</span><select value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value })}><option value="">{t.all}</option><option value="ok">OK</option><option value="error">Error</option><option value="cancelled">Cancelled</option></select></label>
         <label><span>{t.state}</span><select value={draft.active} onChange={(event) => setDraft({ ...draft, active: event.target.value })}><option value="">{t.all}</option><option value="true">{t.active}</option><option value="false">{t.terminal}</option></select></label>
         <label><span>{t.timeRange}</span><select value={draft.timeRange} onChange={(event) => setDraft({ ...draft, timeRange: event.target.value })}><option value="">{t.all}</option><option value="1h">{t.lastHour}</option><option value="24h">{t.last24Hours}</option><option value="168h">{t.last7Days}</option></select></label>
-        <div className="trace-filter-actions"><Button>{t.apply}</Button><Button type="button" variant="secondary" onClick={() => { setDraft(emptyFilters); setFilters(emptyFilters); setCursorStack([""]); }}>{t.clear}</Button></div>
+		<div className="trace-filter-actions"><Button>{t.apply}</Button><Button type="button" variant="secondary" onClick={() => { setDraft(emptyFilters); setFilters(emptyFilters); setCursorStack([""]); replaceExplorerFilterURL(emptyFilters); }}>{t.clear}</Button></div>
       </form>
       {traces.isLoading ? <div className="trace-state" role="status">{t.loading}</div> : null}
       {traces.isError ? <Alert variant="destructive" className="trace-state"><AlertDescription>{forbidden ? t.restricted : t.unavailable}</AlertDescription>{forbidden ? null : <Button variant="secondary" onClick={() => void traces.refetch()}>{t.retry}</Button>}</Alert> : null}
@@ -286,6 +292,9 @@ function parseAttributeList(value: string) { if (!value) return [] as string[]; 
 function spanKind(span: Span, t: TraceCopy) { if (span.name === "agent.execution") return t.agentExecution; if (span.name === "nano.job.attempt") return t.jobAttempt; if (span.name === "agent.model.call" || span.name === "gen_ai.model.call") return t.modelCall; if (span.name === "agent.action" || span.name.includes("action")) return t.actionCall; return t.spanKind; }
 function collectStrings(value: unknown): string[] { if (typeof value === "string") return [value]; if (Array.isArray(value)) return value.flatMap(collectStrings); if (value && typeof value === "object") return Object.values(value).flatMap(collectStrings); return []; }
 function timeRangeStart(value: string) { const hours = Number.parseInt(value, 10); return Number.isFinite(hours) && hours > 0 ? new Date(Date.now() - hours * 60 * 60 * 1000).toISOString() : ""; }
+function explorerFiltersFromURL(): Filters { const values = new URLSearchParams(window.location.search); return { identity: values.get("identity") ?? "", agent: values.get("agent") ?? "", model: values.get("model") ?? "", status: values.get("status") ?? "", active: values.get("active") ?? "", timeRange: values.get("range") ?? "" }; }
+function explorerFilterParameters(filters: Filters) { const values = new URLSearchParams(); if (filters.identity) values.set("identity", filters.identity); if (filters.agent) values.set("agent", filters.agent); if (filters.model) values.set("model", filters.model); if (filters.status) values.set("status", filters.status); if (filters.active) values.set("active", filters.active); if (filters.timeRange) values.set("range", filters.timeRange); return values; }
+function replaceExplorerFilterURL(filters: Filters) { const url = new URL(window.location.href); url.search = explorerFilterParameters(filters).toString(); window.history.replaceState(null, "", url); }
 function replayError(code: string | undefined, t: TraceCopy) { if (code === "replay_forbidden") return t.replayForbidden; if (code === "replay_expired") return t.replayExpired; if (code === "replay_corrupt") return t.replayCorrupt; return t.replayUnavailable; }
 
 function normalizeTraceDetail(detail: TraceDetail): TraceDetail {
