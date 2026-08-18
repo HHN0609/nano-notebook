@@ -189,9 +189,20 @@ func TestProductionTraceTopologyUsesKafkaAndClickHouse(t *testing.T) {
 	for _, name := range []string{"control-plane", "worker"} {
 		service := file.Services[name]
 		if service.Environment["NANO_AGENT_TRACE_TRANSPORT"] != "kafka" ||
-			service.Environment["NANO_AGENT_TRACE_KAFKA_BROKERS"] != "kafka:19092" {
+			service.Environment["NANO_AGENT_TRACE_KAFKA_BROKERS"] != "kafka-1:19092,kafka-2:19092,kafka-3:19092" {
 			t.Fatalf("%s is not a Kafka Trace producer: %#v", name, service.Environment)
 		}
+	}
+	for _, name := range []string{"kafka-1", "kafka-2", "kafka-3"} {
+		broker, ok := file.Services[name]
+		if !ok || broker.Environment["KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR"] != "3" ||
+			broker.Environment["KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR"] != "3" {
+			t.Fatalf("production broker %s is not RF=3: %#v", name, broker)
+		}
+	}
+	init := file.Services["kafka-init"]
+	if init.Environment["NANO_KAFKA_REPLICATION_FACTOR"] != "3" {
+		t.Fatalf("production topic replication factor = %q", init.Environment["NANO_KAFKA_REPLICATION_FACTOR"])
 	}
 	processor, ok := file.Services["agent-trace-processor-clickhouse"]
 	if !ok || processor.Environment["NANO_AGENT_TRACE_PROCESSOR_STORE"] != "clickhouse" ||

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 bootstrap_server="${NANO_KAFKA_BOOTSTRAP_SERVER:-kafka:19092}"
+replication_factor="${NANO_KAFKA_REPLICATION_FACTOR:-1}"
 topics_bin="/opt/kafka/bin/kafka-topics.sh"
 
 create_topic() {
@@ -15,7 +16,7 @@ create_topic() {
     --if-not-exists \
     --topic "${topic}" \
     --partitions "${partitions}" \
-    --replication-factor 1 \
+    --replication-factor "${replication_factor}" \
     --config cleanup.policy=delete \
     --config retention.ms="${retention_ms}" \
     --config compression.type=producer
