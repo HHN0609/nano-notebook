@@ -243,7 +243,11 @@ func runClickHouseCollector(ctx context.Context, config collectorConfig) error {
 	if err := collector.RunClickHouseMigrations(ctx, connection); err != nil {
 		return fmt.Errorf("run Collector ClickHouse migrations: %w", err)
 	}
-	store, err := collector.NewClickHouseStore(connection)
+	stagingObjects, replayObjects, err := openCollectorReplayStores(ctx, config)
+	if err != nil {
+		return err
+	}
+	store, err := collector.NewClickHouseStoreWithReplay(connection, stagingObjects, replayObjects)
 	if err != nil {
 		return err
 	}
@@ -253,7 +257,7 @@ func runClickHouseCollector(ctx context.Context, config collectorConfig) error {
 	if err != nil {
 		return err
 	}
-	queryStore, err := collector.NewClickHouseTraceQueryStore(connection)
+	queryStore, err := collector.NewClickHouseTraceQueryStoreWithReplay(connection, replayObjects)
 	if err != nil {
 		return err
 	}
@@ -263,7 +267,10 @@ func runClickHouseCollector(ctx context.Context, config collectorConfig) error {
 	}
 	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
 		Ingestor: ingestor, ServiceToken: config.ServiceToken, MaxBodyBytes: config.MaxBodyBytes,
-		QueryStore: queryStore, AnalyticsStore: analyticsStore, QueryToken: config.QueryToken, Readiness: connection.Ping,
+		QueryStore: queryStore, AnalyticsStore: analyticsStore, QueryToken: config.QueryToken,
+		Readiness: func(readyCtx context.Context) error {
+			return errors.Join(connection.Ping(readyCtx), stagingObjects.CheckReady(readyCtx), replayObjects.CheckReady(readyCtx))
+		},
 	})
 	if err != nil {
 		return err
@@ -357,19 +364,9 @@ func openCollectorPool(ctx context.Context, databaseURL string, maxConns, minCon
 }
 
 func runCollectorService(ctx context.Context, config collectorConfig, pool, projectionPool, queryPool *pgxpool.Pool, analyticsStore collector.TraceAnalyticsQueries) error {
-	stagingObjects, err := objectstore.NewS3Store(config.ReplayStagingS3)
+	stagingObjects, replayObjects, err := openCollectorReplayStores(ctx, config)
 	if err != nil {
-		return fmt.Errorf("configure Collector staging object Store: %w", err)
-	}
-	replayObjects, err := objectstore.NewS3Store(config.ReplayS3)
-	if err != nil {
-		return fmt.Errorf("configure Collector Replay object Store: %w", err)
-	}
-	if err := stagingObjects.CheckReady(ctx); err != nil {
-		return fmt.Errorf("check Collector staging object Store: %w", err)
-	}
-	if err := replayObjects.CheckReady(ctx); err != nil {
-		return fmt.Errorf("check Collector Replay object Store: %w", err)
+		return err
 	}
 	store, err := collector.NewPostgresStoreWithReplay(pool, stagingObjects, replayObjects)
 	if err != nil {
@@ -434,6 +431,24 @@ func runCollectorService(ctx context.Context, config collectorConfig, pool, proj
 	cancelMaintenance()
 	maintenanceErr := errors.Join(<-maintenanceDone, <-maintenanceDone)
 	return errors.Join(serviceErr, maintenanceErr)
+}
+
+func openCollectorReplayStores(ctx context.Context, config collectorConfig) (*objectstore.S3Store, *objectstore.S3Store, error) {
+	stagingObjects, err := objectstore.NewS3Store(config.ReplayStagingS3)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure Collector staging object Store: %w", err)
+	}
+	replayObjects, err := objectstore.NewS3Store(config.ReplayS3)
+	if err != nil {
+		return nil, nil, fmt.Errorf("configure Collector Replay object Store: %w", err)
+	}
+	if err := stagingObjects.CheckReady(ctx); err != nil {
+		return nil, nil, fmt.Errorf("check Collector staging object Store: %w", err)
+	}
+	if err := replayObjects.CheckReady(ctx); err != nil {
+		return nil, nil, fmt.Errorf("check Collector Replay object Store: %w", err)
+	}
+	return stagingObjects, replayObjects, nil
 }
 
 func envInt32(key string, fallback int32) (int32, error) {

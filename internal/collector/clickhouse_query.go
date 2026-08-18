@@ -2,17 +2,36 @@ package collector
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 )
 
 type ClickHouseTraceQueryStore struct {
-	connection driver.Conn
-	raw        *ClickHouseStore
+	connection    driver.Conn
+	raw           *ClickHouseStore
+	replayObjects objectstore.Store
+}
+
+func NewClickHouseTraceQueryStoreWithReplay(connection driver.Conn, replayObjects objectstore.Store) (*ClickHouseTraceQueryStore, error) {
+	if replayObjects == nil {
+		return nil, errors.New("Collector ClickHouse Replay query object Store is required")
+	}
+	store, err := NewClickHouseTraceQueryStore(connection)
+	if err != nil {
+		return nil, err
+	}
+	store.replayObjects = replayObjects
+	return store, nil
 }
 
 func NewClickHouseTraceQueryStore(connection driver.Conn) (*ClickHouseTraceQueryStore, error) {
@@ -157,6 +176,52 @@ func (s *ClickHouseTraceQueryStore) Detail(ctx context.Context, traceID agentobs
 	}, nil
 }
 
-func (s *ClickHouseTraceQueryStore) Replay(context.Context, agentobs.TraceID, agentobs.SpanID, string) (OpaqueReplay, error) {
-	return OpaqueReplay{}, ErrReplayNotFound
+func (s *ClickHouseTraceQueryStore) Replay(ctx context.Context, traceID agentobs.TraceID, spanID agentobs.SpanID, attachmentID string) (OpaqueReplay, error) {
+	if s == nil || s.raw == nil || s.replayObjects == nil || traceID == "" || spanID == "" || attachmentID == "" ||
+		len(traceID) > 128 || len(spanID) > 128 || len(attachmentID) > 64 {
+		return OpaqueReplay{}, ErrReplayNotFound
+	}
+	stored, found, err := s.raw.loadReplayRef(ctx, attachmentID)
+	if err != nil {
+		return OpaqueReplay{}, ErrReplayUnavailable
+	}
+	if !found || stored.traceID != traceID {
+		return OpaqueReplay{}, ErrReplayNotFound
+	}
+	if stored.expiresAtNano <= time.Now().UTC().UnixNano() {
+		return OpaqueReplay{}, ErrReplayExpired
+	}
+	var visible uint64
+	if err := s.connection.QueryRow(ctx, `
+		SELECT count()
+		FROM obs_trace_summaries AS s FINAL
+		INNER JOIN (
+			SELECT trace_id, sequence, span_id
+			FROM obs_trace_records_raw
+			WHERE trace_id = ? AND sequence = ?
+			ORDER BY ingest_version DESC LIMIT 1 BY identity_key
+		) AS r ON r.trace_id = s.trace_id
+		WHERE s.trace_id = ? AND s.projected_sequence >= ? AND r.span_id = ?
+	`, string(traceID), uint32(stored.recordSequence), string(traceID), uint32(stored.recordSequence), string(spanID)).Scan(&visible); err != nil {
+		return OpaqueReplay{}, err
+	}
+	if visible == 0 {
+		return OpaqueReplay{}, ErrReplayNotFound
+	}
+	ciphertext, err := s.replayObjects.Get(ctx, stored.objectKey, int64(stored.ciphertextBytes))
+	if err != nil || len(ciphertext) != stored.ciphertextBytes {
+		return OpaqueReplay{}, ErrReplayUnavailable
+	}
+	digest := sha256.Sum256(ciphertext)
+	if subtle.ConstantTimeCompare([]byte(stored.ciphertextSHA256), []byte(hex.EncodeToString(digest[:]))) != 1 {
+		return OpaqueReplay{}, ErrReplayUnavailable
+	}
+	return OpaqueReplay{
+		AttachmentID: stored.attachmentID, TraceID: stored.traceID, SpanID: spanID, Class: stored.class,
+		Sealed: replay.SealedPayload{
+			Class: stored.class, SchemaVersion: stored.schemaVersion, PlaintextSHA256: stored.plaintextSHA256,
+			Ciphertext: ciphertext, CiphertextSHA256: stored.ciphertextSHA256, Compression: stored.compression,
+			Encryption: stored.encryption, KeyID: stored.keyID, WrappedKey: stored.wrappedKey, Nonce: stored.nonce,
+		},
+	}, nil
 }

@@ -52,4 +52,12 @@ func TestClickHouseMigrationsAgainstRealServer(t *testing.T) {
 			t.Errorf("live ClickHouse schema is missing %q:\n%s", required, createStatement)
 		}
 	}
+	if err := connection.QueryRow(ctx, "SHOW CREATE TABLE obs_replay_payload_refs").Scan(&createStatement); err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"ReplacingMergeTree(ingest_version)", "ORDER BY (attachment_id, metadata_sha256)"} {
+		if !strings.Contains(createStatement, required) {
+			t.Errorf("live ClickHouse Replay schema is missing %q:\n%s", required, createStatement)
+		}
+	}
 }

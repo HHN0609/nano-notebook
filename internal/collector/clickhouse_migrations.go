@@ -25,11 +25,12 @@ func RunClickHouseMigrations(ctx context.Context, executor clickHouseMigrationEx
 // Agent Trace facts. Raw rows repeat their Trace descriptor intentionally so a
 // retained fact never depends on a mutable parent row.
 func ClickHouseMigrationsSQL() string {
-	return clickHouseRawMigrationSQL + "\n" + clickHouseSummaryMigrationSQL + "\n" + clickHouseAnalyticsColumnsMigrationSQL + "\n" + clickHouseSpanAnalyticsMigrationSQL
+	return clickHouseRawMigrationSQL + "\n" + clickHouseSummaryMigrationSQL + "\n" + clickHouseAnalyticsColumnsMigrationSQL + "\n" + clickHouseSpanAnalyticsMigrationSQL + "\n" + clickHouseReplayRefsMigrationSQL
 }
 
 var clickHouseMigrationStatements = []string{
 	clickHouseRawMigrationSQL, clickHouseSummaryMigrationSQL, clickHouseAnalyticsColumnsMigrationSQL, clickHouseSpanAnalyticsMigrationSQL,
+	clickHouseReplayRefsMigrationSQL,
 }
 
 const clickHouseRawMigrationSQL = `
@@ -166,5 +167,36 @@ ENGINE = ReplacingMergeTree(ingest_version)
 PARTITION BY toYYYYMM(started_at)
 ORDER BY (notebook_id, trace_id, span_id)
 TTL started_at + INTERVAL 90 DAY DELETE
+SETTINGS index_granularity = 8192;
+`
+
+const clickHouseReplayRefsMigrationSQL = `
+create table if not exists obs_replay_payload_refs (
+	attachment_id String CODEC(ZSTD(3)),
+	metadata_sha256 FixedString(64),
+	trace_id String CODEC(ZSTD(3)),
+	record_sequence UInt32,
+	class LowCardinality(String),
+	schema_version UInt16,
+	plaintext_sha256 FixedString(64),
+	object_key String CODEC(ZSTD(3)),
+	ciphertext_bytes UInt32,
+	ciphertext_sha256 FixedString(64),
+	compression LowCardinality(String),
+	encryption LowCardinality(String),
+	key_id LowCardinality(String),
+	wrapped_key String,
+	nonce String,
+	expires_at DateTime64(9, 'UTC'),
+	expires_at_unix_nano Int64,
+	state LowCardinality(String),
+	source_topic LowCardinality(String),
+	source_partition Int32,
+	source_offset Int64,
+	ingest_version UInt64,
+	stored_at DateTime64(9, 'UTC') DEFAULT now64(9)
+)
+ENGINE = ReplacingMergeTree(ingest_version)
+ORDER BY (attachment_id, metadata_sha256)
 SETTINGS index_granularity = 8192;
 `

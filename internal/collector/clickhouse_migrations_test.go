@@ -34,6 +34,9 @@ func TestClickHouseMigrationsDefineDurableRawRecordContract(t *testing.T) {
 		"tool_name LowCardinality(String)",
 		"retryable Nullable(Bool)",
 		"ORDER BY (notebook_id, trace_id, span_id)",
+		"create table if not exists obs_replay_payload_refs",
+		"metadata_sha256 FixedString(64)",
+		"ORDER BY (attachment_id, metadata_sha256)",
 	} {
 		if !strings.Contains(sql, required) {
 			t.Errorf("ClickHouse migrations are missing %q", required)

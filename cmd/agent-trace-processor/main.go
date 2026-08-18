@@ -239,7 +239,7 @@ func run(ctx context.Context, config config) error {
 		if err := collector.RunClickHouseMigrations(ctx, connection); err != nil {
 			return fmt.Errorf("migrate Agent Trace Processor ClickHouse: %w", err)
 		}
-		clickHouseStore, storeErr := collector.NewClickHouseStore(connection)
+		clickHouseStore, storeErr := collector.NewClickHouseStoreWithReplay(connection, stagingObjects, replayObjects)
 		if storeErr != nil {
 			return storeErr
 		}

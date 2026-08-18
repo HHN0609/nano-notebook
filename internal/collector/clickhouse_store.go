@@ -12,11 +12,14 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 )
 
 type ClickHouseStore struct {
 	connection       driver.Conn
+	stagingObjects   objectstore.Store
+	replayObjects    objectstore.Store
 	probeMu          sync.Mutex
 	pendingProbes    []*clickHouseProbeRequest
 	probeDelay       time.Duration
@@ -42,6 +45,7 @@ type clickHouseWriteRequest struct {
 	trace            TraceDescriptor
 	records          []SequencedRecord
 	projection       *TraceProjection
+	attachments      []preparedAttachment
 	committedThrough int
 	source           KafkaSourcePosition
 	done             chan error
@@ -66,6 +70,19 @@ func NewClickHouseStore(connection driver.Conn) (*ClickHouseStore, error) {
 	}, nil
 }
 
+func NewClickHouseStoreWithReplay(connection driver.Conn, stagingObjects, replayObjects objectstore.Store) (*ClickHouseStore, error) {
+	if stagingObjects == nil || replayObjects == nil {
+		return nil, errors.New("Collector ClickHouse Replay Store dependencies are incomplete")
+	}
+	store, err := NewClickHouseStore(connection)
+	if err != nil {
+		return nil, err
+	}
+	store.stagingObjects = stagingObjects
+	store.replayObjects = replayObjects
+	return store, nil
+}
+
 func (s *ClickHouseStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) (int, error) {
 	if s == nil || s.connection == nil {
 		return 0, errors.New("nil Collector ClickHouse Store")
@@ -73,12 +90,6 @@ func (s *ClickHouseStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk
 	source, ok := KafkaSourcePositionFromContext(ctx)
 	if !ok || strings.TrimSpace(source.Topic) == "" || source.Partition < 0 || source.Offset < 0 {
 		return 0, errors.New("Collector ClickHouse ingest is missing its Kafka source position")
-	}
-	if len(chunk.Attachments) != 0 {
-		return 0, &ChunkError{
-			Code: CodeAttachmentUnavailable, Retryable: true,
-			Err: errors.New("Collector ClickHouse Replay metadata storage is not configured"),
-		}
 	}
 	trace, err := CanonicalTraceDescriptor(chunk.Trace)
 	if err != nil {
@@ -96,10 +107,18 @@ func (s *ClickHouseStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk
 			return 0, err
 		}
 	}
+	chunk, err = resolveDirectAttachmentSequences(existing.Records, chunk)
+	if err != nil {
+		return 0, &ChunkError{Code: CodeInvalidChunk, CommittedThrough: existing.CommittedThrough, Err: err}
+	}
 	merged, committedThrough, err := validateAndMergeTraceChunk(ctx, memoryTrace{
 		descriptor: existing.Trace,
 		records:    existing.Records,
 	}, chunk, s.spanExists)
+	if err != nil {
+		return 0, err
+	}
+	preparedAttachments, err := s.prepareReplayAttachments(ctx, chunk)
 	if err != nil {
 		return 0, err
 	}
@@ -111,11 +130,11 @@ func (s *ClickHouseStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk
 	if projectionErr == nil {
 		projected = &projection
 	}
-	if len(newRecords) == 0 && projected == nil {
+	if len(newRecords) == 0 && projected == nil && len(preparedAttachments) == 0 {
 		return committedThrough, nil
 	}
 	if err := s.enqueueWrite(clickHouseWriteRequest{
-		trace: trace, records: newRecords, projection: projected, committedThrough: committedThrough,
+		trace: trace, records: newRecords, projection: projected, attachments: preparedAttachments, committedThrough: committedThrough,
 		source: source, done: make(chan error, 1),
 	}); err != nil {
 		return 0, err
@@ -181,6 +200,9 @@ func (s *ClickHouseStore) writeBatch(ctx context.Context, requests []*clickHouse
 		if err := s.writeRawBatch(ctx, requests); err != nil {
 			return err
 		}
+	}
+	if err := s.writeReplayRefsBatch(ctx, requests); err != nil {
+		return err
 	}
 	if projectionCount > 0 {
 		if err := s.writeSummaryBatch(ctx, requests); err != nil {
