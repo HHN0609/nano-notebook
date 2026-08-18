@@ -52,6 +52,46 @@ func TestLoadControlPlaneConfigDefaultsToQwenPlus(t *testing.T) {
 	}
 }
 
+func TestLoadControlPlaneConfigDefaultsAgentTraceTransportToKafka(t *testing.T) {
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_BROKERS", "")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_TOPIC", "")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "")
+
+	config, err := loadControlPlaneConfig()
+	if err != nil {
+		t.Fatalf("loadControlPlaneConfig: %v", err)
+	}
+	if config.TraceTransport != "kafka" || len(config.TraceKafkaBrokers) != 1 || config.TraceKafkaBrokers[0] != "127.0.0.1:59092" ||
+		config.TraceKafkaTopic != "nano.observability.agent-trace.v1" || config.TraceKafkaClientID != "nano-control-plane-agent-trace" {
+		t.Fatalf("Agent Trace transport defaults = %#v", config)
+	}
+}
+
+func TestLoadControlPlaneConfigSupportsExplicitHTTPAndRejectsInvalidTraceTransport(t *testing.T) {
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "http")
+	if config, err := loadControlPlaneConfig(); err != nil || config.TraceTransport != "http" {
+		t.Fatalf("explicit HTTP config = %#v, %v", config, err)
+	}
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "udp")
+	if _, err := loadControlPlaneConfig(); err == nil {
+		t.Fatal("loadControlPlaneConfig accepted unknown Agent Trace transport")
+	}
+}
+
+func TestLoadControlPlaneConfigRejectsMissingSelectedTraceTransportConfig(t *testing.T) {
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "kafka")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_BROKERS", " ")
+	if _, err := loadControlPlaneConfig(); err == nil {
+		t.Fatal("loadControlPlaneConfig accepted Kafka without brokers")
+	}
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "http")
+	t.Setenv("NANO_COLLECTOR_SERVICE_TOKEN", " ")
+	if _, err := loadControlPlaneConfig(); err == nil {
+		t.Fatal("loadControlPlaneConfig accepted HTTP without service token")
+	}
+}
+
 func TestLoadControlPlaneConfigRejectsMutableAgentRelease(t *testing.T) {
 	t.Setenv("NANO_AGENT_RELEASE", "nano.default@latest")
 	if _, err := loadControlPlaneConfig(); err == nil {

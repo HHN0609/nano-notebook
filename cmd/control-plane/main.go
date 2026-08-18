@@ -35,6 +35,10 @@ type controlPlaneConfig struct {
 	CollectorQueryToken   string
 	CollectorServiceToken string
 	ProducerID            string
+	TraceTransport        string
+	TraceKafkaBrokers     []string
+	TraceKafkaTopic       string
+	TraceKafkaClientID    string
 	ReplayKeyID           string
 	ReplayKEK             []byte
 	CookieSecure          bool
@@ -137,21 +141,30 @@ func main() {
 		slog.Error("Collector Query client configuration invalid", "error", err)
 		os.Exit(1)
 	}
-	batchHTTP, err := agentbatch.NewHTTPSender(agentbatch.HTTPSenderConfig{
-		Endpoint:     config.CollectorURL + "/internal/agent-observability/v2/batches",
-		ServiceToken: config.CollectorServiceToken,
-		HTTPClient:   &http.Client{Timeout: 10 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+	traceSender, err := agentbatch.NewManagedSender(ctx, agentbatch.ManagedSenderConfig{
+		Transport: agentbatch.TraceTransport(config.TraceTransport),
+		HTTP: agentbatch.HTTPSenderConfig{
+			Endpoint:     config.CollectorURL + "/internal/agent-observability/v2/batches",
+			ServiceToken: config.CollectorServiceToken,
+			HTTPClient:   &http.Client{Timeout: 10 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+		},
+		Kafka: agentbatch.ManagedKafkaConfig{
+			Brokers: config.TraceKafkaBrokers, Topic: config.TraceKafkaTopic, ClientID: config.TraceKafkaClientID,
+			MaxBufferedRecords: 10_000, MaxBufferedBytes: 32 * 1024 * 1024,
+			DeliveryTimeout: 10 * time.Second, Linger: 5 * time.Millisecond, ReadinessTimeout: 10 * time.Second,
+		},
 	})
 	if err != nil {
-		slog.Error("Agent Trace HTTP Sender configuration invalid", "error", err)
+		slog.Error("Agent Trace Sender unavailable", "transport", config.TraceTransport, "error", err)
 		os.Exit(1)
 	}
 	traceExporter, err := agentbatch.NewExporter(agentbatch.Config{
-		ProducerID: config.ProducerID, Sender: batchHTTP,
+		ProducerID: config.ProducerID, Sender: traceSender,
 		MaxPendingRecords: 10_000, MaxPendingBytes: 32 * 1024 * 1024,
 		MaxBatchRecords: 128, MaxBatchBytes: 512 * 1024, MaxDelay: 250 * time.Millisecond,
 	})
 	if err != nil {
+		traceSender.Close()
 		slog.Error("Agent Trace memory exporter configuration invalid", "error", err)
 		os.Exit(1)
 	}
@@ -215,6 +228,7 @@ func main() {
 	if err := traceExporter.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("Agent Trace memory flush incomplete; bounded unsent records were dropped on process exit", "error", err)
 	}
+	traceSender.Close()
 	slog.Info("control-plane stopped")
 }
 
@@ -238,6 +252,10 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 		CollectorQueryToken:   env("NANO_COLLECTOR_QUERY_TOKEN", "nano-local-collector-query-token"),
 		CollectorServiceToken: env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
 		ProducerID:            env("NANO_CONTROL_PLANE_PRODUCER_ID", "nano-control-plane"),
+		TraceTransport:        strings.ToLower(strings.TrimSpace(env("NANO_AGENT_TRACE_TRANSPORT", "kafka"))),
+		TraceKafkaBrokers:     splitTraceKafkaBrokers(env("NANO_AGENT_TRACE_KAFKA_BROKERS", "127.0.0.1:59092")),
+		TraceKafkaTopic:       env("NANO_AGENT_TRACE_KAFKA_TOPIC", "nano.observability.agent-trace.v1"),
+		TraceKafkaClientID:    env("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "nano-control-plane-agent-trace"),
 		ReplayKeyID:           env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 		CookieSecure: os.Getenv("NANO_COOKIE_SECURE") == "true", Version: env("NANO_VERSION", "dev"),
 		DefaultModel:         env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
@@ -256,11 +274,31 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
 		config.AgentRelease.Identity == "" || strings.TrimSpace(config.CollectorURL) == "" || strings.TrimSpace(config.CollectorQueryToken) == "" ||
-		strings.TrimSpace(config.CollectorServiceToken) == "" || strings.TrimSpace(config.ProducerID) == "" ||
+		strings.TrimSpace(config.ProducerID) == "" ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || strings.TrimSpace(config.FetcherURL) == "" || len(config.ReplayKEK) != 32 {
 		return controlPlaneConfig{}, errors.New("Control Plane configuration is incomplete")
 	}
+	if config.TraceTransport != string(agentbatch.TraceTransportKafka) && config.TraceTransport != string(agentbatch.TraceTransportHTTP) {
+		return controlPlaneConfig{}, errors.New("Control Plane Agent Trace transport is invalid")
+	}
+	if config.TraceTransport == string(agentbatch.TraceTransportKafka) &&
+		(len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "") {
+		return controlPlaneConfig{}, errors.New("Control Plane Agent Trace Kafka configuration is incomplete")
+	}
+	if config.TraceTransport == string(agentbatch.TraceTransportHTTP) && strings.TrimSpace(config.CollectorServiceToken) == "" {
+		return controlPlaneConfig{}, errors.New("Control Plane Agent Trace HTTP configuration is incomplete")
+	}
 	return config, nil
+}
+
+func splitTraceKafkaBrokers(value string) []string {
+	var brokers []string
+	for _, broker := range strings.Split(value, ",") {
+		if broker = strings.TrimSpace(broker); broker != "" {
+			brokers = append(brokers, broker)
+		}
+	}
+	return brokers
 }
 
 func env(key, fallback string) string {

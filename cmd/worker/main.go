@@ -56,6 +56,10 @@ type workerConfig struct {
 	CollectorEndpoint              string
 	CollectorServiceToken          string
 	ProducerID                     string
+	TraceTransport                 string
+	TraceKafkaBrokers              []string
+	TraceKafkaTopic                string
+	TraceKafkaClientID             string
 	BatchMaxRecords                int
 	BatchMaxEncodedBytes           int
 	BatchMaxDelay                  time.Duration
@@ -324,20 +328,29 @@ func main() {
 		slog.Error("Replay Stager invalid", "error", err)
 		os.Exit(1)
 	}
-	batchHTTP, err := agentbatch.NewHTTPSender(agentbatch.HTTPSenderConfig{
-		Endpoint: config.CollectorEndpoint, ServiceToken: config.CollectorServiceToken,
-		HTTPClient: &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+	traceSender, err := agentbatch.NewManagedSender(ctx, agentbatch.ManagedSenderConfig{
+		Transport: agentbatch.TraceTransport(config.TraceTransport),
+		HTTP: agentbatch.HTTPSenderConfig{
+			Endpoint: config.CollectorEndpoint, ServiceToken: config.CollectorServiceToken,
+			HTTPClient: &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+		},
+		Kafka: agentbatch.ManagedKafkaConfig{
+			Brokers: config.TraceKafkaBrokers, Topic: config.TraceKafkaTopic, ClientID: config.TraceKafkaClientID,
+			MaxBufferedRecords: 10_000, MaxBufferedBytes: 32 * 1024 * 1024,
+			DeliveryTimeout: 10 * time.Second, Linger: 5 * time.Millisecond, ReadinessTimeout: 10 * time.Second,
+		},
 	})
 	if err != nil {
-		slog.Error("Agent Trace HTTP Sender invalid", "error", err)
+		slog.Error("Agent Trace Sender unavailable", "transport", config.TraceTransport, "error", err)
 		os.Exit(1)
 	}
 	traceExporter, err := agentbatch.NewExporter(agentbatch.Config{
-		ProducerID: config.ProducerID, Sender: batchHTTP,
+		ProducerID: config.ProducerID, Sender: traceSender,
 		MaxPendingRecords: 10_000, MaxPendingBytes: 32 * 1024 * 1024,
 		MaxBatchRecords: config.BatchMaxRecords, MaxBatchBytes: config.BatchMaxEncodedBytes, MaxDelay: config.BatchMaxDelay,
 	})
 	if err != nil {
+		traceSender.Close()
 		slog.Error("Agent Trace memory exporter invalid", "error", err)
 		os.Exit(1)
 	}
@@ -622,6 +635,7 @@ func main() {
 	if err := shutdownTraceExporter(shutdownCtx, traceExporter); err != nil {
 		slog.Warn("Agent Trace memory flush incomplete; bounded unsent records were dropped on process exit", "error", err)
 	}
+	traceSender.Close()
 	slog.Info("worker stopped")
 }
 
@@ -817,6 +831,10 @@ func loadWorkerConfig() (workerConfig, error) {
 		CollectorEndpoint:     collectorURL + "/internal/agent-observability/v2/batches",
 		CollectorServiceToken: env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
 		ProducerID:            env("NANO_COLLECTOR_PRODUCER_ID", "nano-worker"),
+		TraceTransport:        strings.ToLower(strings.TrimSpace(env("NANO_AGENT_TRACE_TRANSPORT", "kafka"))),
+		TraceKafkaBrokers:     splitTraceKafkaBrokers(env("NANO_AGENT_TRACE_KAFKA_BROKERS", "127.0.0.1:59092")),
+		TraceKafkaTopic:       env("NANO_AGENT_TRACE_KAFKA_TOPIC", "nano.observability.agent-trace.v1"),
+		TraceKafkaClientID:    env("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "nano-worker-agent-trace"),
 		BatchMaxRecords:       maxRecords, BatchMaxEncodedBytes: maxEncodedBytes, BatchMaxDelay: maxDelay,
 		HTTPTimeout: httpTimeout, PurgeMaxCommands: purgeMaxCommands,
 		PurgeLeaseDuration: purgeLeaseDuration, PurgePollInterval: purgePollInterval,
@@ -897,7 +915,24 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.MailLeaseDuration <= 0 || config.MailPollInterval <= 0 || config.MailSMTPTimeout <= 0 {
 		return workerConfig{}, errors.New("worker configuration is incomplete or inconsistent")
 	}
+	if config.TraceTransport != string(agentbatch.TraceTransportKafka) && config.TraceTransport != string(agentbatch.TraceTransportHTTP) {
+		return workerConfig{}, errors.New("worker Agent Trace transport is invalid")
+	}
+	if config.TraceTransport == string(agentbatch.TraceTransportKafka) &&
+		(len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "") {
+		return workerConfig{}, errors.New("worker Agent Trace Kafka configuration is incomplete")
+	}
 	return config, nil
+}
+
+func splitTraceKafkaBrokers(value string) []string {
+	var brokers []string
+	for _, broker := range strings.Split(value, ",") {
+		if broker = strings.TrimSpace(broker); broker != "" {
+			brokers = append(brokers, broker)
+		}
+	}
+	return brokers
 }
 
 func workerEnvBool(key string, fallback bool) (bool, error) {

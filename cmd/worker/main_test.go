@@ -44,6 +44,41 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	}
 }
 
+func TestLoadWorkerConfigDefaultsAgentTraceTransportToKafka(t *testing.T) {
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_BROKERS", "")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_TOPIC", "")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "")
+
+	config, err := loadWorkerConfig()
+	if err != nil {
+		t.Fatalf("loadWorkerConfig: %v", err)
+	}
+	if config.TraceTransport != "kafka" || len(config.TraceKafkaBrokers) != 1 || config.TraceKafkaBrokers[0] != "127.0.0.1:59092" ||
+		config.TraceKafkaTopic != "nano.observability.agent-trace.v1" || config.TraceKafkaClientID != "nano-worker-agent-trace" {
+		t.Fatalf("Agent Trace transport defaults = %#v", config)
+	}
+}
+
+func TestLoadWorkerConfigSupportsExplicitHTTPAndRejectsInvalidTraceTransport(t *testing.T) {
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "http")
+	if config, err := loadWorkerConfig(); err != nil || config.TraceTransport != "http" {
+		t.Fatalf("explicit HTTP config = %#v, %v", config, err)
+	}
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "udp")
+	if _, err := loadWorkerConfig(); err == nil {
+		t.Fatal("loadWorkerConfig accepted unknown Agent Trace transport")
+	}
+}
+
+func TestLoadWorkerConfigRejectsMissingKafkaTraceTransportConfig(t *testing.T) {
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "kafka")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_TOPIC", " ")
+	if _, err := loadWorkerConfig(); err == nil {
+		t.Fatal("loadWorkerConfig accepted Kafka without a topic")
+	}
+}
+
 func TestLoadWorkerConfigRejectsMutableAgentRelease(t *testing.T) {
 	t.Setenv("NANO_AGENT_RELEASE", "nano.default@latest")
 	if _, err := loadWorkerConfig(); err == nil {
