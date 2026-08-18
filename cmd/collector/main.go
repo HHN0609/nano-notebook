@@ -107,7 +107,7 @@ func loadConfig() (collectorConfig, error) {
 		return collectorConfig{}, err
 	}
 	config := collectorConfig{
-		StoreBackend:               env("NANO_COLLECTOR_STORE", "postgres"),
+		StoreBackend:               env("NANO_COLLECTOR_STORE", "clickhouse"),
 		DatabaseURL:                env("NANO_COLLECTOR_DATABASE_URL", "postgres://nano_observability:nano-observability@localhost:55432/nano_observability?sslmode=disable"),
 		DatabaseMaxConns:           maxConns,
 		DatabaseMinConns:           minConns,

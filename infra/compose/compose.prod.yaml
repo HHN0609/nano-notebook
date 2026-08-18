@@ -4,7 +4,8 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - control-plane
+      control-plane:
+        condition: service_started
     restart: unless-stopped
 
   control-plane:
@@ -22,6 +23,10 @@ services:
       NANO_COLLECTOR_URL: http://collector:8082
       NANO_COLLECTOR_QUERY_TOKEN: nano-prod-collector-query-token
       NANO_COLLECTOR_SERVICE_TOKEN: nano-prod-collector-token
+      NANO_AGENT_TRACE_TRANSPORT: kafka
+      NANO_AGENT_TRACE_KAFKA_BROKERS: kafka:19092
+      NANO_AGENT_TRACE_KAFKA_TOPIC: nano.observability.agent-trace.v1
+      NANO_AGENT_TRACE_KAFKA_CLIENT_ID: nano-control-plane-agent-trace
       NANO_BIFROST_URL: http://bifrost:56666
       NANO_QDRANT_COLLECTION: nano-source-evidence-gemini-2-768-v1
       NANO_QDRANT_DENSE_DIMENSIONS: "768"
@@ -38,6 +43,8 @@ services:
       postgres:
         condition: service_healthy
       minio-init:
+        condition: service_completed_successfully
+      kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
 
@@ -61,8 +68,14 @@ services:
       NANO_QDRANT_COLLECTION: nano-source-evidence-gemini-2-768-v1
       NANO_QDRANT_DENSE_DIMENSIONS: "768"
       NANO_QDRANT_URL: http://qdrant:6333
-      NANO_COLLECTOR_ENDPOINT: http://collector:8082
+      NANO_COLLECTOR_URL: http://collector:8082
       NANO_COLLECTOR_SERVICE_TOKEN: nano-prod-collector-token
+      NANO_AGENT_TRACE_TRANSPORT: kafka
+      NANO_AGENT_TRACE_KAFKA_BROKERS: kafka:19092
+      NANO_AGENT_TRACE_KAFKA_TOPIC: nano.observability.agent-trace.v1
+      NANO_AGENT_TRACE_KAFKA_CLIENT_ID: nano-worker-agent-trace
+      NANO_AGENT_TRACE_KAFKA_PURGE_TOPIC: nano.observability.agent-trace-purge.v1
+      NANO_AGENT_TRACE_KAFKA_PURGE_CLIENT_ID: nano-worker-agent-trace-purge
       NANO_REPLAY_STAGING_S3_ENDPOINT: minio:9000
       NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID: nano
       NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY: nano-password
@@ -77,6 +90,8 @@ services:
       postgres:
         condition: service_healthy
       minio-init:
+        condition: service_completed_successfully
+      kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
 
@@ -99,13 +114,17 @@ services:
     image: ${ECR_REGISTRY:-localhost}/nano-notebook-collector:${IMAGE_TAG:-latest}
     environment:
       NANO_COLLECTOR_ADDR: ":8082"
-      NANO_COLLECTOR_DATABASE_URL: postgres://nano_observability:nano-observability@observability-postgres:5432/nano_observability?sslmode=disable
+      NANO_COLLECTOR_STORE: clickhouse
       NANO_COLLECTOR_SERVICE_TOKEN: nano-prod-collector-token
       NANO_COLLECTOR_QUERY_TOKEN: nano-prod-collector-query-token
       NANO_COLLECTOR_DATABASE_MAX_CONNS: "16"
       NANO_COLLECTOR_PROJECTION_DATABASE_MAX_CONNS: "4"
       NANO_COLLECTOR_QUERY_DATABASE_MAX_CONNS: "8"
       NANO_COLLECTOR_PRODUCER_ID: nano-worker
+      NANO_CLICKHOUSE_ADDR: clickhouse:9000
+      NANO_CLICKHOUSE_DATABASE: nano_observability
+      NANO_CLICKHOUSE_USER: nano_observability
+      NANO_CLICKHOUSE_PASSWORD: nano-observability
       NANO_REPLAY_STAGING_S3_ENDPOINT: minio:9000
       NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID: nano
       NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY: nano-password
@@ -116,10 +135,44 @@ services:
       NANO_REPLAY_S3_BUCKET: nano-agent-replay
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     depends_on:
-      observability-postgres:
+      clickhouse:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+    restart: unless-stopped
+
+  agent-trace-processor-clickhouse:
+    image: ${ECR_REGISTRY:-localhost}/nano-notebook-agent-trace-processor:${IMAGE_TAG:-latest}
+    environment:
+      NANO_AGENT_TRACE_PROCESSOR_STORE: clickhouse
+      NANO_CLICKHOUSE_ADDR: clickhouse:9000
+      NANO_CLICKHOUSE_DATABASE: nano_observability
+      NANO_CLICKHOUSE_USER: nano_observability
+      NANO_CLICKHOUSE_PASSWORD: nano-observability
+      NANO_KAFKA_BROKERS: kafka:19092
+      NANO_AGENT_TRACE_TOPIC: nano.observability.agent-trace.v1
+      NANO_AGENT_TRACE_PURGE_TOPIC: nano.observability.agent-trace-purge.v1
+      NANO_AGENT_TRACE_PROCESSOR_GROUP_ID: nano-agent-trace-storage-clickhouse-v1
+      NANO_REPLAY_STAGING_S3_ENDPOINT: minio:9000
+      NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID: nano
+      NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY: nano-password
+      NANO_REPLAY_STAGING_S3_BUCKET: nano-agent-replay-staging
+      NANO_REPLAY_S3_ENDPOINT: minio:9000
+      NANO_REPLAY_S3_ACCESS_KEY_ID: nano
+      NANO_REPLAY_S3_SECRET_ACCESS_KEY: nano-password
+      NANO_REPLAY_S3_BUCKET: nano-agent-replay
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9096/metrics >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
     restart: unless-stopped
 
   document-renderer:
@@ -158,6 +211,7 @@ services:
 
   observability-postgres:
     image: postgres:16-alpine
+    profiles: ["postgres-trace-rollback"]
     environment:
       POSTGRES_USER: nano_observability
       POSTGRES_PASSWORD: nano-observability
@@ -169,6 +223,64 @@ services:
       retries: 20
     volumes:
       - observability-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  kafka:
+    image: apache/kafka:4.3.1
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:19092,CONTROLLER://:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: "1"
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server 127.0.0.1:19092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  kafka-init:
+    image: apache/kafka:4.3.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/opt/nano/init-topics.sh"]
+    volumes:
+      - ../kafka/init-topics.sh:/opt/nano/init-topics.sh:ro
+
+  clickhouse:
+    image: clickhouse:26.3.17.56-jammy
+    environment:
+      CLICKHOUSE_DB: nano_observability
+      CLICKHOUSE_USER: nano_observability
+      CLICKHOUSE_PASSWORD: nano-observability
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --host 127.0.0.1 --user $$CLICKHOUSE_USER --password $$CLICKHOUSE_PASSWORD --query 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
     restart: unless-stopped
 
   minio:
@@ -259,7 +371,8 @@ services:
   grafana:
     image: grafana/grafana:11.4.0
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_started
     environment:
       GF_SECURITY_ADMIN_USER: ${NANO_GRAFANA_ADMIN_USER}
       GF_SECURITY_ADMIN_PASSWORD: ${NANO_GRAFANA_ADMIN_PASSWORD}
@@ -275,6 +388,8 @@ services:
 volumes:
   postgres-data:
   observability-postgres-data:
+  kafka-data:
+  clickhouse-data:
   minio-data:
   qdrant-data:
   prometheus-data:

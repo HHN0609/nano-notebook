@@ -35,6 +35,9 @@ func TestLoadConfigUsesDedicatedCollectorDatabaseAndPool(t *testing.T) {
 	if config.DatabaseURL != "postgres://observability" {
 		t.Fatalf("DatabaseURL = %q", config.DatabaseURL)
 	}
+	if config.StoreBackend != "clickhouse" {
+		t.Fatalf("default StoreBackend = %q, want clickhouse", config.StoreBackend)
+	}
 	if config.DatabaseMaxConns != 24 || config.DatabaseMinConns != 3 {
 		t.Fatalf("database pool = %d/%d", config.DatabaseMaxConns, config.DatabaseMinConns)
 	}

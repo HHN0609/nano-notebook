@@ -38,6 +38,12 @@ services:
       context: ../..
       dockerfile: infra/collector/Dockerfile
 
+  agent-trace-processor-clickhouse:
+    image: ""
+    build:
+      context: ../..
+      dockerfile: infra/agent-trace-processor/Dockerfile
+
   document-renderer:
     image: ""
     build:

@@ -124,7 +124,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	parsed := config{
-		StoreBackend: value("NANO_AGENT_TRACE_PROCESSOR_STORE", "postgres"),
+		StoreBackend: value("NANO_AGENT_TRACE_PROCESSOR_STORE", "clickhouse"),
 		DatabaseURL:  value("NANO_AGENT_TRACE_PROCESSOR_DATABASE_URL", ""), DatabaseMaxConns: int32(databaseMaxConns),
 		ClickHouseAddr:     strings.Split(value("NANO_CLICKHOUSE_ADDR", ""), ","),
 		ClickHouseDatabase: value("NANO_CLICKHOUSE_DATABASE", "nano_observability"),

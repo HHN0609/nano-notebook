@@ -17,10 +17,11 @@ fi
 export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano?sslmode=disable}"
 export NANO_CONTROL_PLANE_ADDR="${NANO_CONTROL_PLANE_ADDR:-:8080}"
 export NANO_WORKER_ADDR="${NANO_WORKER_ADDR:-:8081}"
-export NANO_COLLECTOR_ADDR="${NANO_COLLECTOR_ADDR:-:8082}"
-export NANO_COLLECTOR_DATABASE_URL="${NANO_COLLECTOR_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55433/nano_observability?sslmode=disable}"
+export NANO_COLLECTOR_URL="${NANO_COLLECTOR_URL:-http://127.0.0.1:58082}"
 export NANO_COLLECTOR_SERVICE_TOKEN="${NANO_COLLECTOR_SERVICE_TOKEN:-nano-local-collector-token}"
 export NANO_COLLECTOR_QUERY_TOKEN="${NANO_COLLECTOR_QUERY_TOKEN:-nano-local-collector-query-token}"
+export NANO_AGENT_TRACE_TRANSPORT="${NANO_AGENT_TRACE_TRANSPORT:-kafka}"
+export NANO_AGENT_TRACE_KAFKA_BROKERS="${NANO_AGENT_TRACE_KAFKA_BROKERS:-127.0.0.1:59092}"
 export NANO_CHAT_MODEL="${NANO_CHAT_MODEL:-aliyun/qwen-plus}"
 export NANO_BIFROST_URL="${NANO_BIFROST_URL:-http://127.0.0.1:56666}"
 export NANO_WEB_BASE_URL="${NANO_WEB_BASE_URL:-http://localhost:5173}"
@@ -31,13 +32,25 @@ export NANO_FETCHER_DOH_BOOTSTRAP_ADDR="${NANO_FETCHER_DOH_BOOTSTRAP_ADDR:-1.1.1
 
 docker compose -f infra/compose/compose.yaml up -d
 docker compose -f infra/compose/compose.yaml wait minio-init >/dev/null
+docker compose -f infra/compose/compose.yaml wait kafka-init >/dev/null
 for i in $(seq 1 60); do
   if docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
-scripts/prepare-observability-db
+for i in $(seq 1 60); do
+  if docker compose -f infra/compose/compose.yaml ps --status running agent-trace-processor-clickhouse collector >/dev/null 2>&1 &&
+    curl -fsS http://127.0.0.1:59096/metrics >/dev/null 2>&1 &&
+    curl -fsS http://127.0.0.1:58082/internal/agent-observability/v1/health >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$i" -eq 60 ]; then
+    echo "default Kafka/ClickHouse Trace services did not become ready" >&2
+    exit 1
+  fi
+  sleep 1
+done
 go run ./cmd/migrate
 
 cleanup() {
@@ -47,7 +60,6 @@ trap cleanup EXIT INT TERM
 
 go run ./cmd/control-plane &
 go run ./cmd/worker &
-go run ./cmd/collector &
 go run ./cmd/fetcher &
 npm --prefix web run dev -- --host 127.0.0.1 &
 

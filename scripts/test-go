@@ -8,7 +8,8 @@ export NANO_TEST_DATABASE_URL="${NANO_TEST_DATABASE_URL:-postgres://nano:nano@lo
 export NANO_TEST_OBSERVABILITY_DATABASE_URL="${NANO_TEST_OBSERVABILITY_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55433/nano_observability_test?sslmode=disable}"
 export NANO_TEST_MIGRATION_OBSERVABILITY_DATABASE_URL="${NANO_TEST_MIGRATION_OBSERVABILITY_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55433/nano_observability_migration_test?sslmode=disable}"
 export NANO_TEST_S3_ENDPOINT="${NANO_TEST_S3_ENDPOINT:-127.0.0.1:59000}"
-docker compose -f infra/compose/compose.yaml up -d postgres observability-postgres minio minio-init >/dev/null
+export NANO_TEST_CLICKHOUSE_ADDR="${NANO_TEST_CLICKHOUSE_ADDR:-127.0.0.1:59004}"
+docker compose -f infra/compose/compose.yaml up -d postgres observability-postgres clickhouse minio minio-init >/dev/null
 docker compose -f infra/compose/compose.yaml wait minio-init >/dev/null
 
 postgres_ready() {
@@ -23,6 +24,19 @@ for _ in $(seq 1 60); do
 done
 if ! postgres_ready; then
   echo "postgres did not become ready" >&2
+  exit 1
+fi
+clickhouse_ready() {
+  docker compose -f infra/compose/compose.yaml exec -T clickhouse clickhouse-client --host 127.0.0.1 --user nano_observability --password nano-observability --query 'SELECT 1' >/dev/null 2>&1
+}
+for _ in $(seq 1 60); do
+  if clickhouse_ready; then
+    break
+  fi
+  sleep 1
+done
+if ! clickhouse_ready; then
+  echo "clickhouse did not become ready" >&2
   exit 1
 fi
 if ! docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -Atc "select 1 from pg_database where datname='nano_test'" | grep -qx 1; then

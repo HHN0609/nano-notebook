@@ -67,6 +67,30 @@ func TestLoadConfigBuildsClickHouseStageCProcessor(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDefaultsToClickHouse(t *testing.T) {
+	env := map[string]string{
+		"NANO_CLICKHOUSE_ADDR":                     "clickhouse:9000",
+		"NANO_CLICKHOUSE_USER":                     "nano_observability",
+		"NANO_CLICKHOUSE_PASSWORD":                 "password",
+		"NANO_KAFKA_BROKERS":                       "kafka:19092",
+		"NANO_REPLAY_STAGING_S3_ENDPOINT":          "minio:9000",
+		"NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID":     "nano",
+		"NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY": "password",
+		"NANO_REPLAY_STAGING_S3_BUCKET":            "staging",
+		"NANO_REPLAY_S3_ENDPOINT":                  "minio:9000",
+		"NANO_REPLAY_S3_ACCESS_KEY_ID":             "nano",
+		"NANO_REPLAY_S3_SECRET_ACCESS_KEY":         "password",
+		"NANO_REPLAY_S3_BUCKET":                    "replay",
+	}
+	config, err := loadConfig(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.StoreBackend != "clickhouse" {
+		t.Fatalf("default StoreBackend = %q, want clickhouse", config.StoreBackend)
+	}
+}
+
 func TestLoadConfigRejectsIncompleteSelectedStore(t *testing.T) {
 	env := map[string]string{
 		"NANO_AGENT_TRACE_PROCESSOR_STORE": "clickhouse",
