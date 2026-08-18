@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 )
@@ -38,6 +39,10 @@ type Ingestor interface {
 	Ingest(context.Context, collector.Batch) (collector.BatchResult, error)
 }
 
+type Purger interface {
+	Purge(context.Context, collector.PurgeBatch) (collector.PurgeBatchResult, error)
+}
+
 type QuarantineWriter interface {
 	Write(context.Context, QuarantineEnvelope) error
 }
@@ -59,6 +64,8 @@ type QuarantineEnvelope struct {
 type Config struct {
 	Topic      string
 	Ingestor   Ingestor
+	PurgeTopic string
+	Purger     Purger
 	Quarantine QuarantineWriter
 	Now        func() time.Time
 	Metrics    *metrics.Catalog
@@ -67,6 +74,8 @@ type Config struct {
 type Processor struct {
 	topic      string
 	ingestor   Ingestor
+	purgeTopic string
+	purger     Purger
 	quarantine QuarantineWriter
 	now        func() time.Time
 	metrics    *metrics.Catalog
@@ -74,13 +83,20 @@ type Processor struct {
 
 func New(config Config) (*Processor, error) {
 	config.Topic = strings.TrimSpace(config.Topic)
+	config.PurgeTopic = strings.TrimSpace(config.PurgeTopic)
 	if config.Topic == "" || config.Ingestor == nil || config.Quarantine == nil {
 		return nil, errors.New("Agent Trace Processor configuration is incomplete")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	return &Processor{topic: config.Topic, ingestor: config.Ingestor, quarantine: config.Quarantine, now: config.Now, metrics: config.Metrics}, nil
+	if (config.PurgeTopic == "") != (config.Purger == nil) {
+		return nil, errors.New("Agent Trace Processor purge configuration is incomplete")
+	}
+	return &Processor{
+		topic: config.Topic, ingestor: config.Ingestor, purgeTopic: config.PurgeTopic, purger: config.Purger,
+		quarantine: config.Quarantine, now: config.Now, metrics: config.Metrics,
+	}, nil
 }
 
 // Process returns Commit only after retained storage accepted the message or a
@@ -89,6 +105,9 @@ func New(config Config) (*Processor, error) {
 func (p *Processor) Process(ctx context.Context, message Message) (Disposition, error) {
 	if p == nil || p.ingestor == nil || p.quarantine == nil {
 		return Retry, errors.New("nil Agent Trace Processor")
+	}
+	if strings.TrimSpace(message.Topic) == p.purgeTopic && p.purger != nil {
+		return p.processPurge(ctx, message)
 	}
 	if strings.TrimSpace(message.Topic) != p.topic {
 		return p.quarantineMessage(ctx, message, CodeInvalidEnvelope, "unexpected source topic")
@@ -141,6 +160,42 @@ func (p *Processor) Process(ctx context.Context, message Message) (Disposition, 
 		p.recordMessage("retry")
 		return Retry, fmt.Errorf("Agent Trace storage returned unknown status %q", chunk.Status)
 	}
+}
+
+func (p *Processor) processPurge(ctx context.Context, message Message) (Disposition, error) {
+	envelope, err := agentoutbox.DecodeKafkaPurgeEnvelope(message.Value)
+	if err != nil {
+		return p.quarantineMessage(ctx, message, CodeInvalidEnvelope, err.Error())
+	}
+	if string(message.Key) != string(envelope.Command.TraceID) {
+		return p.quarantineMessage(ctx, message, CodeInvalidEnvelope, "Kafka key does not match purge trace_id")
+	}
+	ctx = collector.ContextWithKafkaSourcePosition(ctx, collector.KafkaSourcePosition{
+		Topic: message.Topic, Partition: message.Partition, Offset: message.Offset,
+	})
+	batch := collector.PurgeBatch{
+		ProtocolVersion: collector.ProtocolVersion, BatchID: envelope.BatchID, ProducerID: envelope.ProducerID,
+		CreatedAt: envelope.CreatedAt, Commands: []collector.PurgeCommand{envelope.Command},
+	}
+	result, err := p.purger.Purge(ctx, batch)
+	if err != nil {
+		p.recordMessage("retry")
+		return Retry, fmt.Errorf("apply Agent Trace purge: %w", err)
+	}
+	if result.BatchID != batch.BatchID || len(result.Commands) != 1 || result.Commands[0].TraceID != envelope.Command.TraceID {
+		p.recordMessage("retry")
+		return Retry, errors.New("Agent Trace purge Store returned an invalid acknowledgement")
+	}
+	command := result.Commands[0]
+	if command.Status == collector.PurgeAcknowledged {
+		p.recordMessage("purged")
+		return Commit, nil
+	}
+	if command.Status == collector.PurgeRejected {
+		return p.quarantineMessage(ctx, message, command.Code, "Agent Trace purge permanently rejected")
+	}
+	p.recordMessage("retry")
+	return Retry, fmt.Errorf("Agent Trace purge Store returned unknown status %q", command.Status)
 }
 
 func (p *Processor) quarantineMessage(ctx context.Context, message Message, code, detail string) (Disposition, error) {

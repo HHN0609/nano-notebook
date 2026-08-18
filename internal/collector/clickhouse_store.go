@@ -96,6 +96,13 @@ func (s *ClickHouseStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk
 		return 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
 	}
 	chunk.Trace = trace
+	tombstoned, err := s.isTombstoned(ctx, chunk.Trace.TraceID)
+	if err != nil {
+		return 0, err
+	}
+	if tombstoned {
+		return 0, &ChunkError{Code: CodeTombstoned, Err: errors.New("Collector ClickHouse Trace is tombstoned")}
+	}
 	var existing StoredTrace
 	exists, err := s.traceExists(ctx, chunk.Trace)
 	if err != nil {

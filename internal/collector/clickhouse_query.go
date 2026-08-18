@@ -59,7 +59,7 @@ func (s *ClickHouseTraceQueryStore) List(ctx context.Context, query TraceListQue
 	if query.StartedAfterUnixNano != nil && query.StartedBeforeUnixNano != nil && *query.StartedAfterUnixNano >= *query.StartedBeforeUnixNano {
 		return TraceListResult{}, errors.New("Collector Trace time range is invalid")
 	}
-	clauses := make([]string, 0, 8)
+	clauses := []string{"s.trace_id NOT IN (SELECT trace_id FROM obs_trace_tombstones FINAL)"}
 	args := make([]any, 0, 12)
 	bind := func(clause string, values ...any) {
 		clauses = append(clauses, clause)
@@ -159,6 +159,13 @@ func (s *ClickHouseTraceQueryStore) Detail(ctx context.Context, traceID agentobs
 	if s == nil || s.raw == nil || traceID == "" || len(traceID) > 128 {
 		return ProjectedTrace{}, errors.New("Collector ClickHouse Trace detail query is invalid")
 	}
+	tombstoned, err := s.raw.isTombstoned(ctx, traceID)
+	if err != nil {
+		return ProjectedTrace{}, err
+	}
+	if tombstoned {
+		return ProjectedTrace{}, ErrTraceNotFound
+	}
 	stored, err := s.raw.LoadTrace(ctx, traceID)
 	if err != nil {
 		return ProjectedTrace{}, err
@@ -179,6 +186,13 @@ func (s *ClickHouseTraceQueryStore) Detail(ctx context.Context, traceID agentobs
 func (s *ClickHouseTraceQueryStore) Replay(ctx context.Context, traceID agentobs.TraceID, spanID agentobs.SpanID, attachmentID string) (OpaqueReplay, error) {
 	if s == nil || s.raw == nil || s.replayObjects == nil || traceID == "" || spanID == "" || attachmentID == "" ||
 		len(traceID) > 128 || len(spanID) > 128 || len(attachmentID) > 64 {
+		return OpaqueReplay{}, ErrReplayNotFound
+	}
+	tombstoned, err := s.raw.isTombstoned(ctx, traceID)
+	if err != nil {
+		return OpaqueReplay{}, err
+	}
+	if tombstoned {
 		return OpaqueReplay{}, ErrReplayNotFound
 	}
 	stored, found, err := s.raw.loadReplayRef(ctx, attachmentID)

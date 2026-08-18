@@ -814,6 +814,7 @@ func clickHouseBreakdownDimension(dimension AnalyticsDimension) (string, string)
 
 func clickHouseAnalyticsWhere(query TraceAnalyticsQuery) (string, []any) {
 	clauses := []string{
+		"s.trace_id NOT IN (SELECT trace_id FROM obs_trace_tombstones FINAL)",
 		"s.started_at_unix_nano >= ?",
 		"s.started_at_unix_nano < ?",
 		"s.workload_kind = ?",

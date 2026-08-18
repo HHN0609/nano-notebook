@@ -76,11 +76,17 @@ func purgeClaimFixture() agentoutbox.ClaimedPurgeBatch {
 }
 
 type purgeSenderStore struct {
-	claimed      agentoutbox.ClaimedPurgeBatch
-	claimOK      bool
-	applyCalls   int
-	releaseCalls int
-	releaseCode  string
+	claimed        agentoutbox.ClaimedPurgeBatch
+	claimOK        bool
+	applyCalls     int
+	releaseCalls   int
+	releaseCode    string
+	publishedCalls int
+}
+
+func (s *purgeSenderStore) MarkPurgePublished(context.Context, agentoutbox.ClaimedPurgeBatch) error {
+	s.publishedCalls++
+	return nil
 }
 
 func (s *purgeSenderStore) ClaimPurgeBatch(context.Context) (agentoutbox.ClaimedPurgeBatch, bool, error) {

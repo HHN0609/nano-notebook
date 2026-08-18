@@ -94,15 +94,10 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		processed bool
 		err       error
 	}
-	type traceKey struct {
-		topic     string
-		partition int32
-		key       string
-	}
 	groups := make([]traceWork, 0)
-	groupIndexes := make(map[traceKey]int)
+	groupIndexes := make(map[string]int)
 	for messageIndex, message := range messages {
-		key := traceKey{topic: message.Topic, partition: message.Partition, key: string(message.Key)}
+		key := string(message.Key)
 		index, ok := groupIndexes[key]
 		if !ok {
 			index = len(groups)

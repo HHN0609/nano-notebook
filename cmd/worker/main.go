@@ -60,6 +60,8 @@ type workerConfig struct {
 	TraceKafkaBrokers              []string
 	TraceKafkaTopic                string
 	TraceKafkaClientID             string
+	TraceKafkaPurgeTopic           string
+	TraceKafkaPurgeClientID        string
 	BatchMaxRecords                int
 	BatchMaxEncodedBytes           int
 	BatchMaxDelay                  time.Duration
@@ -114,6 +116,11 @@ type workerConfig struct {
 }
 
 type traceFlusher interface {
+	ForceFlush(context.Context) error
+}
+
+type purgeOutboxSender interface {
+	Run(context.Context, time.Duration) error
 	ForceFlush(context.Context) error
 }
 
@@ -364,16 +371,40 @@ func main() {
 		slog.Error("Agent Trace purge Store invalid", "error", err)
 		os.Exit(1)
 	}
-	purgeSender, err := agentoutbox.NewPurgeSender(purgePostgres, agentoutbox.SenderConfig{
-		PurgeEndpoint: strings.TrimSuffix(config.CollectorEndpoint, "/v2/batches") + "/v1/purges",
-		ServiceToken:  config.CollectorServiceToken,
-		HTTPClient:    &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
-		ReportError: func(err error) {
-			slog.Error("Agent Trace purge delivery failed; durable command retained", "error", err)
-		},
-	})
+	var purgeSender purgeOutboxSender
+	var purgeKafkaProducer *agentbatch.FranzKafkaProducer
+	reportPurgeError := func(err error) {
+		slog.Error("Agent Trace purge delivery failed; durable command retained", "error", err)
+	}
+	if config.TraceTransport == string(agentbatch.TraceTransportKafka) {
+		purgeKafkaProducer, err = agentbatch.NewFranzKafkaProducer(agentbatch.FranzKafkaConfig{
+			Brokers: config.TraceKafkaBrokers, ClientID: config.TraceKafkaPurgeClientID,
+			MaxBufferedRecords: 1_000, MaxBufferedBytes: 8 * 1024 * 1024,
+			DeliveryTimeout: 10 * time.Second, Linger: 5 * time.Millisecond,
+		})
+		if err == nil {
+			readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err = purgeKafkaProducer.Ping(readyCtx)
+			cancel()
+		}
+		if err == nil {
+			purgeSender, err = agentoutbox.NewKafkaPurgeSender(purgePostgres, agentoutbox.KafkaPurgeSenderConfig{
+				Topic: config.TraceKafkaPurgeTopic, Producer: purgeKafkaProducer, ReportError: reportPurgeError,
+			})
+		}
+	} else {
+		purgeSender, err = agentoutbox.NewPurgeSender(purgePostgres, agentoutbox.SenderConfig{
+			PurgeEndpoint: strings.TrimSuffix(config.CollectorEndpoint, "/v2/batches") + "/v1/purges",
+			ServiceToken:  config.CollectorServiceToken,
+			HTTPClient:    &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+			ReportError:   reportPurgeError,
+		})
+	}
 	if err != nil {
-		slog.Error("Agent Trace purge Sender invalid", "error", err)
+		if purgeKafkaProducer != nil {
+			purgeKafkaProducer.Close()
+		}
+		slog.Error("Agent Trace purge Sender invalid", "transport", config.TraceTransport, "error", err)
 		os.Exit(1)
 	}
 	var searchProvider websearch.Provider = notConfiguredWebSearchProvider{}
@@ -632,6 +663,9 @@ func main() {
 	if err := purgeSender.ForceFlush(shutdownCtx); err != nil {
 		slog.Warn("Agent Trace purge flush incomplete; durable command remains for restart", "error", err)
 	}
+	if purgeKafkaProducer != nil {
+		purgeKafkaProducer.Close()
+	}
 	if err := shutdownTraceExporter(shutdownCtx, traceExporter); err != nil {
 		slog.Warn("Agent Trace memory flush incomplete; bounded unsent records were dropped on process exit", "error", err)
 	}
@@ -822,20 +856,22 @@ func loadWorkerConfig() (workerConfig, error) {
 	}
 	collectorURL := strings.TrimRight(env("NANO_COLLECTOR_URL", "http://127.0.0.1:8082"), "/")
 	config := workerConfig{
-		DatabaseURL:           env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
-		AgentConfigurationID:  env("NANO_AGENT_CONFIGURATION_ID", "nano-interactive-v1"),
-		AgentRelease:          agentRelease,
-		LeaderModel:           env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
-		ResearchModel:         env("NANO_RESEARCH_MODEL", env("NANO_CHAT_MODEL", "aliyun/qwen-plus")),
-		Addr:                  env("NANO_WORKER_ADDR", ":8081"),
-		CollectorEndpoint:     collectorURL + "/internal/agent-observability/v2/batches",
-		CollectorServiceToken: env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
-		ProducerID:            env("NANO_COLLECTOR_PRODUCER_ID", "nano-worker"),
-		TraceTransport:        strings.ToLower(strings.TrimSpace(env("NANO_AGENT_TRACE_TRANSPORT", "kafka"))),
-		TraceKafkaBrokers:     splitTraceKafkaBrokers(env("NANO_AGENT_TRACE_KAFKA_BROKERS", "127.0.0.1:59092")),
-		TraceKafkaTopic:       env("NANO_AGENT_TRACE_KAFKA_TOPIC", "nano.observability.agent-trace.v1"),
-		TraceKafkaClientID:    env("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "nano-worker-agent-trace"),
-		BatchMaxRecords:       maxRecords, BatchMaxEncodedBytes: maxEncodedBytes, BatchMaxDelay: maxDelay,
+		DatabaseURL:             env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
+		AgentConfigurationID:    env("NANO_AGENT_CONFIGURATION_ID", "nano-interactive-v1"),
+		AgentRelease:            agentRelease,
+		LeaderModel:             env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
+		ResearchModel:           env("NANO_RESEARCH_MODEL", env("NANO_CHAT_MODEL", "aliyun/qwen-plus")),
+		Addr:                    env("NANO_WORKER_ADDR", ":8081"),
+		CollectorEndpoint:       collectorURL + "/internal/agent-observability/v2/batches",
+		CollectorServiceToken:   env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
+		ProducerID:              env("NANO_COLLECTOR_PRODUCER_ID", "nano-worker"),
+		TraceTransport:          strings.ToLower(strings.TrimSpace(env("NANO_AGENT_TRACE_TRANSPORT", "kafka"))),
+		TraceKafkaBrokers:       splitTraceKafkaBrokers(env("NANO_AGENT_TRACE_KAFKA_BROKERS", "127.0.0.1:59092")),
+		TraceKafkaTopic:         env("NANO_AGENT_TRACE_KAFKA_TOPIC", "nano.observability.agent-trace.v1"),
+		TraceKafkaClientID:      env("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "nano-worker-agent-trace"),
+		TraceKafkaPurgeTopic:    env("NANO_AGENT_TRACE_KAFKA_PURGE_TOPIC", "nano.observability.agent-trace-purge.v1"),
+		TraceKafkaPurgeClientID: env("NANO_AGENT_TRACE_KAFKA_PURGE_CLIENT_ID", "nano-worker-agent-trace-purge"),
+		BatchMaxRecords:         maxRecords, BatchMaxEncodedBytes: maxEncodedBytes, BatchMaxDelay: maxDelay,
 		HTTPTimeout: httpTimeout, PurgeMaxCommands: purgeMaxCommands,
 		PurgeLeaseDuration: purgeLeaseDuration, PurgePollInterval: purgePollInterval,
 		PurgeBaseBackoff: purgeBaseBackoff, PurgeMaxBackoff: purgeMaxBackoff,
@@ -886,7 +922,6 @@ func loadWorkerConfig() (workerConfig, error) {
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.AgentConfigurationID) == "" ||
 		config.AgentRelease.Identity == "" ||
 		strings.TrimSpace(config.LeaderModel) == "" || strings.TrimSpace(config.ResearchModel) == "" || strings.TrimSpace(config.Addr) == "" ||
-		strings.TrimSpace(collectorURL) == "" || strings.TrimSpace(config.CollectorServiceToken) == "" ||
 		strings.TrimSpace(config.ProducerID) == "" || config.BatchMaxRecords < 1 ||
 		config.BatchMaxEncodedBytes < 1 || config.BatchMaxDelay < 0 || config.HTTPTimeout <= 0 ||
 		config.PurgeMaxCommands < 1 || config.PurgeLeaseDuration <= 0 || config.PurgePollInterval <= 0 ||
@@ -919,8 +954,13 @@ func loadWorkerConfig() (workerConfig, error) {
 		return workerConfig{}, errors.New("worker Agent Trace transport is invalid")
 	}
 	if config.TraceTransport == string(agentbatch.TraceTransportKafka) &&
-		(len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "") {
+		(len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "" ||
+			strings.TrimSpace(config.TraceKafkaPurgeTopic) == "" || strings.TrimSpace(config.TraceKafkaPurgeClientID) == "" || config.TraceKafkaPurgeTopic == config.TraceKafkaTopic) {
 		return workerConfig{}, errors.New("worker Agent Trace Kafka configuration is incomplete")
+	}
+	if config.TraceTransport == string(agentbatch.TraceTransportHTTP) &&
+		(strings.TrimSpace(collectorURL) == "" || strings.TrimSpace(config.CollectorServiceToken) == "") {
+		return workerConfig{}, errors.New("worker Agent Trace HTTP configuration is incomplete")
 	}
 	return config, nil
 }

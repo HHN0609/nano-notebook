@@ -15,6 +15,7 @@ import (
 type FranzConsumerConfig struct {
 	Brokers          []string
 	Topic            string
+	PurgeTopic       string
 	GroupID          string
 	ClientID         string
 	MaxPollRecords   int
@@ -44,6 +45,7 @@ func defaultConsumerResetOffset() kgo.Offset {
 
 func NewFranzConsumer(config FranzConsumerConfig) (*FranzConsumer, error) {
 	config.Topic = strings.TrimSpace(config.Topic)
+	config.PurgeTopic = strings.TrimSpace(config.PurgeTopic)
 	config.GroupID = strings.TrimSpace(config.GroupID)
 	config.ClientID = strings.TrimSpace(config.ClientID)
 	brokers := make([]string, 0, len(config.Brokers))
@@ -57,11 +59,18 @@ func NewFranzConsumer(config FranzConsumerConfig) (*FranzConsumer, error) {
 		config.FetchMaxWait <= 0 || config.SessionTimeout <= 0 || config.RebalanceTimeout <= 0 {
 		return nil, errors.New("Agent Trace Kafka Consumer configuration is incomplete or unbounded")
 	}
+	if config.PurgeTopic == config.Topic {
+		return nil, errors.New("Agent Trace and purge Kafka topics must be distinct")
+	}
+	topics := []string{config.Topic}
+	if config.PurgeTopic != "" {
+		topics = append(topics, config.PurgeTopic)
+	}
 	options := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
 		kgo.ClientID(config.ClientID),
 		kgo.ConsumerGroup(config.GroupID),
-		kgo.ConsumeTopics(config.Topic),
+		kgo.ConsumeTopics(topics...),
 		kgo.ConsumeResetOffset(defaultConsumerResetOffset()),
 		kgo.DisableAutoCommit(),
 		kgo.BlockRebalanceOnPoll(),

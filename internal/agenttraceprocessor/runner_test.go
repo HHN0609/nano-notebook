@@ -90,6 +90,22 @@ func TestRunnerDoesNotCommitStoredSuffixPastFailedPartitionOffset(t *testing.T) 
 	}
 }
 
+func TestRunnerSerializesTraceAndPurgeTopicsForTheSameTraceKey(t *testing.T) {
+	consumer := &fakeConsumer{polls: [][]agenttraceprocessor.Message{{
+		{Topic: traceTopic, Partition: 0, Offset: 1, Key: []byte("trace-a")},
+		{Topic: "nano.observability.agent-trace-purge.v1", Partition: 4, Offset: 1, Key: []byte("trace-a")},
+	}}}
+	handler := newTraceKeyConcurrencyHandler()
+	runner := newRunner(t, consumer, handler)
+	close(handler.release)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if handler.sameTraceOverlap || handler.maxActive != 1 {
+		t.Fatalf("same_trace_overlap=%v max_active=%d", handler.sameTraceOverlap, handler.maxActive)
+	}
+}
+
 func TestRunnerRecordsBoundedKafkaToSearchableMetrics(t *testing.T) {
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	consumer := &fakeConsumer{polls: [][]agenttraceprocessor.Message{{{

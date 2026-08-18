@@ -10,6 +10,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/agenttraceprocessor"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 )
@@ -99,6 +100,43 @@ func TestProcessorQuarantinesInvalidEnvelopeWithoutCallingStorage(t *testing.T) 
 	}
 }
 
+func TestProcessorCommitsPurgeOnlyAfterClickHousePurgerCompletes(t *testing.T) {
+	purger := &fakePurger{result: collector.PurgeBatchResult{BatchID: "purge-batch-1", Commands: []collector.PurgeCommandResult{{
+		TraceID: "trace-purge-1", Status: collector.PurgeAcknowledged,
+	}}}}
+	processor, err := agenttraceprocessor.New(agenttraceprocessor.Config{
+		Topic: traceTopic, Ingestor: &fakeIngestor{}, PurgeTopic: "nano.observability.agent-trace-purge.v1",
+		Purger: purger, Quarantine: &fakeQuarantine{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disposition, err := processor.Process(context.Background(), validPurgeMessage(t))
+	if err != nil || disposition != agenttraceprocessor.Commit || purger.calls != 1 {
+		t.Fatalf("purge disposition=%q calls=%d err=%v", disposition, purger.calls, err)
+	}
+	source, ok := collector.KafkaSourcePositionFromContext(purger.ctx)
+	if !ok || source.Topic != "nano.observability.agent-trace-purge.v1" || source.Offset != 52 {
+		t.Fatalf("purge source=%#v found=%t", source, ok)
+	}
+}
+
+func TestProcessorRetriesPurgeWhenPhysicalDeletionIsIncomplete(t *testing.T) {
+	wantErr := errors.New("Replay object unavailable")
+	purger := &fakePurger{err: wantErr}
+	processor, err := agenttraceprocessor.New(agenttraceprocessor.Config{
+		Topic: traceTopic, Ingestor: &fakeIngestor{}, PurgeTopic: "nano.observability.agent-trace-purge.v1",
+		Purger: purger, Quarantine: &fakeQuarantine{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disposition, err := processor.Process(context.Background(), validPurgeMessage(t))
+	if !errors.Is(err, wantErr) || disposition != agenttraceprocessor.Retry {
+		t.Fatalf("purge disposition=%q err=%v", disposition, err)
+	}
+}
+
 func TestKafkaQuarantineWriterKeysEnvelopeBySourceCoordinate(t *testing.T) {
 	producer := &fakeKafkaProducer{}
 	writer, err := agenttraceprocessor.NewKafkaQuarantineWriter(agenttraceprocessor.KafkaQuarantineConfig{
@@ -155,6 +193,19 @@ type fakeQuarantine struct {
 	err     error
 }
 
+type fakePurger struct {
+	result collector.PurgeBatchResult
+	err    error
+	calls  int
+	ctx    context.Context
+}
+
+func (p *fakePurger) Purge(ctx context.Context, _ collector.PurgeBatch) (collector.PurgeBatchResult, error) {
+	p.calls++
+	p.ctx = ctx
+	return p.result, p.err
+}
+
 type fakeKafkaProducer struct {
 	messages []agentbatch.KafkaMessage
 	errors   []error
@@ -199,4 +250,23 @@ func validMessage(t *testing.T) agenttraceprocessor.Message {
 		t.Fatal(err)
 	}
 	return agenttraceprocessor.Message{Topic: traceTopic, Partition: 3, Offset: 41, Key: []byte("trace-1"), Value: value}
+}
+
+func validPurgeMessage(t *testing.T) agenttraceprocessor.Message {
+	t.Helper()
+	envelope := agentoutbox.KafkaPurgeEnvelope{
+		SchemaVersion: 1, BatchID: "purge-batch-1", ProducerID: "nano-worker", CreatedAt: time.Now().UTC(),
+		Command: collector.PurgeCommand{
+			CommandID: "purge/trace-purge-1", CommandVersion: 1, Kind: collector.CommandPurgeTrace,
+			TraceID: "trace-purge-1", RunID: "run-purge-1", RequestedAt: time.Now().UTC(),
+		},
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agenttraceprocessor.Message{
+		Topic: "nano.observability.agent-trace-purge.v1", Partition: 3, Offset: 52,
+		Key: []byte("trace-purge-1"), Value: encoded,
+	}
 }

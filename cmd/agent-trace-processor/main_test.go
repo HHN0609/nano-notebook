@@ -59,6 +59,9 @@ func TestLoadConfigBuildsClickHouseStageCProcessor(t *testing.T) {
 		config.ClickHouseMaxIdleConns != 8 || config.ClickHouseDialTimeout != 10*time.Second {
 		t.Fatalf("config=%#v", config)
 	}
+	if config.PurgeTopic != "nano.observability.agent-trace-purge.v1" || config.PurgeProducerID != "nano-worker" {
+		t.Fatalf("purge config=%#v", config)
+	}
 	if config.DatabaseURL != "" {
 		t.Fatalf("ClickHouse Stage C unexpectedly requires PostgreSQL: %#v", config)
 	}

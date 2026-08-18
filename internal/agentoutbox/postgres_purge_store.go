@@ -198,6 +198,64 @@ func (s *PurgeStore) ApplyPurgeResult(ctx context.Context, claimed ClaimedPurgeB
 	return tx.Commit(ctx)
 }
 
+func (s *PurgeStore) MarkPurgePublished(ctx context.Context, claimed ClaimedPurgeBatch) error {
+	if claimed.LeaseToken == "" || claimed.Batch.BatchID == "" || len(claimed.Batch.Commands) == 0 {
+		return errors.New("Kafka purge publication does not match a claimed Batch")
+	}
+	for _, command := range claimed.Batch.Commands {
+		keys, err := s.purgeObjectKeys(ctx, command.CommandID)
+		if err != nil {
+			return err
+		}
+		traceKeys, err := s.traceStagingObjectKeys(ctx, command.TraceID)
+		if err != nil {
+			return err
+		}
+		keys = append(keys, traceKeys...)
+		if len(keys) > 0 && s.stagingObjects == nil {
+			return errors.New("Outbox Replay staging object Store is unavailable")
+		}
+		for _, key := range keys {
+			if err := s.stagingObjects.Delete(ctx, key); err != nil {
+				return fmt.Errorf("delete published Replay staging object: %w", err)
+			}
+		}
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
+		return err
+	}
+	for _, command := range claimed.Batch.Commands {
+		var leased bool
+		if err := tx.QueryRow(ctx, `
+			select true from agentobs_outbox_commands
+			where command_id = $1 and delivery_state = 'leased' and lease_token = $2
+			for update
+		`, command.CommandID, claimed.LeaseToken).Scan(&leased); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("Outbox purge lease for Trace %s is no longer authoritative", command.TraceID)
+			}
+			return err
+		}
+		if _, err := tx.Exec(ctx, `delete from agentobs_outbox_command_objects where command_id = $1`, command.CommandID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			update agentobs_outbox_commands
+			set delivery_state = 'published', lease_token = null, lease_expires_at = null,
+				last_error_code = null, updated_at = now()
+			where command_id = $1
+		`, command.CommandID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *PurgeStore) traceStagingObjectKeys(ctx context.Context, traceID agentobs.TraceID) ([]string, error) {
 	if s.stagingObjects == nil {
 		return nil, nil

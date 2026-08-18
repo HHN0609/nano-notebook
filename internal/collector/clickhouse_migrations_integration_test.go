@@ -60,4 +60,15 @@ func TestClickHouseMigrationsAgainstRealServer(t *testing.T) {
 			t.Errorf("live ClickHouse Replay schema is missing %q:\n%s", required, createStatement)
 		}
 	}
+	for table, orderBy := range map[string]string{
+		"obs_trace_tombstones":  "ORDER BY (trace_id, command_sha256)",
+		"obs_trace_purge_state": "ORDER BY (command_id, command_sha256)",
+	} {
+		if err := connection.QueryRow(ctx, "SHOW CREATE TABLE "+table).Scan(&createStatement); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(createStatement, orderBy) {
+			t.Errorf("live ClickHouse %s schema is missing %q:\n%s", table, orderBy, createStatement)
+		}
+	}
 }

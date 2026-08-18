@@ -25,12 +25,13 @@ func RunClickHouseMigrations(ctx context.Context, executor clickHouseMigrationEx
 // Agent Trace facts. Raw rows repeat their Trace descriptor intentionally so a
 // retained fact never depends on a mutable parent row.
 func ClickHouseMigrationsSQL() string {
-	return clickHouseRawMigrationSQL + "\n" + clickHouseSummaryMigrationSQL + "\n" + clickHouseAnalyticsColumnsMigrationSQL + "\n" + clickHouseSpanAnalyticsMigrationSQL + "\n" + clickHouseReplayRefsMigrationSQL
+	return clickHouseRawMigrationSQL + "\n" + clickHouseSummaryMigrationSQL + "\n" + clickHouseAnalyticsColumnsMigrationSQL + "\n" + clickHouseSpanAnalyticsMigrationSQL + "\n" + clickHouseReplayRefsMigrationSQL + "\n" + clickHouseTombstonesMigrationSQL + "\n" + clickHousePurgeStateMigrationSQL
 }
 
 var clickHouseMigrationStatements = []string{
 	clickHouseRawMigrationSQL, clickHouseSummaryMigrationSQL, clickHouseAnalyticsColumnsMigrationSQL, clickHouseSpanAnalyticsMigrationSQL,
 	clickHouseReplayRefsMigrationSQL,
+	clickHouseTombstonesMigrationSQL, clickHousePurgeStateMigrationSQL,
 }
 
 const clickHouseRawMigrationSQL = `
@@ -198,5 +199,49 @@ create table if not exists obs_replay_payload_refs (
 )
 ENGINE = ReplacingMergeTree(ingest_version)
 ORDER BY (attachment_id, metadata_sha256)
+SETTINGS index_granularity = 8192;
+`
+
+const clickHouseTombstonesMigrationSQL = `
+create table if not exists obs_trace_tombstones (
+	trace_id String CODEC(ZSTD(3)),
+	command_sha256 FixedString(64),
+	command_id String CODEC(ZSTD(3)),
+	command_version UInt16,
+	run_id String CODEC(ZSTD(3)),
+	producer_id LowCardinality(String),
+	requested_at DateTime64(9, 'UTC'),
+	requested_at_unix_nano Int64,
+	source_topic LowCardinality(String),
+	source_partition Int32,
+	source_offset Int64,
+	tombstone_version UInt64,
+	tombstoned_at DateTime64(9, 'UTC') DEFAULT now64(9)
+)
+ENGINE = ReplacingMergeTree(tombstone_version)
+ORDER BY (trace_id, command_sha256)
+SETTINGS index_granularity = 8192;
+`
+
+const clickHousePurgeStateMigrationSQL = `
+create table if not exists obs_trace_purge_state (
+	command_id String CODEC(ZSTD(3)),
+	command_sha256 FixedString(64),
+	trace_id String CODEC(ZSTD(3)),
+	stage LowCardinality(String),
+	tombstone_ack Bool,
+	replay_objects_ack Bool,
+	replay_refs_ack Bool,
+	raw_records_ack Bool,
+	summaries_ack Bool,
+	span_analytics_ack Bool,
+	source_topic LowCardinality(String),
+	source_partition Int32,
+	source_offset Int64,
+	state_version UInt64,
+	updated_at DateTime64(9, 'UTC') DEFAULT now64(9)
+)
+ENGINE = ReplacingMergeTree(state_version)
+ORDER BY (command_id, command_sha256)
 SETTINGS index_granularity = 8192;
 `

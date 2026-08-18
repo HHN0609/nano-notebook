@@ -35,6 +35,8 @@ type config struct {
 	ClickHouseDialTimeout  time.Duration
 	Brokers                []string
 	Topic                  string
+	PurgeTopic             string
+	PurgeProducerID        string
 	QuarantineTopic        string
 	GroupID                string
 	ClientID               string
@@ -131,6 +133,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		ClickHouseDialTimeout: clickHouseDialTimeout,
 		Brokers:               strings.Split(value("NANO_KAFKA_BROKERS", ""), ","),
 		Topic:                 value("NANO_AGENT_TRACE_TOPIC", "nano.observability.agent-trace.v1"),
+		PurgeTopic:            value("NANO_AGENT_TRACE_PURGE_TOPIC", "nano.observability.agent-trace-purge.v1"),
+		PurgeProducerID:       value("NANO_AGENT_TRACE_PURGE_PRODUCER_ID", "nano-worker"),
 		QuarantineTopic:       value("NANO_AGENT_TRACE_QUARANTINE_TOPIC", "nano.observability.agent-trace-quarantine.v1"),
 		GroupID:               value("NANO_AGENT_TRACE_PROCESSOR_GROUP_ID", "nano-agent-trace-storage-v1"),
 		ClientID:              value("NANO_AGENT_TRACE_PROCESSOR_CLIENT_ID", "nano-agent-trace-processor"),
@@ -156,7 +160,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 			parsed.ClickHouseMaxOpenConns > 256 || parsed.ClickHouseMaxIdleConns < 0 ||
 			parsed.ClickHouseMaxIdleConns > parsed.ClickHouseMaxOpenConns || parsed.ClickHouseDialTimeout <= 0)
 	if (parsed.StoreBackend != "postgres" && parsed.StoreBackend != "clickhouse") || postgresInvalid || clickHouseInvalid ||
-		len(parsed.Brokers) == 0 || strings.TrimSpace(parsed.Brokers[0]) == "" || parsed.Topic == "" || parsed.QuarantineTopic == "" ||
+		len(parsed.Brokers) == 0 || strings.TrimSpace(parsed.Brokers[0]) == "" || parsed.Topic == "" || parsed.PurgeTopic == "" ||
+		parsed.PurgeTopic == parsed.Topic || parsed.PurgeProducerID == "" || parsed.QuarantineTopic == "" ||
 		parsed.GroupID == "" || parsed.ClientID == "" || parsed.ProducerIDPrefix == "" || parsed.MaxPollRecords < 1 ||
 		parsed.FetchMaxBytes < 1 || parsed.FetchMaxWait <= 0 || parsed.SessionTimeout <= 0 || parsed.RebalanceTimeout <= 0 ||
 		parsed.ReplayStagingS3.Endpoint == "" || parsed.ReplayStagingS3.AccessKeyID == "" || parsed.ReplayStagingS3.SecretAccessKey == "" || parsed.ReplayStagingS3.Bucket == "" ||
@@ -251,8 +256,16 @@ func run(ctx context.Context, config config) error {
 	if err != nil {
 		return err
 	}
+	purgeStore, ok := store.(collector.PurgeStore)
+	if !ok {
+		return errors.New("Agent Trace Processor Store does not support purge")
+	}
+	purger, err := collector.NewPurger(collector.PurgerConfig{ProducerID: config.PurgeProducerID, Store: purgeStore})
+	if err != nil {
+		return err
+	}
 	consumer, err := agenttraceprocessor.NewFranzConsumer(agenttraceprocessor.FranzConsumerConfig{
-		Brokers: config.Brokers, Topic: config.Topic, GroupID: config.GroupID, ClientID: config.ClientID,
+		Brokers: config.Brokers, Topic: config.Topic, PurgeTopic: config.PurgeTopic, GroupID: config.GroupID, ClientID: config.ClientID,
 		MaxPollRecords: config.MaxPollRecords, FetchMaxBytes: config.FetchMaxBytes, FetchMaxWait: config.FetchMaxWait,
 		SessionTimeout: config.SessionTimeout, RebalanceTimeout: config.RebalanceTimeout,
 		Metrics: metricsCatalog,
@@ -279,7 +292,10 @@ func run(ctx context.Context, config config) error {
 	if err != nil {
 		return err
 	}
-	processor, err := agenttraceprocessor.New(agenttraceprocessor.Config{Topic: config.Topic, Ingestor: ingestor, Quarantine: quarantine, Metrics: metricsCatalog})
+	processor, err := agenttraceprocessor.New(agenttraceprocessor.Config{
+		Topic: config.Topic, Ingestor: ingestor, PurgeTopic: config.PurgeTopic, Purger: purger,
+		Quarantine: quarantine, Metrics: metricsCatalog,
+	})
 	if err != nil {
 		return err
 	}

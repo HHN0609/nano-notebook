@@ -1876,7 +1876,8 @@ create table if not exists agentobs_outbox_commands (
 	run_id text not null check (char_length(run_id) between 1 and 160),
 	requested_at timestamptz not null,
 	requested_at_unix_nano bigint not null,
-	delivery_state text not null default 'ready' check (delivery_state in ('ready', 'leased', 'acknowledged', 'quarantined')),
+	delivery_state text not null default 'ready' constraint agentobs_outbox_commands_delivery_state_check
+		check (delivery_state in ('ready', 'leased', 'published', 'acknowledged', 'quarantined')),
 	lease_token uuid,
 	lease_expires_at timestamptz,
 	next_attempt_at timestamptz not null default now(),
@@ -1889,6 +1890,12 @@ create table if not exists agentobs_outbox_commands (
 		or (delivery_state != 'leased' and lease_token is null and lease_expires_at is null)
 	)
 );
+
+alter table agentobs_outbox_commands
+	drop constraint if exists agentobs_outbox_commands_delivery_state_check;
+alter table agentobs_outbox_commands
+	add constraint agentobs_outbox_commands_delivery_state_check
+	check (delivery_state in ('ready', 'leased', 'published', 'acknowledged', 'quarantined'));
 
 create index if not exists agentobs_outbox_commands_ready_idx
 	on agentobs_outbox_commands(next_attempt_at, created_at, command_id)
