@@ -172,6 +172,9 @@ func TestDefaultTraceTopologyUsesKafkaAndClickHouse(t *testing.T) {
 	if _, ok := collector.DependsOn["observability-postgres"]; ok {
 		t.Fatal("default Collector still depends on Observability PostgreSQL")
 	}
+	if got := strings.Join(collector.Healthcheck.Test, " "); !strings.Contains(got, "127.0.0.1:9093/metrics") {
+		t.Fatalf("default Collector health does not cover its metrics listener: %q", got)
+	}
 	if !contains(file.Services["observability-postgres"].Profiles, "postgres-trace-rollback") {
 		t.Fatal("Observability PostgreSQL is still part of the default Compose topology")
 	}
@@ -213,6 +216,9 @@ func TestProductionTraceTopologyUsesKafkaAndClickHouse(t *testing.T) {
 	collector := file.Services["collector"]
 	if collector.Environment["NANO_COLLECTOR_STORE"] != "clickhouse" || collector.DependsOn["clickhouse"].Condition != "service_healthy" {
 		t.Fatalf("production Collector=%#v", collector)
+	}
+	if got := strings.Join(collector.Healthcheck.Test, " "); !strings.Contains(got, "127.0.0.1:9093/metrics") {
+		t.Fatalf("production Collector health does not cover its metrics listener: %q", got)
 	}
 	if _, ok := collector.DependsOn["observability-postgres"]; ok {
 		t.Fatal("production Collector still depends on Observability PostgreSQL")

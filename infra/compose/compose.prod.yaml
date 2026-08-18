@@ -139,6 +139,11 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8082/internal/agent-observability/v1/health >/dev/null && wget -qO- http://127.0.0.1:9093/metrics >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
     restart: unless-stopped
 
   agent-trace-processor-clickhouse:

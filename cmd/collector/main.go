@@ -247,10 +247,25 @@ func runClickHouseCollector(ctx context.Context, config collectorConfig) error {
 	if err != nil {
 		return err
 	}
+	metricsRegistry := metrics.NewRegistry()
+	metricsCatalog := metrics.NewCatalog(metricsRegistry)
+	metricsAddr := env("NANO_COLLECTOR_METRICS_ADDR", "0.0.0.0:9093")
+	metricsServer := metrics.NewAdminServer(metricsAddr, metricsRegistry)
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("Collector metrics listener failed", "error", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = metricsServer.Shutdown(shutdownCtx)
+	}()
 	store, err := collector.NewClickHouseStoreWithReplay(connection, stagingObjects, replayObjects)
 	if err != nil {
 		return err
 	}
+	store = store.WithMetrics(metricsCatalog)
 	ingestor, err := collector.NewIngestor(collector.IngestorConfig{
 		ProducerID: config.ProducerID, ProducerIDPrefix: config.ProducerIDPrefix, Store: store,
 	})
@@ -267,7 +282,7 @@ func runClickHouseCollector(ctx context.Context, config collectorConfig) error {
 	}
 	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
 		Ingestor: ingestor, ServiceToken: config.ServiceToken, MaxBodyBytes: config.MaxBodyBytes,
-		QueryStore: queryStore, AnalyticsStore: analyticsStore, QueryToken: config.QueryToken,
+		QueryStore: queryStore, AnalyticsStore: collector.WithTraceAnalyticsMetrics(analyticsStore, metricsCatalog), QueryToken: config.QueryToken,
 		Readiness: func(readyCtx context.Context) error {
 			return errors.Join(connection.Ping(readyCtx), stagingObjects.CheckReady(readyCtx), replayObjects.CheckReady(readyCtx))
 		},
