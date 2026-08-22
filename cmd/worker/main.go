@@ -39,6 +39,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprojection"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcepurge"
+	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 	agentworker "github.com/huangxinxinyu/nano-notebook/internal/worker"
 	"github.com/huangxinxinyu/nano-notebook/internal/workload"
@@ -97,6 +98,9 @@ type workerConfig struct {
 	DocumentRenderDPI              int
 	DocumentRenderMaxPixelsPerPage int64
 	DocumentRenderMaxOutputBytes   int64
+	WebReaderURL                   string
+	WebReaderServiceToken          string
+	WebReaderTimeout               time.Duration
 	SourceProcessingMaxBytes       int64
 	SourceProcessingMaxRunes       int
 	FetcherURL                     string
@@ -472,7 +476,19 @@ func main() {
 		slog.Error("Source Discovery Fetcher client invalid", "error", err)
 		os.Exit(1)
 	}
-	sourceExtractor := sourceprocessing.NewNativeExtractor(modelClient, sourceprocessing.NativeExtractorConfig{
+	var webReaderAdapter webreader.Adapter
+	if strings.TrimSpace(config.WebReaderURL) != "" {
+		webReaderHTTPAdapter, err := webreader.NewHTTPAdapter(webreader.HTTPConfig{
+			Endpoint: config.WebReaderURL, ServiceToken: config.WebReaderServiceToken,
+			HTTPClient: &http.Client{Timeout: config.WebReaderTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+		})
+		if err != nil {
+			slog.Error("web reader Adapter invalid", "error", err)
+			os.Exit(1)
+		}
+		webReaderAdapter = webReaderHTTPAdapter
+	}
+	sourceExtractor := sourceprocessing.NewNativeExtractorWithWebReader(modelClient, webReaderAdapter, sourceprocessing.NativeExtractorConfig{
 		VisionModel: config.SourceVisionModel, TranscriptionModel: config.SourceTranscriptionModel,
 		VisionPromptVersion: config.SourceVisionPromptVersion, MaxVisionPages: config.SourceMaxVisionPages,
 	})
@@ -810,6 +826,10 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	webReaderTimeout, err := workerEnvDuration("NANO_WEB_READER_TIMEOUT", 90*time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	documentRenderMaxPages, err := workerEnvInt("NANO_DOCUMENT_RENDER_MAX_PAGES", 500)
 	if err != nil {
 		return workerConfig{}, err
@@ -908,6 +928,9 @@ func loadWorkerConfig() (workerConfig, error) {
 		DocumentRenderTimeout:        documentRenderTimeout, DocumentRenderMaxPages: documentRenderMaxPages,
 		DocumentRenderDPI: documentRenderDPI, DocumentRenderMaxPixelsPerPage: int64(documentRenderMaxPixels),
 		DocumentRenderMaxOutputBytes: int64(documentRenderMaxOutput),
+		WebReaderURL:          strings.TrimRight(env("NANO_WEB_READER_URL", "http://127.0.0.1:8085"), "/"),
+		WebReaderServiceToken: env("NANO_WEB_READER_SERVICE_TOKEN", "nano-local-reader-token"),
+		WebReaderTimeout:      webReaderTimeout,
 		SourceProcessingMaxBytes:     int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
 		FetcherURL:           strings.TrimRight(env("NANO_FETCHER_URL", "http://127.0.0.1:8083"), "/"),
 		BraveSearchAPIKey:    strings.TrimSpace(os.Getenv("NANO_BRAVE_SEARCH_API_KEY")),
@@ -952,6 +975,11 @@ func loadWorkerConfig() (workerConfig, error) {
 	}
 	if config.TraceTransport != string(agentbatch.TraceTransportKafka) && config.TraceTransport != string(agentbatch.TraceTransportHTTP) {
 		return workerConfig{}, errors.New("worker Agent Trace transport is invalid")
+	}
+	// The web-reader sidecar is an optional capability: an empty URL disables
+	// the HTML quality-gate fallback entirely.
+	if strings.TrimSpace(config.WebReaderURL) != "" && config.WebReaderTimeout <= 0 {
+		return workerConfig{}, errors.New("worker Web Reader configuration is invalid")
 	}
 	if config.TraceTransport == string(agentbatch.TraceTransportKafka) &&
 		(len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "" ||
