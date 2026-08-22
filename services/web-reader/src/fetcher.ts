@@ -8,6 +8,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import { promises as dns } from 'node:dns';
+import type { LookupAddress, LookupOptions } from 'node:dns';
 import { isIPv4, isIPv6 } from 'node:net';
 import zlib from 'node:zlib';
 import type { Readable } from 'node:stream';
@@ -154,8 +155,8 @@ function requestOnce(url: URL, config: Config): Promise<Hop> {
 
     const req = transport.request(url, {
       agent: false,
-      lookup: (hostname: string, _options: unknown, callback: (err: Error | null, address: string, family: number) => void) => {
-        validatingLookup(hostname, config, callback);
+      lookup: (hostname: string, options: LookupOptions, callback: LookupCallback) => {
+        validatingLookup(hostname, options, config, callback);
       },
       headers: {
         'user-agent': config.userAgent,
@@ -188,10 +189,17 @@ function requestOnce(url: URL, config: Config): Promise<Hop> {
   });
 }
 
+type LookupCallback = (
+  err: Error | null,
+  address: string | LookupAddress[],
+  family?: number,
+) => void;
+
 function validatingLookup(
   hostname: string,
+  options: LookupOptions,
   config: Config,
-  callback: (err: Error | null, address: string, family: number) => void,
+  callback: LookupCallback,
 ): void {
   dns
     .lookup(hostname, { all: true, verbatim: true })
@@ -211,6 +219,15 @@ function validatingLookup(
             return;
           }
         }
+      }
+      // net's Happy Eyeballs (autoSelectFamily, on by default) calls the
+      // lookup with { all: true } and expects the callback to receive the
+      // full address list, per the dns.lookup contract. Answering with the
+      // single-address signature makes net iterate the address string
+      // character by character and fail with "Invalid IP address".
+      if (options.all) {
+        callback(null, addresses);
+        return;
       }
       const first = addresses[0];
       if (!first) {

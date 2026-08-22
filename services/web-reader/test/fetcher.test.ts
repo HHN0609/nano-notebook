@@ -86,6 +86,24 @@ test('fetchPage fetches an html page and decodes the body', async () => {
   }
 });
 
+test('fetchPage resolves hostnames through the validating lookup', async () => {
+  const fixture = await startFixture((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(HTML);
+  });
+  try {
+    // IP literals connect directly and never exercise the custom `lookup`
+    // hook; `localhost` does, covering the all-mode callback contract that
+    // net relies on when autoSelectFamily (Happy Eyeballs) is enabled.
+    const result = await fetchPage(fixture.url('/page').replace('127.0.0.1', 'localhost'), baseConfig());
+
+    assert.equal(result.status, 200);
+    assert.ok(result.body.includes('hello world'));
+  } finally {
+    await fixture.close();
+  }
+});
+
 test('fetchPage follows redirects and reports the final url', async () => {
   const fixture = await startFixture((req, res) => {
     if (req.url === '/a') {
