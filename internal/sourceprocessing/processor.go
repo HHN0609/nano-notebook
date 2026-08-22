@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
@@ -15,6 +16,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -271,13 +273,13 @@ func (p *Processor) loadSource(ctx context.Context, lease sourcejobs.Lease) (sou
 	var item source.Source
 	err = tx.QueryRow(ctx, `
 		select s.id, s.notebook_id, s.title, s.format, s.media_type, s.byte_size,
-			s.content_sha256, s.original_object_key, s.state, s.created_at, s.updated_at
+			s.content_sha256, s.original_object_key, coalesce(s.final_url,''), s.state, s.created_at, s.updated_at
 		from source_sources s join source_processing_jobs j on j.source_id=s.id
 		where s.id=$1 and s.notebook_id=$2 and j.id=$3 and j.status='running'
 			and j.lease_token=$4::uuid and j.lease_expires_at > now()
 	`, lease.SourceID, lease.NotebookID, lease.ID, lease.LeaseToken).Scan(
 		&item.ID, &item.NotebookID, &item.Title, &item.Format, &item.MediaType, &item.ByteSize,
-		&item.ContentSHA256, &item.OriginalObjectKey, &item.State, &item.CreatedAt, &item.UpdatedAt,
+		&item.ContentSHA256, &item.OriginalObjectKey, &item.FinalURL, &item.State, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return source.Source{}, sourcejobs.ErrLeaseLost
@@ -292,18 +294,27 @@ func (p *Processor) loadSource(ctx context.Context, lease sourcejobs.Lease) (sou
 }
 
 type NativeExtractor struct {
-	media  MediaModels
-	config NativeExtractorConfig
+	media     MediaModels
+	webReader webreader.Adapter
+	config    NativeExtractorConfig
 }
 
 func NewNativeExtractor(media MediaModels, config NativeExtractorConfig) *NativeExtractor {
+	return NewNativeExtractorWithWebReader(media, nil, config)
+}
+
+// NewNativeExtractorWithWebReader additionally wires the web-reader sidecar
+// used as a fallback when deterministic HTML extraction fails the quality
+// gate (JS-rendered shells, bot walls, thin server HTML). A nil reader keeps
+// the legacy behavior: quality-gate failures stay failures.
+func NewNativeExtractorWithWebReader(media MediaModels, webReader webreader.Adapter, config NativeExtractorConfig) *NativeExtractor {
 	config.VisionModel = strings.TrimSpace(config.VisionModel)
 	config.TranscriptionModel = strings.TrimSpace(config.TranscriptionModel)
 	config.VisionPromptVersion = strings.TrimSpace(config.VisionPromptVersion)
 	if config.MaxVisionPages == 0 {
 		config.MaxVisionPages = 20
 	}
-	return &NativeExtractor{media: media, config: config}
+	return &NativeExtractor{media: media, webReader: webReader, config: config}
 }
 
 func (e *NativeExtractor) ExtractRendered(ctx context.Context, item source.Source, payload []byte, extractionConfigID string, rendered documentrender.Result) (normalize.Artifact, error) {
@@ -374,8 +385,18 @@ func (e *NativeExtractor) Extract(ctx context.Context, item source.Source, paylo
 	case source.FormatDOCX, source.FormatPPTX:
 		return normalize.OOXML(input)
 	case source.FormatHTML:
-		input.ExtractionConfigID = "html-primary-v2"
-		return normalize.HTML(input)
+		input.ExtractionConfigID = htmlPrimaryExtractionConfigID
+		artifact, err := normalize.HTML(input)
+		if err == nil {
+			return artifact, nil
+		}
+		// Quality-gate rejections are exactly the cases a full web reader
+		// (Readability + optional browser render) can plausibly rescue;
+		// structural errors (budget, malformed DOM) are not retried.
+		if !errors.Is(err, normalize.ErrHTMLQuality) {
+			return normalize.Artifact{}, err
+		}
+		return e.readViaWebReader(ctx, item, err)
 	case source.FormatPNG, source.FormatJPEG, source.FormatWebP:
 		if e == nil || e.media == nil || e.config.VisionModel == "" || e.config.VisionPromptVersion == "" {
 			return normalize.Artifact{}, errors.New("vision Extractor Adapter is not configured")
@@ -418,6 +439,45 @@ func (e *NativeExtractor) Extract(ctx context.Context, item source.Source, paylo
 	default:
 		return normalize.Artifact{}, errors.New("Extractor Adapter is not configured for Source format")
 	}
+}
+
+// Extraction config used when the web-reader sidecar rescued a Source the
+// deterministic html-primary-v2 gate rejected. The original HTML bytes and
+// their SHA256 remain the stored evidence; this revision is derived content,
+// which is why it publishes under its own extraction config (ADR-0021).
+const (
+	htmlPrimaryExtractionConfigID = "html-primary-v2"
+	htmlReaderExtractionConfigID  = "html-reader-v1"
+	// webReaderMaxChars bounds the sidecar request; the Processor's
+	// MaxNormalizedRunes budget still applies to the resulting artifact.
+	webReaderMaxChars = 250_000
+	// minWebReaderRunes mirrors normalize's minimum useful HTML content; a
+	// web-reader rescue below it is treated as a failed rescue.
+	minWebReaderRunes = 60
+)
+
+func (e *NativeExtractor) readViaWebReader(ctx context.Context, item source.Source, cause error) (normalize.Artifact, error) {
+	if e == nil || e.webReader == nil || strings.TrimSpace(item.FinalURL) == "" {
+		return normalize.Artifact{}, cause
+	}
+	page, err := e.webReader.Parse(ctx, webreader.Request{
+		URL: strings.TrimSpace(item.FinalURL), Format: webreader.FormatMarkdown, MaxChars: webReaderMaxChars,
+	})
+	if err != nil {
+		return normalize.Artifact{}, fmt.Errorf("%w; web-reader fallback failed: %v", cause, err)
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(page.Content)) < minWebReaderRunes {
+		return normalize.Artifact{}, fmt.Errorf("%w; web-reader fallback content is too thin", cause)
+	}
+	input := normalize.Input{
+		SourceID: item.ID, ExtractionConfigID: htmlReaderExtractionConfigID,
+		Format: "markdown", Payload: []byte(page.Content),
+	}
+	artifact, err := normalize.Text(input)
+	if err != nil {
+		return normalize.Artifact{}, fmt.Errorf("%w; web-reader fallback artifact invalid: %v", cause, err)
+	}
+	return artifact, nil
 }
 
 func (p *Processor) fail(ctx context.Context, lease sourcejobs.Lease, code string) error {

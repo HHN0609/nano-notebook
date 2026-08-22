@@ -1,4 +1,4 @@
-.PHONY: bootstrap migrate seed start stop health reset test-go test-web test-document-renderer
+.PHONY: bootstrap migrate seed start stop health reset test-go test-web test-web-reader test-document-renderer
 
 bootstrap:
 	scripts/bootstrap
@@ -26,6 +26,9 @@ test-go:
 
 test-web:
 	scripts/test-web
+
+test-web-reader:
+	scripts/test-web-reader
 
 test-document-renderer:
 	scripts/test-document-renderer
