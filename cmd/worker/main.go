@@ -60,6 +60,7 @@ type workerConfig struct {
 	TraceKafkaBrokers              []string
 	TraceKafkaTopic                string
 	TraceKafkaClientID             string
+	TraceKafkaMaxRetries           int
 	TraceKafkaPurgeTopic           string
 	TraceKafkaPurgeClientID        string
 	BatchMaxRecords                int
@@ -345,6 +346,7 @@ func main() {
 			Brokers: config.TraceKafkaBrokers, Topic: config.TraceKafkaTopic, ClientID: config.TraceKafkaClientID,
 			MaxBufferedRecords: 10_000, MaxBufferedBytes: 32 * 1024 * 1024,
 			DeliveryTimeout: 10 * time.Second, Linger: 5 * time.Millisecond, ReadinessTimeout: 10 * time.Second,
+			MaxRetries: config.TraceKafkaMaxRetries,
 		},
 	})
 	if err != nil {
@@ -726,6 +728,10 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	traceKafkaMaxRetries, err := workerEnvInt("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", agentbatch.DefaultKafkaMaxRetries)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	maxEncodedBytes, err := workerEnvInt("NANO_TRACE_BATCH_MAX_ENCODED_BYTES", 512*1024)
 	if err != nil {
 		return workerConfig{}, err
@@ -869,6 +875,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		TraceKafkaBrokers:       splitTraceKafkaBrokers(env("NANO_AGENT_TRACE_KAFKA_BROKERS", "127.0.0.1:59092")),
 		TraceKafkaTopic:         env("NANO_AGENT_TRACE_KAFKA_TOPIC", "nano.observability.agent-trace.v1"),
 		TraceKafkaClientID:      env("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "nano-worker-agent-trace"),
+		TraceKafkaMaxRetries:    traceKafkaMaxRetries,
 		TraceKafkaPurgeTopic:    env("NANO_AGENT_TRACE_KAFKA_PURGE_TOPIC", "nano.observability.agent-trace-purge.v1"),
 		TraceKafkaPurgeClientID: env("NANO_AGENT_TRACE_KAFKA_PURGE_CLIENT_ID", "nano-worker-agent-trace-purge"),
 		BatchMaxRecords:         maxRecords, BatchMaxEncodedBytes: maxEncodedBytes, BatchMaxDelay: maxDelay,
@@ -955,7 +962,7 @@ func loadWorkerConfig() (workerConfig, error) {
 	}
 	if config.TraceTransport == string(agentbatch.TraceTransportKafka) &&
 		(len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "" ||
-			strings.TrimSpace(config.TraceKafkaPurgeTopic) == "" || strings.TrimSpace(config.TraceKafkaPurgeClientID) == "" || config.TraceKafkaPurgeTopic == config.TraceKafkaTopic) {
+			config.TraceKafkaMaxRetries < 0 || strings.TrimSpace(config.TraceKafkaPurgeTopic) == "" || strings.TrimSpace(config.TraceKafkaPurgeClientID) == "" || config.TraceKafkaPurgeTopic == config.TraceKafkaTopic) {
 		return workerConfig{}, errors.New("worker Agent Trace Kafka configuration is incomplete")
 	}
 	if config.TraceTransport == string(agentbatch.TraceTransportHTTP) &&

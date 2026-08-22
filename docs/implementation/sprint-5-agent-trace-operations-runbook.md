@@ -30,9 +30,12 @@ Browser -> Control Plane Admin API -> Collector Query API
   on rollback.
 - Hard process loss may lose the bounded unsent diagnostic tail. Collector represents
   missing roots, parents, or terminals as incomplete; it never invents data.
-- Network loss, `429`, `5xx`, timeout, and uncertain ACK retry the same Batch ID while
-  resident. Authentication, invalid protocol, and permanent Collector rejection drop
-  the affected diagnostic Batch and increment drop diagnostics.
+- Kafka network loss, timeout, and uncertain ACK retry the same Batch ID up to
+  `NANO_AGENT_TRACE_KAFKA_MAX_RETRIES` times after the initial attempt (default `3`).
+  Exhaustion drops the affected diagnostic Batch, increments drop diagnostics, and lets
+  later Batches continue. The HTTP fallback retains its existing while-resident retry
+  behavior for `429`, `5xx`, timeout, and uncertain ACK. Authentication, invalid protocol,
+  and permanent Collector rejection remain immediate diagnostic-Batch drops.
 - Deletion is different from diagnostics: purge intent stays durable in Application
   PostgreSQL and a purge-only sender retries it until Collector ACKs.
 - Collector owns sequence assignment. Producer processes coordinate by stable record

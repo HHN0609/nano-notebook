@@ -78,6 +78,7 @@ NANO_AGENT_TRACE_TRANSPORT=kafka|http
 NANO_AGENT_TRACE_KAFKA_BROKERS=127.0.0.1:59092
 NANO_AGENT_TRACE_KAFKA_TOPIC=nano.observability.agent-trace.v1
 NANO_AGENT_TRACE_KAFKA_CLIENT_ID=<service-specific-id>
+NANO_AGENT_TRACE_KAFKA_MAX_RETRIES=3
 ```
 
 `kafka` is the default. `http` remains supported only as an explicit rollback choice and continues to require the Collector ingestion endpoint and service token.

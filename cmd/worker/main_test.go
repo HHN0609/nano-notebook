@@ -49,6 +49,7 @@ func TestLoadWorkerConfigDefaultsAgentTraceTransportToKafka(t *testing.T) {
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_BROKERS", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_TOPIC", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_PURGE_TOPIC", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_PURGE_CLIENT_ID", "")
 
@@ -57,7 +58,7 @@ func TestLoadWorkerConfigDefaultsAgentTraceTransportToKafka(t *testing.T) {
 		t.Fatalf("loadWorkerConfig: %v", err)
 	}
 	if config.TraceTransport != "kafka" || len(config.TraceKafkaBrokers) != 1 || config.TraceKafkaBrokers[0] != "127.0.0.1:59092" ||
-		config.TraceKafkaTopic != "nano.observability.agent-trace.v1" || config.TraceKafkaClientID != "nano-worker-agent-trace" ||
+		config.TraceKafkaTopic != "nano.observability.agent-trace.v1" || config.TraceKafkaClientID != "nano-worker-agent-trace" || config.TraceKafkaMaxRetries != 3 ||
 		config.TraceKafkaPurgeTopic != "nano.observability.agent-trace-purge.v1" || config.TraceKafkaPurgeClientID != "nano-worker-agent-trace-purge" {
 		t.Fatalf("Agent Trace transport defaults = %#v", config)
 	}
@@ -79,6 +80,13 @@ func TestLoadWorkerConfigRejectsMissingKafkaTraceTransportConfig(t *testing.T) {
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_TOPIC", " ")
 	if _, err := loadWorkerConfig(); err == nil {
 		t.Fatal("loadWorkerConfig accepted Kafka without a topic")
+	}
+}
+
+func TestLoadWorkerConfigRejectsNegativeKafkaRetryLimit(t *testing.T) {
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", "-1")
+	if _, err := loadWorkerConfig(); err == nil {
+		t.Fatal("loadWorkerConfig accepted a negative Kafka retry limit")
 	}
 }
 

@@ -45,12 +45,65 @@ func TestKafkaSenderPublishesOneTraceKeyedMessagePerChunk(t *testing.T) {
 
 func TestKafkaSenderTreatsAnyUnacknowledgedChunkAsRetryable(t *testing.T) {
 	producer := &recordingKafkaProducer{errors: []error{nil, errors.New("broker unavailable")}}
-	sender, err := agentbatch.NewKafkaSender(agentbatch.KafkaSenderConfig{Topic: "agent-trace", Producer: producer})
+	sender, err := agentbatch.NewKafkaSender(agentbatch.KafkaSenderConfig{Topic: "agent-trace", Producer: producer, MaxRetries: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := sender.Send(context.Background(), kafkaBatchFixture(t)); err == nil || !agentbatch.Retryable(err) {
 		t.Fatalf("partial acknowledgement error=%v retryable=%t", err, agentbatch.Retryable(err))
+	}
+}
+
+func TestKafkaSenderStopsRetryingBatchAfterConfiguredLimit(t *testing.T) {
+	producer := &recordingKafkaProducer{errors: []error{nil, errors.New("broker unavailable")}}
+	sender, err := agentbatch.NewKafkaSender(agentbatch.KafkaSenderConfig{
+		Topic: "agent-trace", Producer: producer, MaxRetries: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := kafkaBatchFixture(t)
+	for attempt := 1; attempt <= 4; attempt++ {
+		_, sendErr := sender.Send(context.Background(), batch)
+		wantRetryable := attempt < 4
+		if sendErr == nil || agentbatch.Retryable(sendErr) != wantRetryable {
+			t.Fatalf("attempt %d error=%v retryable=%t want=%t", attempt, sendErr, agentbatch.Retryable(sendErr), wantRetryable)
+		}
+	}
+	if producer.calls != 4 {
+		t.Fatalf("ProduceSync calls = %d, want 4", producer.calls)
+	}
+}
+
+func TestKafkaSenderSuccessfulRetryClearsBatchFailureCount(t *testing.T) {
+	producer := &scriptedKafkaProducer{responses: [][]error{
+		{nil, errors.New("broker unavailable")},
+		nil,
+		{nil, errors.New("broker unavailable again")},
+	}}
+	sender, err := agentbatch.NewKafkaSender(agentbatch.KafkaSenderConfig{
+		Topic: "agent-trace", Producer: producer, MaxRetries: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := kafkaBatchFixture(t)
+	if _, err := sender.Send(context.Background(), batch); err == nil || !agentbatch.Retryable(err) {
+		t.Fatalf("first failure error=%v retryable=%t", err, agentbatch.Retryable(err))
+	}
+	if _, err := sender.Send(context.Background(), batch); err != nil {
+		t.Fatalf("successful retry: %v", err)
+	}
+	if _, err := sender.Send(context.Background(), batch); err == nil || !agentbatch.Retryable(err) {
+		t.Fatalf("failure after success error=%v retryable=%t", err, agentbatch.Retryable(err))
+	}
+}
+
+func TestNewKafkaSenderRejectsNegativeRetryLimit(t *testing.T) {
+	if _, err := agentbatch.NewKafkaSender(agentbatch.KafkaSenderConfig{
+		Topic: "agent-trace", Producer: &recordingKafkaProducer{}, MaxRetries: -1,
+	}); err == nil {
+		t.Fatal("negative Kafka retry limit was accepted")
 	}
 }
 
@@ -72,11 +125,23 @@ func TestNewFranzKafkaProducerValidatesBoundedConfiguration(t *testing.T) {
 type recordingKafkaProducer struct {
 	messages []agentbatch.KafkaMessage
 	errors   []error
+	calls    int
+}
+
+type scriptedKafkaProducer struct {
+	responses [][]error
 }
 
 func (p *recordingKafkaProducer) ProduceSync(_ context.Context, messages []agentbatch.KafkaMessage) []error {
+	p.calls++
 	p.messages = append([]agentbatch.KafkaMessage(nil), messages...)
 	return append([]error(nil), p.errors...)
+}
+
+func (p *scriptedKafkaProducer) ProduceSync(context.Context, []agentbatch.KafkaMessage) []error {
+	response := append([]error(nil), p.responses[0]...)
+	p.responses = p.responses[1:]
+	return response
 }
 
 func kafkaBatchFixture(t *testing.T) collector.Batch {

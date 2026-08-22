@@ -29,6 +29,7 @@ type ManagedKafkaConfig struct {
 	DeliveryTimeout    time.Duration
 	Linger             time.Duration
 	ReadinessTimeout   time.Duration
+	MaxRetries         int
 }
 
 // ManagedSenderConfig selects the production Agent Trace delivery transport.
@@ -104,7 +105,9 @@ func newManagedKafkaSender(ctx context.Context, config ManagedSenderConfig) (*Ma
 		client.Close()
 		return nil, fmt.Errorf("check Agent Trace Kafka readiness: %w", err)
 	}
-	sender, err := NewKafkaSender(KafkaSenderConfig{Topic: kafka.Topic, Producer: client})
+	sender, err := NewKafkaSender(KafkaSenderConfig{
+		Topic: kafka.Topic, Producer: client, MaxRetries: kafka.MaxRetries,
+	})
 	if err != nil {
 		client.Close()
 		return nil, err

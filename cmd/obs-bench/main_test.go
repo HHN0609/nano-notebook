@@ -45,7 +45,7 @@ func TestParseConfigSelectsKafkaAcceptanceWithoutHTTPSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	if config.Transport != "kafka" || len(config.KafkaBrokers) != 1 || config.KafkaBrokers[0] != "127.0.0.1:59092" ||
-		config.KafkaTopic != "nano.observability.agent-trace.v1" {
+		config.KafkaTopic != "nano.observability.agent-trace.v1" || config.KafkaMaxRetries != 3 {
 		t.Fatalf("config=%#v", config)
 	}
 	if _, err := parseConfig([]string{

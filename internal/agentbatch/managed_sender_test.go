@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 )
 
 func TestNewManagedSenderDefaultsToKafkaChecksReadinessAndClosesOnce(t *testing.T) {
@@ -47,6 +50,42 @@ func TestNewManagedSenderClosesKafkaClientWhenReadinessFails(t *testing.T) {
 	}
 }
 
+func TestNewManagedSenderAppliesKafkaRetryLimit(t *testing.T) {
+	client := &managedKafkaClient{produceErrors: []error{errors.New("broker unavailable")}}
+	managed, err := NewManagedSender(context.Background(), ManagedSenderConfig{
+		Kafka: ManagedKafkaConfig{
+			Brokers: []string{"kafka-a:9092"}, Topic: "nano.observability.agent-trace.v1", ClientID: "nano-worker-agent-trace",
+			MaxBufferedRecords: 10_000, MaxBufferedBytes: 32 * 1024 * 1024,
+			DeliveryTimeout: 10 * time.Second, Linger: 5 * time.Millisecond, MaxRetries: 1,
+		},
+		newKafkaClient: func(FranzKafkaConfig) (managedKafkaProducer, error) { return client, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(managed.Close)
+	occurredAt := time.Unix(1_700_000_000, 0).UTC()
+	record := agentobs.Record{
+		SchemaVersion: 1, SemanticConventionVersion: 1, PayloadVersion: 1,
+		IdentityKey: "managed/retry/event", Kind: agentobs.RecordEvent,
+		TraceID: "trace-managed-retry", SpanID: "span-managed-retry",
+		Name: "nano.managed.retry", OccurredAt: occurredAt,
+	}
+	batch := collector.Batch{
+		ProtocolVersion: collector.DirectProtocolVersion, BatchID: "batch-managed-retry", ProducerID: "nano-worker",
+		CreatedAt: occurredAt, Chunks: []collector.TraceChunk{{
+			Trace:   collector.TraceDescriptor{TraceID: "trace-managed-retry"},
+			Records: []collector.SequencedRecord{{Record: record}},
+		}},
+	}
+	if _, err := managed.Send(context.Background(), batch); err == nil || !Retryable(err) {
+		t.Fatalf("initial failure error=%v retryable=%t", err, Retryable(err))
+	}
+	if _, err := managed.Send(context.Background(), batch); err == nil || Retryable(err) {
+		t.Fatalf("terminal failure error=%v retryable=%t", err, Retryable(err))
+	}
+}
+
 func TestNewManagedSenderSupportsExplicitHTTPAndRejectsUnknownTransport(t *testing.T) {
 	managed, err := NewManagedSender(context.Background(), ManagedSenderConfig{
 		Transport: TraceTransportHTTP,
@@ -62,12 +101,15 @@ func TestNewManagedSenderSupportsExplicitHTTPAndRejectsUnknownTransport(t *testi
 }
 
 type managedKafkaClient struct {
-	pingCalls  int
-	closeCalls int
-	pingErr    error
+	pingCalls     int
+	closeCalls    int
+	pingErr       error
+	produceErrors []error
 }
 
-func (*managedKafkaClient) ProduceSync(context.Context, []KafkaMessage) []error { return nil }
+func (c *managedKafkaClient) ProduceSync(context.Context, []KafkaMessage) []error {
+	return append([]error(nil), c.produceErrors...)
+}
 
 func (c *managedKafkaClient) Ping(context.Context) error {
 	c.pingCalls++

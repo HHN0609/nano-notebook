@@ -19,22 +19,23 @@ import (
 )
 
 type config struct {
-	Transport     string
-	Store         string
-	Endpoint      string
-	Token         string
-	KafkaBrokers  []string
-	KafkaTopic    string
-	KafkaClientID string
-	ProducerID    string
-	DatasetID     string
-	Seed          string
-	EventEpoch    time.Time
-	Roots         uint64
-	Rate          float64
-	StartDelay    time.Duration
-	Timeout       time.Duration
-	MaximumLate   time.Duration
+	Transport       string
+	Store           string
+	Endpoint        string
+	Token           string
+	KafkaBrokers    []string
+	KafkaTopic      string
+	KafkaClientID   string
+	KafkaMaxRetries int
+	ProducerID      string
+	DatasetID       string
+	Seed            string
+	EventEpoch      time.Time
+	Roots           uint64
+	Rate            float64
+	StartDelay      time.Duration
+	Timeout         time.Duration
+	MaximumLate     time.Duration
 }
 
 func parseConfig(args []string) (config, error) {
@@ -50,6 +51,7 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&kafkaBrokers, "kafka-brokers", "", "comma-separated Kafka bootstrap brokers")
 	flags.StringVar(&parsed.KafkaTopic, "kafka-topic", "nano.observability.agent-trace.v1", "Durable Agent Trace topic")
 	flags.StringVar(&parsed.KafkaClientID, "kafka-client-id", "nano-obs-bench-producer", "Kafka producer client identity")
+	flags.IntVar(&parsed.KafkaMaxRetries, "kafka-max-retries", agentbatch.DefaultKafkaMaxRetries, "outer Kafka Batch retries after the initial attempt")
 	flags.StringVar(&parsed.ProducerID, "producer-id", "nano-obs-bench/loadgen", "Collector producer identity")
 	flags.StringVar(&parsed.DatasetID, "dataset", "", "versioned dataset identity")
 	flags.StringVar(&parsed.Seed, "seed", "", "deterministic fixture seed")
@@ -84,7 +86,7 @@ func parseConfig(args []string) (config, error) {
 	if parsed.Transport == "http" && (parsed.Endpoint == "" || parsed.Token == "") {
 		return config{}, errors.New("Stage A HTTP benchmark configuration is incomplete")
 	}
-	if parsed.Transport == "kafka" && (len(parsed.KafkaBrokers) == 0 || parsed.KafkaTopic == "" || parsed.KafkaClientID == "") {
+	if parsed.Transport == "kafka" && (len(parsed.KafkaBrokers) == 0 || parsed.KafkaTopic == "" || parsed.KafkaClientID == "" || parsed.KafkaMaxRetries < 0) {
 		return config{}, errors.New("Kafka benchmark configuration is incomplete")
 	}
 	var err error
@@ -156,7 +158,9 @@ func run(ctx context.Context, config config, output io.Writer) error {
 			return fmt.Errorf("check Kafka benchmark readiness: %w", err)
 		}
 		closeSender = producer.Close
-		sender, err = agentbatch.NewKafkaSender(agentbatch.KafkaSenderConfig{Topic: config.KafkaTopic, Producer: producer})
+		sender, err = agentbatch.NewKafkaSender(agentbatch.KafkaSenderConfig{
+			Topic: config.KafkaTopic, Producer: producer, MaxRetries: config.KafkaMaxRetries,
+		})
 	} else {
 		sender, err = agentbatch.NewHTTPSender(agentbatch.HTTPSenderConfig{
 			Endpoint: config.Endpoint, ServiceToken: config.Token, HTTPClient: &http.Client{Timeout: 10 * time.Second},

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
@@ -27,16 +28,23 @@ type KafkaProducer interface {
 	ProduceSync(context.Context, []KafkaMessage) []error
 }
 
+// DefaultKafkaMaxRetries allows three retries after the initial Batch send.
+const DefaultKafkaMaxRetries = 3
+
 // KafkaSenderConfig configures Durable Agent Trace Kafka acceptance.
 type KafkaSenderConfig struct {
-	Topic    string
-	Producer KafkaProducer
+	Topic      string
+	Producer   KafkaProducer
+	MaxRetries int
 }
 
 // KafkaSender publishes one trace-keyed Kafka message per Collector Trace chunk.
 type KafkaSender struct {
-	topic    string
-	producer KafkaProducer
+	topic      string
+	producer   KafkaProducer
+	maxRetries int
+	retryMu    sync.Mutex
+	failures   map[string]int
 }
 
 // KafkaTraceEnvelope is the strongly versioned Kafka value contract.
@@ -50,10 +58,13 @@ type KafkaTraceEnvelope struct {
 
 func NewKafkaSender(config KafkaSenderConfig) (*KafkaSender, error) {
 	config.Topic = strings.TrimSpace(config.Topic)
-	if config.Topic == "" || config.Producer == nil {
+	if config.Topic == "" || config.Producer == nil || config.MaxRetries < 0 {
 		return nil, errors.New("Agent Trace Kafka Sender configuration is incomplete")
 	}
-	return &KafkaSender{topic: config.Topic, producer: config.Producer}, nil
+	return &KafkaSender{
+		topic: config.Topic, producer: config.Producer, maxRetries: config.MaxRetries,
+		failures: make(map[string]int),
+	}, nil
 }
 
 func (s *KafkaSender) Send(ctx context.Context, batch collector.Batch) (collector.BatchResult, error) {
@@ -85,14 +96,33 @@ func (s *KafkaSender) Send(ctx context.Context, batch collector.Batch) (collecto
 	}
 	produceErrors := s.producer.ProduceSync(ctx, messages)
 	if len(produceErrors) != 0 && len(produceErrors) != len(messages) {
-		return collector.BatchResult{}, newDeliveryError(true, errors.New("Kafka producer returned an invalid acknowledgement set"))
+		return collector.BatchResult{}, s.failedDelivery(batch.BatchID, errors.New("Kafka producer returned an invalid acknowledgement set"))
 	}
 	for index, err := range produceErrors {
 		if err != nil {
-			return collector.BatchResult{}, newDeliveryError(true, fmt.Errorf("Kafka did not acknowledge Trace %s: %w", batch.Chunks[index].Trace.TraceID, err))
+			return collector.BatchResult{}, s.failedDelivery(batch.BatchID, fmt.Errorf("Kafka did not acknowledge Trace %s: %w", batch.Chunks[index].Trace.TraceID, err))
 		}
 	}
+	s.clearFailures(batch.BatchID)
 	return result, nil
+}
+
+func (s *KafkaSender) failedDelivery(batchID string, cause error) error {
+	s.retryMu.Lock()
+	defer s.retryMu.Unlock()
+	failures := s.failures[batchID] + 1
+	if failures > s.maxRetries {
+		delete(s.failures, batchID)
+		return newDeliveryError(false, fmt.Errorf("Kafka Batch %s exhausted %d retries: %w", batchID, s.maxRetries, cause))
+	}
+	s.failures[batchID] = failures
+	return newDeliveryError(true, cause)
+}
+
+func (s *KafkaSender) clearFailures(batchID string) {
+	s.retryMu.Lock()
+	delete(s.failures, batchID)
+	s.retryMu.Unlock()
 }
 
 // DecodeKafkaTraceEnvelope strictly decodes one Durable Agent Trace message.

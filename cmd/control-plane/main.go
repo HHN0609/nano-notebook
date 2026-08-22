@@ -39,6 +39,7 @@ type controlPlaneConfig struct {
 	TraceKafkaBrokers     []string
 	TraceKafkaTopic       string
 	TraceKafkaClientID    string
+	TraceKafkaMaxRetries  int
 	ReplayKeyID           string
 	ReplayKEK             []byte
 	CookieSecure          bool
@@ -152,6 +153,7 @@ func main() {
 			Brokers: config.TraceKafkaBrokers, Topic: config.TraceKafkaTopic, ClientID: config.TraceKafkaClientID,
 			MaxBufferedRecords: 10_000, MaxBufferedBytes: 32 * 1024 * 1024,
 			DeliveryTimeout: 10 * time.Second, Linger: 5 * time.Millisecond, ReadinessTimeout: 10 * time.Second,
+			MaxRetries: config.TraceKafkaMaxRetries,
 		},
 	})
 	if err != nil {
@@ -233,6 +235,10 @@ func main() {
 }
 
 func loadControlPlaneConfig() (controlPlaneConfig, error) {
+	traceKafkaMaxRetries, err := strconv.Atoi(env("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", strconv.Itoa(agentbatch.DefaultKafkaMaxRetries)))
+	if err != nil {
+		return controlPlaneConfig{}, fmt.Errorf("parse NANO_AGENT_TRACE_KAFKA_MAX_RETRIES: %w", err)
+	}
 	replayKEK, err := base64.StdEncoding.DecodeString(env("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA="))
 	if err != nil {
 		return controlPlaneConfig{}, fmt.Errorf("parse NANO_REPLAY_KEK_BASE64: %w", err)
@@ -256,6 +262,7 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 		TraceKafkaBrokers:     splitTraceKafkaBrokers(env("NANO_AGENT_TRACE_KAFKA_BROKERS", "127.0.0.1:59092")),
 		TraceKafkaTopic:       env("NANO_AGENT_TRACE_KAFKA_TOPIC", "nano.observability.agent-trace.v1"),
 		TraceKafkaClientID:    env("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "nano-control-plane-agent-trace"),
+		TraceKafkaMaxRetries:  traceKafkaMaxRetries,
 		ReplayKeyID:           env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 		CookieSecure: os.Getenv("NANO_COOKIE_SECURE") == "true", Version: env("NANO_VERSION", "dev"),
 		DefaultModel:         env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
@@ -282,7 +289,7 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 		return controlPlaneConfig{}, errors.New("Control Plane Agent Trace transport is invalid")
 	}
 	if config.TraceTransport == string(agentbatch.TraceTransportKafka) &&
-		(len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "") {
+		(len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "" || config.TraceKafkaMaxRetries < 0) {
 		return controlPlaneConfig{}, errors.New("Control Plane Agent Trace Kafka configuration is incomplete")
 	}
 	if config.TraceTransport == string(agentbatch.TraceTransportHTTP) && strings.TrimSpace(config.CollectorServiceToken) == "" {

@@ -57,13 +57,14 @@ func TestLoadControlPlaneConfigDefaultsAgentTraceTransportToKafka(t *testing.T) 
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_BROKERS", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_TOPIC", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", "")
 
 	config, err := loadControlPlaneConfig()
 	if err != nil {
 		t.Fatalf("loadControlPlaneConfig: %v", err)
 	}
 	if config.TraceTransport != "kafka" || len(config.TraceKafkaBrokers) != 1 || config.TraceKafkaBrokers[0] != "127.0.0.1:59092" ||
-		config.TraceKafkaTopic != "nano.observability.agent-trace.v1" || config.TraceKafkaClientID != "nano-control-plane-agent-trace" {
+		config.TraceKafkaTopic != "nano.observability.agent-trace.v1" || config.TraceKafkaClientID != "nano-control-plane-agent-trace" || config.TraceKafkaMaxRetries != 3 {
 		t.Fatalf("Agent Trace transport defaults = %#v", config)
 	}
 }
@@ -76,6 +77,13 @@ func TestLoadControlPlaneConfigSupportsExplicitHTTPAndRejectsInvalidTraceTranspo
 	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "udp")
 	if _, err := loadControlPlaneConfig(); err == nil {
 		t.Fatal("loadControlPlaneConfig accepted unknown Agent Trace transport")
+	}
+}
+
+func TestLoadControlPlaneConfigRejectsNegativeKafkaRetryLimit(t *testing.T) {
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", "-1")
+	if _, err := loadControlPlaneConfig(); err == nil {
+		t.Fatal("loadControlPlaneConfig accepted a negative Kafka retry limit")
 	}
 }
 
