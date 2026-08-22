@@ -720,6 +720,74 @@ test("submits one durable Message and projects the final answer from Run SSE", a
   expect(admittedMessageID).not.toBe("");
 });
 
+test("switches one message to Research, exposes the editable plan, and starts the accepted version", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  let admissionBody: Record<string, unknown> | undefined;
+  let editedPlan: Record<string, unknown> | undefined;
+  let startedVersion = 0;
+  let sessionStatus: "awaiting_confirmation" | "queued" = "awaiting_confirmation";
+  const plan = {
+    title: "Agent Harness architecture research",
+    objective: "Choose a durable harness architecture",
+    scope: "Open-source Agent Harness implementations",
+    research_questions: ["How do their AgentLoops differ?"],
+    investigation_tracks: ["Source code", "Evaluations"],
+    source_strategy: ["Primary repositories", "Independent reports"],
+    analysis_method: ["Compare on shared dimensions"],
+    deliverable_outline: ["Executive summary", "Comparison", "Recommendation"],
+    completion_criteria: ["Important claims have read-backed links"],
+    clarifying_questions: []
+  };
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/studio-outputs")) return json({ outputs: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [], research_sessions: [] });
+    if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
+      admissionBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ message_id: admissionBody.id, mode: "research", research_session_id: "research_test", run_id: "run_plan", status: "planning" }, 202);
+    }
+    if (url.endsWith("/api/v1/research-sessions/research_test") && method === "GET") return json({
+      session: { id: "research_test", chat_id: "chat_test", input_message_id: admissionBody?.id, status: sessionStatus, planning_run_id: "run_plan", ...(sessionStatus === "queued" ? { accepted_plan_version: 2, execution_run_id: "run_research" } : {}) },
+      plan: { version: editedPlan ? 2 : 1, content: editedPlan ?? plan },
+      evidence: { discovered: 34, read: 0, failed: 0 }
+    });
+    if (url.endsWith("/api/v1/research-sessions/research_test/plan") && method === "PATCH") {
+      editedPlan = (JSON.parse(String(init?.body)) as { plan: Record<string, unknown> }).plan;
+      return json({ session_id: "research_test", version: 2, plan: editedPlan });
+    }
+    if (url.endsWith("/api/v1/research-sessions/research_test/start") && method === "POST") {
+      startedVersion = (JSON.parse(String(init?.body)) as { plan_version: number }).plan_version;
+      sessionStatus = "queued";
+      return json({ session_id: "research_test", run_id: "run_research", status: "queued" }, 202);
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  await user.click(within(chat).getByRole("button", { name: /Research/ }));
+  expect(within(chat).getByText(/Research searches and reads/)).toBeInTheDocument();
+  await user.type(within(chat).getByRole("textbox", { name: "Message Nano Notebook" }), "Compare Agent Harnesses.");
+  await user.click(within(chat).getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(admissionBody?.mode).toBe("research"));
+
+  const planEditor = await within(chat).findByRole("textbox", { name: "Research plan" });
+  const changedPlan = { ...plan, title: "Edited Agent Harness plan" };
+  fireEvent.change(planEditor, { target: { value: JSON.stringify(changedPlan, null, 2) } });
+  await user.click(within(chat).getByRole("button", { name: "Save plan" }));
+  await waitFor(() => expect(editedPlan?.title).toBe("Edited Agent Harness plan"));
+  await user.click(within(chat).getByRole("button", { name: "Start research" }));
+  await waitFor(() => expect(startedVersion).toBe(2));
+  expect(await within(chat).findByText("Discovered")).toBeInTheDocument();
+  expect(within(chat).getByText("34")).toBeInTheDocument();
+});
+
 test("loads the exact delegated Research Session without opening full Discovery while it is searching", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   let admittedMessageID = "";

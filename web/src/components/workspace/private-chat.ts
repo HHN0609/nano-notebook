@@ -25,6 +25,39 @@ export type AgentRun = {
   discovery_session_id?: string;
 };
 
+export type ChatMode = "chat" | "research";
+
+export type ResearchPlan = {
+  title: string;
+  objective: string;
+  scope: string;
+  research_questions: string[];
+  investigation_tracks: string[];
+  source_strategy: string[];
+  analysis_method: string[];
+  deliverable_outline: string[];
+  completion_criteria: string[];
+  clarifying_questions: string[];
+};
+
+export type ResearchSessionSummary = {
+  id: string;
+  input_message_id: string;
+  status: "planning" | "awaiting_confirmation" | "queued" | "running" | "publishing" | "completed" | "failed" | "cancelled";
+  planning_run_id?: string;
+  accepted_plan_version?: number;
+  execution_run_id?: string;
+  current_report_version?: number;
+  error_code?: string;
+};
+
+export type ResearchSessionSnapshot = {
+  session: ResearchSessionSummary & { chat_id: string };
+  plan?: { version: number; content: ResearchPlan };
+  report?: { version: number; content_markdown: string };
+  evidence: { discovered: number; read: number; failed: number };
+};
+
 export type Citation = {
   id: string;
   message_id: string;
@@ -47,13 +80,20 @@ export type ChatSnapshot = {
   runs: AgentRun[];
   citations: Citation[];
   source_ids: string[];
+  research_sessions: ResearchSessionSummary[];
 };
 
 export type ChatController = {
   snapshot: ChatSnapshot | undefined;
   isLoading: boolean;
   error: string | null;
+  mode: ChatMode;
+  setMode: (mode: ChatMode) => void;
+  research: ResearchSessionSnapshot | undefined;
+  isResearchLoading: boolean;
   send: (message: AppendMessage) => Promise<boolean>;
+  editResearchPlan: (plan: ResearchPlan) => Promise<boolean>;
+  startResearch: (planVersion: number) => Promise<boolean>;
   stop: (runID: string) => Promise<boolean>;
   retry: (runID: string) => Promise<boolean>;
 };
@@ -61,8 +101,11 @@ export type ChatController = {
 export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatController {
   const queryClient = useQueryClient();
   const [bootstrapKey] = useState(() => crypto.randomUUID());
-  const [command, setCommand] = useState<{ id: string; content: string; time_zone: string } | null>(null);
+  const [mode, setMode] = useState<ChatMode>("chat");
+  const [selectedResearchSessionID, setSelectedResearchSessionID] = useState<string | null>(null);
+  const [command, setCommand] = useState<{ id: string; content: string; time_zone: string; mode: ChatMode } | null>(null);
   const retryCommand = useRef<{ sourceRunID: string; key: string; timeZone: string } | null>(null);
+  const completedResearchRefresh = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const queryKey = useMemo(() => ["private-chat", notebookID] as const, [notebookID]);
   const snapshotQuery = useQuery({
@@ -83,10 +126,39 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
       const snapshotResponse = await api(`/api/v1/chats/${selected.id}`);
       if (!snapshotResponse.ok) throw new Error(copy.unavailableLabel);
       const snapshot = (await snapshotResponse.json()) as ChatSnapshot;
-      return { ...snapshot, citations: snapshot.citations ?? [], source_ids: snapshot.source_ids ?? [] };
+      return { ...snapshot, citations: snapshot.citations ?? [], source_ids: snapshot.source_ids ?? [], research_sessions: snapshot.research_sessions ?? [] };
     },
     retry: false
   });
+
+  const restoredResearchSessionID = selectedResearchSessionID ?? snapshotQuery.data?.research_sessions.at(-1)?.id ?? null;
+  const researchQuery = useQuery({
+    queryKey: ["research-session", restoredResearchSessionID],
+    enabled: Boolean(restoredResearchSessionID),
+    queryFn: async (): Promise<ResearchSessionSnapshot> => {
+      const response = await api(`/api/v1/research-sessions/${restoredResearchSessionID}`);
+      if (!response.ok) throw new Error(copy.unavailableLabel);
+      return response.json() as Promise<ResearchSessionSnapshot>;
+    },
+    refetchInterval: (query) => {
+      const status = (query.state.data as ResearchSessionSnapshot | undefined)?.session.status;
+      return status === "planning" || status === "queued" || status === "running" || status === "publishing" ? 1000 : false;
+    },
+    retry: false
+  });
+
+  useEffect(() => {
+    const research = researchQuery.data;
+    if (!research) return;
+    queryClient.setQueryData<ChatSnapshot>(queryKey, (current) => current ? {
+      ...current,
+      research_sessions: upsertResearchSession(current.research_sessions, research.session)
+    } : current);
+    if (research.session.status === "completed" && completedResearchRefresh.current !== research.session.id) {
+      completedResearchRefresh.current = research.session.id;
+      void queryClient.invalidateQueries({ queryKey });
+    }
+  }, [queryClient, queryKey, researchQuery.data]);
 
   const run = snapshotQuery.data?.runs.find((item) => item.status === "queued" || item.status === "running");
   const activeRunID = run?.status === "queued" || run?.status === "running" ? run.id : null;
@@ -122,9 +194,9 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     const snapshot = snapshotQuery.data;
     if (!snapshot || !content) return false;
 
-    const pending = command?.content === content
+    const pending = command?.content === content && command.mode === mode
       ? command
-      : { id: crypto.randomUUID(), content, time_zone: browserTimeZone() };
+      : { id: crypto.randomUUID(), content, time_zone: browserTimeZone(), mode };
     setCommand(pending);
     setError(null);
     const response = await api(`/api/v1/chats/${snapshot.chat.id}/messages`, {
@@ -136,8 +208,9 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
       setError(await safeAdmissionError(response, copy));
       return false;
     }
-    const admitted = (await response.json()) as { message_id: string; run_id: string; status: AgentRun["status"] };
+    const admitted = (await response.json()) as { message_id: string; mode?: ChatMode; research_session_id?: string; run_id: string; status: AgentRun["status"] | "planning" };
     setCommand(null);
+    if (admitted.research_session_id) setSelectedResearchSessionID(admitted.research_session_id);
     queryClient.setQueryData<ChatSnapshot>(queryKey, (current) => {
       if (!current) return current;
       const userMessage: ChatMessage = {
@@ -150,12 +223,57 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
       return {
         ...current,
         messages: upsertMessage(current.messages, userMessage),
-        runs: upsertRun(current.runs, { id: admitted.run_id, input_message_id: admitted.message_id, status: admitted.status })
+        runs: upsertRun(current.runs, { id: admitted.run_id, input_message_id: admitted.message_id, status: admitted.status === "planning" ? "queued" : admitted.status }),
+        research_sessions: admitted.research_session_id ? upsertResearchSession(current.research_sessions, {
+          id: admitted.research_session_id, input_message_id: admitted.message_id, status: "planning", planning_run_id: admitted.run_id
+        }) : current.research_sessions
       };
     });
     if (admitted.status === "completed" || admitted.status === "failed" || admitted.status === "cancelled") {
       await snapshotQuery.refetch();
     }
+    return true;
+  }
+
+  async function editResearchPlan(plan: ResearchPlan) {
+    const research = researchQuery.data;
+    if (!research || research.session.status !== "awaiting_confirmation") return false;
+    setError(null);
+    const response = await api(`/api/v1/research-sessions/${research.session.id}/plan`, {
+      method: "PATCH",
+      headers: { "X-CSRF-Token": csrfToken() },
+      body: JSON.stringify({ plan })
+    });
+    if (!response.ok) {
+      setError(copy.unavailableLabel);
+      return false;
+    }
+    await researchQuery.refetch();
+    return true;
+  }
+
+  async function startResearch(planVersion: number) {
+    const research = researchQuery.data;
+    if (!research || research.session.status !== "awaiting_confirmation") return false;
+    setError(null);
+    const response = await api(`/api/v1/research-sessions/${research.session.id}/start`, {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken() },
+      body: JSON.stringify({ plan_version: planVersion, time_zone: browserTimeZone() })
+    });
+    if (!response.ok) {
+      setError(copy.unavailableLabel);
+      return false;
+    }
+    const started = (await response.json()) as { run_id: string; status: "queued" };
+    queryClient.setQueryData<ChatSnapshot>(queryKey, (current) => current ? {
+      ...current,
+      runs: upsertRun(current.runs, { id: started.run_id, input_message_id: research.session.input_message_id, status: started.status }),
+      research_sessions: upsertResearchSession(current.research_sessions, {
+        ...research.session, status: "queued", accepted_plan_version: planVersion, execution_run_id: started.run_id
+      })
+    } : current);
+    await researchQuery.refetch();
     return true;
   }
 
@@ -204,7 +322,13 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     snapshot: snapshotQuery.data,
     isLoading: snapshotQuery.isLoading,
     error: error ?? (snapshotQuery.isError ? copy.unavailableLabel : null),
+    mode,
+    setMode,
+    research: researchQuery.data,
+    isResearchLoading: researchQuery.isLoading,
     send,
+    editResearchPlan,
+    startResearch,
     stop,
     retry
   };
@@ -234,6 +358,12 @@ function upsertRun(runs: AgentRun[], run: AgentRun) {
   const existing = runs.findIndex((item) => item.id === run.id || item.input_message_id === run.input_message_id);
   if (existing < 0) return [...runs, run];
   return runs.map((item, index) => index === existing ? run : item);
+}
+
+function upsertResearchSession(sessions: ResearchSessionSummary[], session: ResearchSessionSummary) {
+  const existing = sessions.findIndex((item) => item.id === session.id);
+  if (existing < 0) return [...sessions, session];
+  return sessions.map((item, index) => index === existing ? session : item);
 }
 
 function upsertCitations(current: Citation[], additions: Citation[]) {

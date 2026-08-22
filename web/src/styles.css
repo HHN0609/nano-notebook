@@ -2359,6 +2359,105 @@ span.source-list-title {
   gap: 8px;
 }
 
+.research-status-card,
+.research-plan-card {
+  align-self: stretch;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--control-background) 78%, transparent);
+  color: var(--secondary-foreground);
+}
+
+.research-status-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  font-size: 12px;
+}
+
+.research-status-card--metrics {
+  flex-wrap: wrap;
+}
+
+.research-status-card--metrics strong {
+  margin-right: auto;
+  color: var(--primary-foreground);
+}
+
+.research-status-card--metrics span {
+  color: var(--muted-foreground);
+}
+
+.research-status-card--metrics b {
+  color: var(--secondary-foreground);
+}
+
+.research-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9ba8ff;
+  box-shadow: 0 0 0 0 rgba(155, 168, 255, .45);
+  animation: research-pulse 1.5s infinite;
+}
+
+@keyframes research-pulse {
+  70% { box-shadow: 0 0 0 7px rgba(155, 168, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(155, 168, 255, 0); }
+}
+
+.research-plan-card {
+  padding: 16px;
+}
+
+.research-plan-card > div:first-child {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.research-plan-card h3,
+.research-plan-card p {
+  margin: 0;
+}
+
+.research-plan-card h3 {
+  color: var(--primary-foreground);
+  font-size: 14px;
+}
+
+.research-plan-card p {
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.research-plan-card textarea {
+  width: 100%;
+  margin-top: 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 11px;
+  resize: vertical;
+  background: var(--background);
+  color: var(--secondary-foreground);
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.research-plan-card .research-plan-error {
+  color: var(--destructive);
+}
+
+.research-plan-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .chat-run-terminal {
   display: flex;
   align-items: center;
@@ -2374,7 +2473,8 @@ span.source-list-title {
 }
 
 .chat-composer {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   flex: none;
   align-items: flex-end;
   gap: 12px;
@@ -2383,6 +2483,31 @@ span.source-list-title {
   border: 1px solid #4b4d52;
   border-radius: 18px;
   padding: 14px 14px 14px 18px;
+}
+
+.chat-mode-selector {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 4px;
+}
+
+.chat-mode-selector button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chat-mode-selector button[aria-pressed="true"] {
+  background: var(--control-background-hover);
+  color: var(--primary-foreground);
 }
 
 .chat-composer-input {

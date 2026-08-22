@@ -8,11 +8,11 @@ import {
   type AssistantRuntime
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { useCallback, useEffect, useMemo, useRef, type ComponentProps } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import remarkGfm from "remark-gfm";
 import { MaterialSymbol } from "../icons/material-symbol";
 import { Button } from "../ui/button";
-import { appendMessageText, type ChatController, type ChatMessage, type Citation } from "./private-chat";
+import { appendMessageText, type ChatController, type ChatMessage, type Citation, type ResearchPlan } from "./private-chat";
 import { SourceOpenTarget } from "./source-open-target";
 import type { MemberSource } from "./sources";
 
@@ -40,6 +40,23 @@ export type ChatPanelCopy = {
   processingLabel: string;
   sourceUnavailableLabel: string;
   coverageWarningLabel: string;
+  chatModeLabel: string;
+  researchModeLabel: string;
+  researchDisclosure: string;
+  researchPlanningLabel: string;
+  researchPlanTitle: string;
+  researchPlanHelp: string;
+  savePlanLabel: string;
+  startResearchLabel: string;
+  savingLabel: string;
+  startingLabel: string;
+  researchProgressLabel: string;
+  discoveredLabel: string;
+  readLabel: string;
+  failedSourcesLabel: string;
+  researchCompletedLabel: string;
+  researchFailedLabel: string;
+  planInvalidLabel: string;
 };
 
 export function ChatPanelContent({ copy, controller, sources, onOpenSource, selectedSourceCount = 0 }: { copy: ChatPanelCopy; controller: ChatController; sources: MemberSource[]; onOpenSource: (source: MemberSource) => void; selectedSourceCount?: number }) {
@@ -82,7 +99,7 @@ export function ChatPanelContent({ copy, controller, sources, onOpenSource, sele
           <h2>{copy.title}</h2>
           <MaterialSymbol name="more_vert" size={20} />
         </div>
-        <p className="chat-source-disclosure">{selectedSourceCount > 0 ? copy.selectedSourceDisclosure.replace("{count}", String(selectedSourceCount)) : copy.sourceDisclosure}</p>
+        <p className="chat-source-disclosure">{controller.mode === "research" ? copy.researchDisclosure : selectedSourceCount > 0 ? copy.selectedSourceDisclosure.replace("{count}", String(selectedSourceCount)) : copy.sourceDisclosure}</p>
         <ThreadPrimitive.Root className="chat-thread">
           <ThreadPrimitive.Viewport className="chat-thread-viewport">
             <ThreadPrimitive.Empty>
@@ -98,6 +115,7 @@ export function ChatPanelContent({ copy, controller, sources, onOpenSource, sele
                 AssistantMessage: () => <AssistantMessage controller={controller} copy={copy} sources={sources} onOpenSource={onOpenSource} />
               }} />
             </div>
+            <ResearchStatusCard copy={copy} controller={controller} />
             {run ? (
               <div className="chat-activity" role="status">
                 <span>{run.status === "queued" ? copy.waitingLabel : copy.generatingLabel}</span>
@@ -107,6 +125,10 @@ export function ChatPanelContent({ copy, controller, sources, onOpenSource, sele
             {controller.error ? <div className="chat-error" role="alert">{controller.error}</div> : null}
           </ThreadPrimitive.Viewport>
           <ComposerPrimitive.Root className="chat-composer">
+            <div className="chat-mode-selector" aria-label={`${copy.chatModeLabel} / ${copy.researchModeLabel}`}>
+              <button type="button" aria-pressed={controller.mode === "chat"} onClick={() => controller.setMode("chat")}>{copy.chatModeLabel}</button>
+              <button type="button" aria-pressed={controller.mode === "research"} onClick={() => controller.setMode("research")}><MaterialSymbol name="travel_explore" size={17} />{copy.researchModeLabel}</button>
+            </div>
             <ComposerPrimitive.Input className="chat-composer-input" aria-label={copy.composerLabel} placeholder={copy.composerPlaceholder} rows={1} />
             <ComposerPrimitive.Send className="chat-send" aria-label={copy.sendLabel}>
               <MaterialSymbol name="arrow_upward" size={22} />
@@ -118,10 +140,67 @@ export function ChatPanelContent({ copy, controller, sources, onOpenSource, sele
   );
 }
 
+function ResearchStatusCard({ copy, controller }: { copy: ChatPanelCopy; controller: ChatController }) {
+  const research = controller.research;
+  if (!research) return null;
+  const { session, evidence, plan } = research;
+  if (session.status === "planning") {
+    return <section className="research-status-card" aria-label={copy.researchProgressLabel}><span className="research-pulse" />{copy.researchPlanningLabel}</section>;
+  }
+  if (session.status === "awaiting_confirmation" && plan) {
+    return <ResearchPlanEditor key={`${session.id}:${plan.version}`} copy={copy} controller={controller} plan={plan.content} version={plan.version} />;
+  }
+  const terminal = session.status === "completed" ? copy.researchCompletedLabel : session.status === "failed" || session.status === "cancelled" ? copy.researchFailedLabel : copy.researchProgressLabel;
+  return (
+    <section className="research-status-card research-status-card--metrics" aria-label={copy.researchProgressLabel}>
+      <strong>{terminal}</strong>
+      <span>{copy.discoveredLabel} <b>{evidence.discovered}</b></span>
+      <span>{copy.readLabel} <b>{evidence.read}</b></span>
+      <span>{copy.failedSourcesLabel} <b>{evidence.failed}</b></span>
+    </section>
+  );
+}
+
+function ResearchPlanEditor({ copy, controller, plan, version }: { copy: ChatPanelCopy; controller: ChatController; plan: ResearchPlan; version: number }) {
+  const [draft, setDraft] = useState(() => JSON.stringify(plan, null, 2));
+  const [planError, setPlanError] = useState(false);
+  const [busy, setBusy] = useState<"save" | "start" | null>(null);
+  const save = async () => {
+    let parsed: ResearchPlan;
+    try {
+      parsed = JSON.parse(draft) as ResearchPlan;
+    } catch {
+      setPlanError(true);
+      return;
+    }
+    setPlanError(false);
+    setBusy("save");
+    if (!await controller.editResearchPlan(parsed)) setPlanError(true);
+    setBusy(null);
+  };
+  const start = async () => {
+    setBusy("start");
+    await controller.startResearch(version);
+    setBusy(null);
+  };
+  return (
+    <section className="research-plan-card" aria-label={copy.researchPlanTitle}>
+      <div><span className="material-symbols-rounded" aria-hidden="true">route</span><div><h3>{plan.title || copy.researchPlanTitle}</h3><p>{copy.researchPlanHelp}</p></div></div>
+      <textarea aria-label={copy.researchPlanTitle} value={draft} onChange={(event) => setDraft(event.target.value)} rows={14} spellCheck={false} />
+      {planError ? <p className="research-plan-error" role="alert">{copy.planInvalidLabel}</p> : null}
+      <div className="research-plan-actions">
+        <Button variant="outline" disabled={busy !== null} onClick={() => void save()}>{busy === "save" ? copy.savingLabel : copy.savePlanLabel}</Button>
+        <Button disabled={busy !== null} onClick={() => void start()}>{busy === "start" ? copy.startingLabel : copy.startResearchLabel}</Button>
+      </div>
+    </section>
+  );
+}
+
 function UserMessage({ controller, copy, latestMessageID }: { controller: ChatController; copy: ChatPanelCopy; latestMessageID?: string }) {
   const messageID = useAuiState((state) => state.message.id);
   const run = controller.snapshot?.runs.find((item) => item.input_message_id === messageID);
-  const canRetry = messageID === latestMessageID && (run?.status === "failed" || run?.status === "cancelled");
+  const isResearch = controller.snapshot?.research_sessions.some((session) => session.input_message_id === messageID);
+  const canRetry = !isResearch && messageID === latestMessageID && (run?.status === "failed" || run?.status === "cancelled");
   return (
     <MessagePrimitive.Root className="chat-message chat-message--user">
       <MessagePrimitive.Parts />
