@@ -179,7 +179,7 @@ test("compact workspace keeps one-panel tab navigation without horizontal overfl
   const compactWorkspace = page.locator(".workspace-compact-tabs");
   const sourcesPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Add files, a web page, or a YouTube URL." });
   const chatPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Ask from model knowledge now." });
-  const studioPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Studio output will be saved here" });
+  const studioPanel = compactWorkspace.getByRole("tabpanel", { name: "Studio" });
   await expect(sourcesPanel).toBeVisible();
   await expect(chatPanel).toBeHidden();
   await expect(studioPanel).toBeHidden();
