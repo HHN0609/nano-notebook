@@ -96,7 +96,8 @@ func TestSourceProcessingQueuePublishesTerminalStateAtomically(t *testing.T) {
 		{source.StateUploaded, source.StateValidating},
 		{source.StateValidating, source.StateNormalizing},
 		{source.StateNormalizing, source.StateSegmenting},
-		{source.StateSegmenting, source.StateIndexing},
+		{source.StateSegmenting, source.StateQualifying},
+		{source.StateQualifying, source.StateIndexing},
 		{source.StateIndexing, source.StateVerifying},
 	}
 	for _, transition := range transitions {

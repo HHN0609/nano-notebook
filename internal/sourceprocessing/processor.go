@@ -15,6 +15,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourceadmission"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 	"github.com/jackc/pgx/v5"
@@ -71,6 +72,7 @@ type NativeExtractorConfig struct {
 
 type queue interface {
 	Advance(context.Context, string, string, source.State, source.State) error
+	HoldForReview(context.Context, string, string) error
 	CompleteEvidence(context.Context, string, string, string) error
 	Fail(context.Context, string, string, string) error
 }
@@ -92,7 +94,12 @@ type Processor struct {
 	extractor  Extractor
 	renderer   documentrender.Adapter
 	traceSink  TraceSink
+	admission  admissionService
 	config     Config
+}
+
+type admissionService interface {
+	Qualify(context.Context, sourcejobs.Lease, source.Source, string, normalize.Artifact) (sourceadmission.Qualification, error)
 }
 
 func NewProcessor(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, config Config) *Processor {
@@ -111,7 +118,17 @@ func NewProcessorWithExtractorAndTrace(pool *pgxpool.Pool, queue queue, publishe
 }
 
 func NewProcessorWithExtractorTraceAndRenderer(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, extractor Extractor, renderer documentrender.Adapter, traceSink TraceSink, config Config) *Processor {
-	return &Processor{pool: pool, queue: queue, publisher: publisher, objects: objects, projection: projection, extractor: extractor, renderer: renderer, traceSink: traceSink, config: config}
+	return &Processor{
+		pool: pool, queue: queue, publisher: publisher, objects: objects, projection: projection, extractor: extractor,
+		renderer: renderer, traceSink: traceSink, admission: sourceadmission.NewShadowServiceWithoutSearch(sourceadmission.NewStore(pool)), config: config,
+	}
+}
+
+func (p *Processor) WithAdmission(service admissionService) *Processor {
+	if p != nil {
+		p.admission = service
+	}
+	return p
 }
 
 func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (resultErr error) {
@@ -185,8 +202,24 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (r
 		item.State = source.StateSegmenting
 	}
 	command := ProjectionCommand{Lease: lease, RevisionID: revisionID, Artifact: artifact}
-	trace.moveStage("source.indexing")
 	if item.State == source.StateSegmenting {
+		if err := p.queue.Advance(ctx, lease.ID, lease.LeaseToken, source.StateSegmenting, source.StateQualifying); err != nil {
+			return err
+		}
+		item.State = source.StateQualifying
+	}
+	trace.moveStage("source.qualifying")
+	if item.State == source.StateQualifying {
+		qualification, err := p.admission.Qualify(ctx, lease, item, revisionID, artifact)
+		if err != nil {
+			return err
+		}
+		if qualification.PauseBeforeProjection {
+			return p.queue.HoldForReview(ctx, lease.ID, lease.LeaseToken)
+		}
+	}
+	trace.moveStage("source.indexing")
+	if item.State == source.StateQualifying {
 		if err := p.projection.Build(ctx, command); err != nil {
 			if errors.Is(err, ErrRetrievalUnavailable) {
 				return p.failTraced(ctx, lease, trace, "retrieval_unavailable")
@@ -196,7 +229,7 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (r
 			}
 			return err
 		}
-		if err := p.queue.Advance(ctx, lease.ID, lease.LeaseToken, source.StateSegmenting, source.StateIndexing); err != nil {
+		if err := p.queue.Advance(ctx, lease.ID, lease.LeaseToken, source.StateQualifying, source.StateIndexing); err != nil {
 			return err
 		}
 		item.State = source.StateIndexing
@@ -252,7 +285,7 @@ func (p *Processor) renderViewerArtifacts(ctx context.Context, item source.Sourc
 }
 
 func (p *Processor) validate(lease sourcejobs.Lease) error {
-	if p == nil || p.pool == nil || p.queue == nil || p.publisher == nil || p.objects == nil || p.projection == nil ||
+	if p == nil || p.pool == nil || p.queue == nil || p.publisher == nil || p.objects == nil || p.projection == nil || p.admission == nil ||
 		p.extractor == nil ||
 		strings.TrimSpace(p.config.ExtractionConfigID) == "" || p.config.MaxSourceBytes <= 0 || p.config.MaxNormalizedRunes <= 0 ||
 		strings.TrimSpace(lease.ID) == "" || strings.TrimSpace(lease.SourceID) == "" || strings.TrimSpace(lease.NotebookID) == "" || strings.TrimSpace(lease.LeaseToken) == "" {
@@ -272,14 +305,14 @@ func (p *Processor) loadSource(ctx context.Context, lease sourcejobs.Lease) (sou
 	}
 	var item source.Source
 	err = tx.QueryRow(ctx, `
-		select s.id, s.notebook_id, s.title, s.format, s.media_type, s.byte_size,
-			s.content_sha256, s.original_object_key, coalesce(s.final_url,''), s.state, s.created_at, s.updated_at
+		select s.id, s.notebook_id, s.input_kind, s.title, s.format, s.media_type, s.byte_size,
+			s.content_sha256, s.original_object_key, coalesce(s.origin_url,''), coalesce(s.final_url,''), s.state, s.created_at, s.updated_at
 		from source_sources s join source_processing_jobs j on j.source_id=s.id
 		where s.id=$1 and s.notebook_id=$2 and j.id=$3 and j.status='running'
 			and j.lease_token=$4::uuid and j.lease_expires_at > now()
 	`, lease.SourceID, lease.NotebookID, lease.ID, lease.LeaseToken).Scan(
-		&item.ID, &item.NotebookID, &item.Title, &item.Format, &item.MediaType, &item.ByteSize,
-		&item.ContentSHA256, &item.OriginalObjectKey, &item.FinalURL, &item.State, &item.CreatedAt, &item.UpdatedAt,
+		&item.ID, &item.NotebookID, &item.InputKind, &item.Title, &item.Format, &item.MediaType, &item.ByteSize,
+		&item.ContentSHA256, &item.OriginalObjectKey, &item.OriginURL, &item.FinalURL, &item.State, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return source.Source{}, sourcejobs.ErrLeaseLost

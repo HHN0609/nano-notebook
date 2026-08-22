@@ -131,6 +131,7 @@ const (
 	StateValidating  State = "validating"
 	StateNormalizing State = "normalizing"
 	StateSegmenting  State = "segmenting"
+	StateQualifying  State = "qualifying"
 	StateIndexing    State = "indexing"
 	StateVerifying   State = "verifying"
 	StateReady       State = "ready"
@@ -155,6 +156,7 @@ type Source struct {
 	ByteSize          int64     `json:"byte_size"`
 	ContentSHA256     string    `json:"content_sha256"`
 	OriginalObjectKey string    `json:"-"`
+	OriginURL         string    `json:"-"`
 	FinalURL          string    `json:"-"`
 	State             State     `json:"state"`
 	FailureCode       string    `json:"-"`

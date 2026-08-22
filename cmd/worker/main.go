@@ -35,6 +35,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 	"github.com/huangxinxinyu/nano-notebook/internal/skillcatalog"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourceadmission"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
@@ -105,6 +106,8 @@ type workerConfig struct {
 	WebReaderTimeout               time.Duration
 	SourceProcessingMaxBytes       int64
 	SourceProcessingMaxRunes       int
+	SourceAdmissionMode            sourceadmission.Mode
+	SourceAdmissionQueryTimeout    time.Duration
 	FetcherURL                     string
 	BraveSearchAPIKey              string
 	SourceDiscoveryLease           time.Duration
@@ -618,6 +621,25 @@ func main() {
 			RenderMaxOutputBytes: config.DocumentRenderMaxOutputBytes,
 		},
 	)
+	admissionProviderID := "not-configured"
+	if config.BraveSearchAPIKey != "" {
+		admissionProviderID = "brave"
+	}
+	admissionVerifierConfig := sourceadmission.DefaultVerifierConfig(admissionProviderID)
+	admissionVerifierConfig.QueryTimeout = config.SourceAdmissionQueryTimeout
+	admissionVerifier, err := sourceadmission.NewVerifier(searchProvider, admissionVerifierConfig)
+	if err != nil {
+		slog.Error("Source Admission Verifier invalid", "error", err)
+		os.Exit(1)
+	}
+	admissionService, err := sourceadmission.NewService(
+		sourceadmission.NewStore(db.Pool()), admissionVerifier, config.SourceAdmissionMode,
+	)
+	if err != nil {
+		slog.Error("Source Admission Service invalid", "error", err)
+		os.Exit(1)
+	}
+	sourceProcessor.WithAdmission(admissionService)
 	sourceProcessingService := sourceprocessing.NewServiceWithConcurrency(
 		sourceQueue, sourceProcessor, config.SourceProcessingHeartbeat, config.SourceProcessingPoll, config.SourceProcessingConcurrency,
 	)
@@ -864,6 +886,10 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	sourceAdmissionQueryTimeout, err := workerEnvDuration("NANO_SOURCE_ADMISSION_QUERY_TIMEOUT", 5*time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	sourceDiscoveryLease, err := workerEnvDuration("NANO_SOURCE_DISCOVERY_LEASE_DURATION", 30*time.Second)
 	if err != nil {
 		return workerConfig{}, err
@@ -983,9 +1009,11 @@ func loadWorkerConfig() (workerConfig, error) {
 		WebReaderServiceToken:        env("NANO_WEB_READER_SERVICE_TOKEN", "nano-local-reader-token"),
 		WebReaderTimeout:             webReaderTimeout,
 		SourceProcessingMaxBytes:     int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
-		FetcherURL:           strings.TrimRight(env("NANO_FETCHER_URL", "http://127.0.0.1:8083"), "/"),
-		BraveSearchAPIKey:    strings.TrimSpace(os.Getenv("NANO_BRAVE_SEARCH_API_KEY")),
-		SourceDiscoveryLease: sourceDiscoveryLease, SourceDiscoveryPoll: sourceDiscoveryPoll,
+		SourceAdmissionMode:         sourceadmission.Mode(strings.ToLower(strings.TrimSpace(env("NANO_SOURCE_ADMISSION_MODE", "shadow")))),
+		SourceAdmissionQueryTimeout: sourceAdmissionQueryTimeout,
+		FetcherURL:                  strings.TrimRight(env("NANO_FETCHER_URL", "http://127.0.0.1:8083"), "/"),
+		BraveSearchAPIKey:           strings.TrimSpace(os.Getenv("NANO_BRAVE_SEARCH_API_KEY")),
+		SourceDiscoveryLease:        sourceDiscoveryLease, SourceDiscoveryPoll: sourceDiscoveryPoll,
 		AgentInteractiveConcurrency: agentInteractiveConcurrency, SourceProcessingConcurrency: sourceProcessingConcurrency,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 		MailSMTPAddr:      env("NANO_MAIL_SMTP_ADDR", "127.0.0.1:51025"),
@@ -1016,7 +1044,9 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.DocumentRenderMaxPages < 1 || config.DocumentRenderMaxPages > 500 || config.DocumentRenderDPI < 72 || config.DocumentRenderDPI > 300 ||
 		config.DocumentRenderMaxPixelsPerPage < 1 || config.DocumentRenderMaxPixelsPerPage > 100_000_000 ||
 		config.DocumentRenderMaxOutputBytes < 1 || config.DocumentRenderMaxOutputBytes > 2<<30 ||
-		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 || strings.TrimSpace(config.FetcherURL) == "" ||
+		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
+		(config.SourceAdmissionMode != sourceadmission.ModeShadow && config.SourceAdmissionMode != sourceadmission.ModeEnforcement) ||
+		config.SourceAdmissionQueryTimeout <= 0 || config.SourceAdmissionQueryTimeout > config.HTTPTimeout || strings.TrimSpace(config.FetcherURL) == "" ||
 		config.SourceDiscoveryLease <= 0 || config.SourceDiscoveryPoll <= 0 ||
 		workload.ValidateInteractiveCapacity(config.AgentInteractiveConcurrency, config.SourceProcessingConcurrency) != nil ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 ||

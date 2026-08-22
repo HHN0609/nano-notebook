@@ -10,6 +10,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourceadmission"
 )
 
 func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
@@ -236,6 +237,8 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_DOCUMENT_RENDER_MAX_OUTPUT_BYTES", "4194304")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_BYTES", "1048576")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_RUNES", "200000")
+	t.Setenv("NANO_SOURCE_ADMISSION_MODE", "enforcement")
+	t.Setenv("NANO_SOURCE_ADMISSION_QUERY_TIMEOUT", "3s")
 	t.Setenv("NANO_BRAVE_SEARCH_API_KEY", "brave-search-secret")
 	t.Setenv("NANO_SOURCE_DISCOVERY_LEASE_DURATION", "35s")
 	t.Setenv("NANO_SOURCE_DISCOVERY_POLL_INTERVAL", "300ms")
@@ -287,6 +290,7 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.DocumentRenderMaxPages != 25 || config.DocumentRenderDPI != 144 || config.DocumentRenderMaxPixelsPerPage != 3_000_000 ||
 		config.DocumentRenderMaxOutputBytes != 4<<20 ||
 		config.SourceProcessingMaxBytes != 1048576 || config.SourceProcessingMaxRunes != 200000 ||
+		config.SourceAdmissionMode != sourceadmission.ModeEnforcement || config.SourceAdmissionQueryTimeout != 3*time.Second ||
 		config.AgentInteractiveConcurrency != 6 || config.SourceProcessingConcurrency != 4 ||
 		config.BraveSearchAPIKey != "brave-search-secret" || config.SourceDiscoveryLease != 35*time.Second ||
 		config.SourceDiscoveryPoll != 300*time.Millisecond {
@@ -296,6 +300,13 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.WebBaseURL != "http://web.internal:5173" || config.MailLeaseDuration != 25*time.Second ||
 		config.MailPollInterval != 175*time.Millisecond || config.MailSMTPTimeout != 4*time.Second {
 		t.Fatalf("mail config = %#v", config)
+	}
+}
+
+func TestLoadWorkerConfigRejectsInvalidSourceAdmissionMode(t *testing.T) {
+	t.Setenv("NANO_SOURCE_ADMISSION_MODE", "truth-gate")
+	if _, err := loadWorkerConfig(); err == nil {
+		t.Fatal("loadWorkerConfig accepted an invalid Source Admission mode")
 	}
 }
 

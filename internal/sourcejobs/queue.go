@@ -221,6 +221,41 @@ func (q *Queue) Complete(ctx context.Context, jobID, leaseToken string) error {
 	return q.finish(ctx, jobID, leaseToken, true, "")
 }
 
+// HoldForReview records a successful automated terminal outcome while leaving
+// the Source and its pinned Evidence Revision at the pre-projection boundary.
+func (q *Queue) HoldForReview(ctx context.Context, jobID, leaseToken string) error {
+	if q == nil || q.pool == nil {
+		return errors.New("invalid Source processing Queue")
+	}
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
+		return err
+	}
+	var notebookID string
+	err = tx.QueryRow(ctx, `
+		update source_processing_jobs j
+		set status='succeeded',lease_token=null,lease_expires_at=null,last_error_code=null,updated_at=now()
+		from source_sources s
+		where j.id=$1 and j.lease_token=$2::uuid and j.status='running' and j.lease_expires_at > now()
+			and s.id=j.source_id and s.state='qualifying'
+		returning j.notebook_id
+	`, jobID, leaseToken).Scan(&notebookID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrLeaseLost
+	}
+	if err != nil {
+		return err
+	}
+	if err := realtime.NotifyNotebookSources(ctx, tx, notebookID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (q *Queue) CompleteEvidence(ctx context.Context, jobID, leaseToken, revisionID string) error {
 	if q == nil || q.pool == nil || strings.TrimSpace(revisionID) == "" {
 		return errors.New("invalid Source Evidence completion")
@@ -564,6 +599,7 @@ func validTransition(expected, next source.State) bool {
 	return (expected == source.StateUploaded && next == source.StateValidating) ||
 		(expected == source.StateValidating && next == source.StateNormalizing) ||
 		(expected == source.StateNormalizing && next == source.StateSegmenting) ||
-		(expected == source.StateSegmenting && next == source.StateIndexing) ||
+		(expected == source.StateSegmenting && next == source.StateQualifying) ||
+		(expected == source.StateQualifying && next == source.StateIndexing) ||
 		(expected == source.StateIndexing && next == source.StateVerifying)
 }

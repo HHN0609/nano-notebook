@@ -164,7 +164,7 @@ func (p *Projection) loadUnits(ctx context.Context, command sourceprocessing.Pro
 		from source_evidence_revisions r
 		join source_sources s on s.id=r.source_id
 		join source_processing_jobs j on j.source_id=s.id
-		where r.id=$1 and r.status='building' and s.state='segmenting'
+		where r.id=$1 and r.status='building' and s.state='qualifying'
 			and j.id=$2 and j.status='running' and j.lease_token=$3::uuid and j.lease_expires_at > now()
 	`, command.RevisionID, command.Lease.ID, command.Lease.LeaseToken).Scan(&sourceID, &notebookID, &sourceTitle)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -225,7 +225,7 @@ func (p *Projection) persistBuild(ctx context.Context, command sourceprocessing.
 			join source_sources s on s.id=j.source_id
 			join retrieval_index_versions v on v.id=$4 and v.status='active'
 			where j.id=$1 and j.lease_token=$2::uuid and j.status='running' and j.lease_expires_at > now()
-				and j.source_id=$3 and s.state='segmenting'
+				and j.source_id=$3 and s.state='qualifying'
 		)
 	`, command.Lease.ID, command.Lease.LeaseToken, record.sourceID, record.indexVersionID).Scan(&allowed); err != nil {
 		return err
