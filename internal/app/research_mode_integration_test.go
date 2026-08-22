@@ -422,7 +422,7 @@ func TestResearchExecutorPersistsStepCapsulesEvidenceAndReportVersion(t *testing
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id=$1 and role='assistant'`, chatID).Scan(&assistants); err != nil {
 		t.Fatal(err)
 	}
-	if modelCalls != 3 || sessionStatus != "completed" || runStatus != "completed" || jobStatus != "succeeded" || capsules != 2 || discovered != 1 || read != 1 || assistants != 1 || !strings.Contains(report, "Harness source") || !strings.Contains(report, "1 successfully read") || strings.Contains(report, "99 successfully read") || strings.Contains(report, "https://unread.example/lead") || !strings.Contains(report, "Publication note") {
+	if modelCalls != 3 || sessionStatus != "completed" || runStatus != "completed" || jobStatus != "succeeded" || capsules != 2 || discovered != 1 || read != 1 || assistants != 1 || !strings.Contains(report, "Harness source") || !strings.Contains(report, "1 successfully read") || strings.Contains(report, "99 successfully read") || strings.Contains(report, "https://unread.example/lead") || strings.Contains(report, "Publication note") {
 		t.Fatalf("calls=%d session=%s run=%s job=%s capsules=%d discovered=%d read=%d assistants=%d report=%s", modelCalls, sessionStatus, runStatus, jobStatus, capsules, discovered, read, assistants, report)
 	}
 }

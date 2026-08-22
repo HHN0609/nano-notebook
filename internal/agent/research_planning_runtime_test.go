@@ -2,8 +2,19 @@ package agent
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestResearchPlanningContextSuppliesCurrentDateWithoutInventingScope(t *testing.T) {
+	got := researchPlanningContext(time.Date(2026, 8, 22, 23, 30, 0, 0, time.UTC), "Asia/Shanghai")
+	for _, required := range []string{"2026-08-23", "Asia/Shanghai", "does not create a date cutoff"} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("planning context missing %q: %s", required, got)
+		}
+	}
+}
 
 func TestValidateResearchPlanJSONNormalizesScopeListFromModel(t *testing.T) {
 	raw := `{

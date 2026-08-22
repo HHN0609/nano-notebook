@@ -224,6 +224,7 @@ services:
         mc mb --ignore-existing local/nano-agent-replay-staging
         mc mb --ignore-existing local/nano-agent-replay
         mc mb --ignore-existing local/nano-sources
+        mc mb --ignore-existing local/nano-research-workspaces
 
   qdrant:
     image: qdrant/qdrant:v1.15.1

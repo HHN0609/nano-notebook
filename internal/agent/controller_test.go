@@ -609,6 +609,107 @@ func TestControllerReturnsTransientModelFailureToRoleExecutorWithoutTerminalizin
 	}
 }
 
+func TestControllerRetriesInvalidModelResponseForOptedInRuntime(t *testing.T) {
+	registry, err := NewActionRegistry(NewCalculateAction())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &invalidResponseRecoveryRuntimeStub{
+		controllerRuntimeStub: &controllerRuntimeStub{execution: defaultControllerExecution()},
+		limit:                 2,
+	}
+	modelErr := &models.ModelError{Kind: models.ErrorInvalidResponse, Err: errors.New("malformed provider response")}
+	model := &decisionModelStub{
+		errors:    []error{modelErr},
+		decisions: []models.ModelDecision{{Final: &models.FinalDraft{Text: "Recovered final."}}},
+	}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) != 2 {
+		t.Fatalf("model calls = %d, want 2", len(model.requests))
+	}
+	if len(runtime.failed) != 0 {
+		t.Fatalf("terminal failures = %v", runtime.failed)
+	}
+	if len(runtime.published) != 1 || runtime.published[0].Text != "Recovered final." {
+		t.Fatalf("published = %+v", runtime.published)
+	}
+	if len(model.requests[1].Messages) == 0 || !strings.Contains(model.requests[1].Messages[len(model.requests[1].Messages)-1].Content, "invalid") {
+		t.Fatalf("retry request is missing repair directive: %+v", model.requests[1].Messages)
+	}
+}
+
+func TestControllerDoesNotRetryInvalidModelResponseWithoutRuntimeOptIn(t *testing.T) {
+	registry, err := NewActionRegistry(NewCalculateAction())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	modelErr := &models.ModelError{Kind: models.ErrorInvalidResponse, Err: errors.New("malformed provider response")}
+	model := &decisionModelStub{err: modelErr}
+
+	err = NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt)
+	if !errors.Is(err, modelErr) || len(model.requests) != 1 {
+		t.Fatalf("err=%v model calls=%d", err, len(model.requests))
+	}
+	if len(runtime.failed) != 1 || runtime.failed[0] != string(models.ErrorInvalidResponse) {
+		t.Fatalf("terminal failures = %v", runtime.failed)
+	}
+}
+
+func TestControllerStopsInvalidModelResponseRecoveryAtRuntimeLimit(t *testing.T) {
+	registry, err := NewActionRegistry(NewCalculateAction())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &invalidResponseRecoveryRuntimeStub{
+		controllerRuntimeStub: &controllerRuntimeStub{execution: defaultControllerExecution()},
+		limit:                 2,
+	}
+	modelErr := &models.ModelError{Kind: models.ErrorInvalidResponse, Err: errors.New("malformed provider response")}
+	model := &decisionModelStub{err: modelErr}
+
+	err = NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt)
+	if !errors.Is(err, modelErr) || len(model.requests) != 3 {
+		t.Fatalf("err=%v model calls=%d", err, len(model.requests))
+	}
+	if len(runtime.failed) != 1 || runtime.failed[0] != string(models.ErrorInvalidResponse) {
+		t.Fatalf("terminal failures = %v", runtime.failed)
+	}
+}
+
+func TestControllerRetriesRuntimeRejectedDecisionBeforeCheckpointAcceptance(t *testing.T) {
+	registry, err := NewActionRegistry(NewCalculateAction())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &decisionResponsePreparationRuntimeStub{
+		invalidResponseRecoveryRuntimeStub: &invalidResponseRecoveryRuntimeStub{
+			controllerRuntimeStub: &controllerRuntimeStub{execution: defaultControllerExecution()},
+			limit:                 2,
+		},
+	}
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		{Final: &models.FinalDraft{Text: "invalid plan"}},
+		{Final: &models.FinalDraft{Text: "valid plan"}},
+	}}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) != 2 {
+		t.Fatalf("model calls = %d, want 2", len(model.requests))
+	}
+	if len(runtime.checkpoints) != 1 || runtime.checkpoints[0].Kind != CheckpointFinalDraft {
+		t.Fatalf("checkpoints = %+v", runtime.checkpoints)
+	}
+	if len(runtime.published) != 1 || runtime.published[0].Text != "valid plan" {
+		t.Fatalf("published = %+v", runtime.published)
+	}
+}
+
 func TestControllerReturnsToolCallErrorToRoleExecutorWithoutTerminalizing(t *testing.T) {
 	tests := []struct {
 		name string
@@ -939,6 +1040,26 @@ type queryContextControllerRuntimeStub struct {
 type contextPreparationRuntimeStub struct {
 	*controllerRuntimeStub
 	triggerReasons []string
+}
+
+type invalidResponseRecoveryRuntimeStub struct {
+	*controllerRuntimeStub
+	limit int
+}
+
+func (r *invalidResponseRecoveryRuntimeStub) InvalidModelResponseRetryLimit() int {
+	return r.limit
+}
+
+type decisionResponsePreparationRuntimeStub struct {
+	*invalidResponseRecoveryRuntimeStub
+}
+
+func (*decisionResponsePreparationRuntimeStub) PrepareDecisionResponse(_ context.Context, _ Execution, _ CheckpointPrefix, decision models.ModelDecision) (models.ModelDecision, error) {
+	if decision.Final != nil && decision.Final.Text == "invalid plan" {
+		return models.ModelDecision{}, errors.New("Research Plan source_strategy is invalid")
+	}
+	return decision, nil
 }
 
 func (r *contextPreparationRuntimeStub) PrepareDecisionRequest(_ context.Context, execution Execution, _ CheckpointPrefix, definitions []models.ActionDefinition, _ DecisionModel, triggerReason string) (models.ModelRequest, error) {

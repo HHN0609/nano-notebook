@@ -154,12 +154,16 @@ func (r *ExecutorRegistry) Resolve(reference agentcatalog.Reference) (ResolvedEx
 // concurrent calls to it needs its own rate-limit accounting first.
 func NanoToolCapabilities() map[string]agentcatalog.ToolCapability {
 	return map[string]agentcatalog.ToolCapability{
-		"calculate":       {Scheduling: agentcatalog.ToolParallel},
-		"current_time":    {Scheduling: agentcatalog.ToolParallel},
-		"read_skill":      {Scheduling: agentcatalog.ToolParallel},
-		"read_url":        {Scheduling: agentcatalog.ToolParallel},
-		"search_evidence": {Scheduling: agentcatalog.ToolParallel},
-		"web_search":      {Scheduling: agentcatalog.ToolOrderedSync},
+		"assemble_research_report": {Scheduling: agentcatalog.ToolOrderedSync},
+		"calculate":                {Scheduling: agentcatalog.ToolParallel},
+		"current_time":             {Scheduling: agentcatalog.ToolParallel},
+		"list_research_files":      {Scheduling: agentcatalog.ToolParallel},
+		"read_research_file":       {Scheduling: agentcatalog.ToolParallel},
+		"read_skill":               {Scheduling: agentcatalog.ToolParallel},
+		"read_url":                 {Scheduling: agentcatalog.ToolParallel},
+		"search_evidence":          {Scheduling: agentcatalog.ToolParallel},
+		"web_search":               {Scheduling: agentcatalog.ToolOrderedSync},
+		"write_research_file":      {Scheduling: agentcatalog.ToolOrderedSync},
 	}
 }
 
@@ -221,7 +225,10 @@ func ResearchRootExecutorCapability() agentcatalog.ExecutorCapability {
 			agentcatalog.MustParseReference("research.plan-result@1"):   true,
 			agentcatalog.MustParseReference("research.report-result@1"): true,
 		},
-		Tools: map[string]bool{"read_url": true, "search_evidence": true, "web_search": true},
+		Tools: map[string]bool{
+			"assemble_research_report": true, "list_research_files": true, "read_research_file": true,
+			"read_url": true, "search_evidence": true, "web_search": true, "write_research_file": true,
+		},
 		MaxLimits: agentcatalog.Limits{
 			ModelCalls: 120, Actions: 100, ActionBatch: 6, ContextBytes: 8388608, ResultBytes: 33554432, Attempts: 5,
 		},

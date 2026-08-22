@@ -9,6 +9,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
@@ -25,6 +26,8 @@ type ResearchPlanningRuntime struct {
 	prompts promptcatalog.Catalog
 	skills  skillcatalog.Catalog
 }
+
+func (*ResearchPlanningRuntime) InvalidModelResponseRetryLimit() int { return 2 }
 
 func NewResearchPlanningRuntime(pool *pgxpool.Pool, prompts promptcatalog.Catalog, skills skillcatalog.Catalog) (*ResearchPlanningRuntime, error) {
 	if pool == nil {
@@ -98,6 +101,7 @@ func (r *ResearchPlanningRuntime) BuildDecisionRequest(ctx context.Context, exec
 		}
 		system += fmt.Sprintf("\n- %s: %s — %s", reference, skill.Name, skill.Description)
 	}
+	system += "\n\n" + researchPlanningContext(time.Now(), execution.TimeZone)
 	lane, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
 		MessageID: execution.InputMessageID, Content: requestText,
 		Runs: []ChatLaneRun{{RunID: execution.RunID, Prefix: &prefix}},
@@ -108,6 +112,30 @@ func (r *ResearchPlanningRuntime) BuildDecisionRequest(ctx context.Context, exec
 	request := buildProjectedRequest(execution, system, lane, definitions)
 	request.InvocationPolicy = execution.ModelInvocation
 	return request, nil
+}
+
+func researchPlanningContext(now time.Time, timeZone string) string {
+	location, err := time.LoadLocation(timeZone)
+	if err != nil {
+		location = time.UTC
+		timeZone = "UTC"
+	}
+	return fmt.Sprintf("Operational planning context: the current date is %s in %s. This is supplied to prevent stale or fabricated dates; it does not create a date cutoff unless the Member requested one.", now.In(location).Format("2006-01-02"), timeZone)
+}
+
+func (*ResearchPlanningRuntime) PrepareDecisionResponse(_ context.Context, _ Execution, _ CheckpointPrefix, decision models.ModelDecision) (models.ModelDecision, error) {
+	if decision.Final == nil {
+		return decision, nil
+	}
+	plan, err := ValidateResearchPlanJSON(decision.Final.Text)
+	if err != nil {
+		return models.ModelDecision{}, err
+	}
+	prepared := decision
+	final := *decision.Final
+	final.Text = string(plan)
+	prepared.Final = &final
+	return prepared, nil
 }
 
 func (r *ResearchPlanningRuntime) PublishFinal(ctx context.Context, attempt Attempt, draft models.FinalDraft) error {

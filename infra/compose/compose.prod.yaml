@@ -67,6 +67,11 @@ services:
       NANO_SOURCE_S3_SECRET_ACCESS_KEY: nano-password
       NANO_SOURCE_S3_BUCKET: nano-sources
       NANO_SOURCE_S3_USE_TLS: "false"
+      NANO_RESEARCH_WORKSPACE_S3_ENDPOINT: minio:9000
+      NANO_RESEARCH_WORKSPACE_S3_ACCESS_KEY_ID: nano
+      NANO_RESEARCH_WORKSPACE_S3_SECRET_ACCESS_KEY: nano-password
+      NANO_RESEARCH_WORKSPACE_S3_BUCKET: nano-research-workspaces
+      NANO_RESEARCH_WORKSPACE_S3_USE_TLS: "false"
       NANO_QDRANT_COLLECTION: nano-source-evidence-gemini-2-768-v1
       NANO_QDRANT_DENSE_DIMENSIONS: "768"
       NANO_QDRANT_URL: http://qdrant:6333
@@ -408,6 +413,7 @@ services:
         mc mb --ignore-existing local/nano-agent-replay-staging
         mc mb --ignore-existing local/nano-agent-replay
         mc mb --ignore-existing local/nano-sources
+        mc mb --ignore-existing local/nano-research-workspaces
 
   qdrant:
     image: qdrant/qdrant:v1.15.1

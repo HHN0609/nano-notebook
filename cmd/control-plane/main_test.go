@@ -47,7 +47,7 @@ func TestLoadControlPlaneConfigDefaultsToQwenPlus(t *testing.T) {
 	if config.DefaultModel != "aliyun/qwen-plus" {
 		t.Fatalf("Default model = %q, want aliyun/qwen-plus", config.DefaultModel)
 	}
-	if config.AgentRelease.String() != "nano.default@5" {
+	if config.AgentRelease.String() != "nano.default@12" {
 		t.Fatalf("Agent release = %q", config.AgentRelease)
 	}
 }

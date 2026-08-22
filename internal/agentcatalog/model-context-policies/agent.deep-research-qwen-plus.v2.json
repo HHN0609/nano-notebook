@@ -1,0 +1,12 @@
+{
+  "identity": "agent.deep-research-qwen-plus",
+  "version": 2,
+  "invocation_model_policy": "agent.deep-research-default@2",
+  "provider_capability": "aliyun.qwen-plus-2025-07-28@1",
+  "pinned_max_output_tokens": 16384,
+  "soft_input_limit_tokens": 180000,
+  "estimation_safety_tokens": 8192,
+  "keep_recent_tokens": 32768,
+  "summary_max_output_tokens": 4096,
+  "overflow_retry_limit": 2
+}

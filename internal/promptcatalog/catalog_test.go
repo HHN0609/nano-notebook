@@ -27,7 +27,7 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
-	const extraVersions = 3 // agent.chat-composer-grounded@2/@3 and agent.chat-composer-bare@2, alongside their still-required @1s (legacy AgentPromptSet binding)
+	const extraVersions = 6 // chat composer upgrades plus final deep Research planner/executor/reporter upgrades, alongside their @1s
 	if got := len(catalog.Versions()); got != len(want)+extraVersions {
 		t.Fatalf("versions=%d want=%d", got, len(want)+extraVersions)
 	}
@@ -58,6 +58,23 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 	}
 	if bare.Contract != "final_draft_text.v1" || bare.SHA256 == "" || strings.TrimSpace(bare.Content) == "" {
 		t.Fatalf("prompt=%+v", bare)
+	}
+	plannerV5, ok := catalog.Resolve("agent.deep-research-planner", 5)
+	if !ok || plannerV5.Contract != "research_plan_text.v1" || !strings.Contains(plannerV5.Content, "This phase has no Web evidence") || !strings.Contains(plannerV5.Content, "Do not prescribe generic report boilerplate") {
+		t.Fatalf("planner v5 prompt=%+v ok=%v", plannerV5, ok)
+	}
+	executorV4, ok := catalog.Resolve("agent.deep-research-executor", 4)
+	if !ok || executorV4.Contract != "research_execution_text.v1" || !strings.Contains(executorV4.Content, "review_present=false") || !strings.Contains(executorV4.Content, "never use numbered placeholders") {
+		t.Fatalf("executor v4 prompt=%+v ok=%v", executorV4, ok)
+	}
+	reporterV3, ok := catalog.Resolve("agent.deep-research-reporter", 3)
+	if !ok || reporterV3.Contract != "research_report_text.v1" || !strings.Contains(reporterV3.Content, "not verified in this run") || !strings.Contains(reporterV3.Content, "Organize the report around the Member's decision") {
+		t.Fatalf("reporter v3 prompt=%+v ok=%v", reporterV3, ok)
+	}
+	for _, forbidden := range []string{"executive summary, method and evidence scope", "source appendix"} {
+		if strings.Contains(strings.ToLower(reporterV3.Content), forbidden) {
+			t.Fatalf("reporter v3 exposes internal acceptance scaffolding %q: %s", forbidden, reporterV3.Content)
+		}
 	}
 }
 

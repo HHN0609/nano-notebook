@@ -17,7 +17,7 @@ func (noopDefinitionExecutor) ExecuteAttempt(context.Context, Attempt) AttemptRe
 }
 
 // TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel locks in
-// the production scheduling decision: calculate, current_time, and
+// the production scheduling decision: calculate, current_time, reads, and
 // search_evidence are read-only and side-effect-free, so a batch made up
 // only of these is eligible for Controller's concurrent execution path.
 // web_search stays ordered_sync because it calls an external, rate-limited
@@ -25,12 +25,16 @@ func (noopDefinitionExecutor) ExecuteAttempt(context.Context, Attempt) AttemptRe
 func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testing.T) {
 	capabilities := NanoToolCapabilities()
 	want := map[string]agentcatalog.ToolScheduling{
-		"calculate":       agentcatalog.ToolParallel,
-		"current_time":    agentcatalog.ToolParallel,
-		"read_skill":      agentcatalog.ToolParallel,
-		"read_url":        agentcatalog.ToolParallel,
-		"search_evidence": agentcatalog.ToolParallel,
-		"web_search":      agentcatalog.ToolOrderedSync,
+		"assemble_research_report": agentcatalog.ToolOrderedSync,
+		"calculate":                agentcatalog.ToolParallel,
+		"current_time":             agentcatalog.ToolParallel,
+		"list_research_files":      agentcatalog.ToolParallel,
+		"read_research_file":       agentcatalog.ToolParallel,
+		"read_skill":               agentcatalog.ToolParallel,
+		"read_url":                 agentcatalog.ToolParallel,
+		"search_evidence":          agentcatalog.ToolParallel,
+		"web_search":               agentcatalog.ToolOrderedSync,
+		"write_research_file":      agentcatalog.ToolOrderedSync,
 	}
 	if len(capabilities) != len(want) {
 		t.Fatalf("capabilities=%+v", capabilities)
@@ -163,12 +167,16 @@ func newTestExecutorRegistry(t *testing.T) *ExecutorRegistry {
 
 func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 	return map[string]agentcatalog.ToolCapability{
-		"calculate":       {Scheduling: agentcatalog.ToolOrderedSync},
-		"current_time":    {Scheduling: agentcatalog.ToolOrderedSync},
-		"read_skill":      {Scheduling: agentcatalog.ToolOrderedSync},
-		"read_url":        {Scheduling: agentcatalog.ToolOrderedSync},
-		"search_evidence": {Scheduling: agentcatalog.ToolOrderedSync},
-		"web_search":      {Scheduling: agentcatalog.ToolOrderedSync},
+		"assemble_research_report": {Scheduling: agentcatalog.ToolOrderedSync},
+		"calculate":                {Scheduling: agentcatalog.ToolOrderedSync},
+		"current_time":             {Scheduling: agentcatalog.ToolOrderedSync},
+		"list_research_files":      {Scheduling: agentcatalog.ToolOrderedSync},
+		"read_research_file":       {Scheduling: agentcatalog.ToolOrderedSync},
+		"read_skill":               {Scheduling: agentcatalog.ToolOrderedSync},
+		"read_url":                 {Scheduling: agentcatalog.ToolOrderedSync},
+		"search_evidence":          {Scheduling: agentcatalog.ToolOrderedSync},
+		"web_search":               {Scheduling: agentcatalog.ToolOrderedSync},
+		"write_research_file":      {Scheduling: agentcatalog.ToolOrderedSync},
 	}
 }
 

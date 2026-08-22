@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,12 +33,35 @@ var chineseReadCountClaimPattern = regexp.MustCompile(`其中\s*\*{0,2}\d+\s*个
 var englishReadCountClaimPattern = regexp.MustCompile(`(?i)\b(?:of which\s+)?\*{0,2}\d+\*{0,2}\s+(?:were\s+)?successfully read(?:\s+(?:primary\s+)?sources?)?\b`)
 
 type ResearchRuntime struct {
-	base    *PostgresRuntime
-	pool    *pgxpool.Pool
-	prompts promptcatalog.Catalog
+	base      *PostgresRuntime
+	pool      *pgxpool.Pool
+	prompts   promptcatalog.Catalog
+	workspace objectstore.Store
 }
 
-func NewResearchRuntime(pool *pgxpool.Pool, prompts promptcatalog.Catalog) (*ResearchRuntime, error) {
+func (*ResearchRuntime) InvalidModelResponseRetryLimit() int { return 5 }
+
+func (*ResearchRuntime) PrepareDecisionResponse(_ context.Context, _ Execution, prefix CheckpointPrefix, decision models.ModelDecision) (models.ModelDecision, error) {
+	if decision.Final == nil || !isResearchCompletionSignal(decision.Final.Text) {
+		return decision, nil
+	}
+	if hasAssembledResearchReport(prefix) {
+		return decision, nil
+	}
+	return models.ModelDecision{}, errors.New("Research completion signal has no assembled report; return a complete report or assemble the workspace first")
+}
+
+func isResearchCompletionSignal(value string) bool {
+	normalized := strings.ToLower(strings.Trim(strings.TrimSpace(value), ".!。！"))
+	switch normalized {
+	case "final", "done", "complete", "completed", "report assembled", "已完成", "完成":
+		return true
+	default:
+		return false
+	}
+}
+
+func NewResearchRuntime(pool *pgxpool.Pool, prompts promptcatalog.Catalog, workspace ...objectstore.Store) (*ResearchRuntime, error) {
 	if pool == nil {
 		return nil, errors.New("Research Runtime requires PostgreSQL")
 	}
@@ -46,7 +70,14 @@ func NewResearchRuntime(pool *pgxpool.Pool, prompts promptcatalog.Catalog) (*Res
 			return nil, fmt.Errorf("Research Prompt %s@1 is missing", identity)
 		}
 	}
-	return &ResearchRuntime{base: NewPostgresRuntime(pool, "", nil), pool: pool, prompts: prompts}, nil
+	var workspaceStore objectstore.Store
+	if len(workspace) > 1 {
+		return nil, errors.New("Research Runtime accepts at most one workspace Store")
+	}
+	if len(workspace) == 1 {
+		workspaceStore = workspace[0]
+	}
+	return &ResearchRuntime{base: NewPostgresRuntime(pool, "", nil), pool: pool, prompts: prompts, workspace: workspaceStore}, nil
 }
 
 func (r *ResearchRuntime) Load(ctx context.Context, attempt Attempt) (Execution, error) {
@@ -120,48 +151,114 @@ func (r *ResearchRuntime) BuildDecisionRequest(ctx context.Context, execution Ex
 	}
 	system := strings.TrimSpace(executorPrompt.Content) + "\n\nFinal report requirements:\n" + strings.TrimSpace(reporterPrompt.Content)
 	system += "\n\n" + researchExecutionControlPrompt(execution.ActionBatchLimit)
-	forceReport := consecutiveResearchDuplicateSteps(prefix) >= 3
-	if forceReport {
-		system += "\n\nRecovery directive: the last tool decisions repeated already completed inputs. Tool use is now closed for this Run. Produce the complete final report immediately from the successfully read Evidence Ledger, explicitly noting remaining gaps."
-		definitions = nil
+	duplicateSteps := consecutiveResearchDuplicateSteps(prefix)
+	if duplicateSteps > 0 {
+		unreadURLs, err := r.loadUnreadResearchURLs(ctx, sessionID, researchRecoveryCandidateLimit(execution.ActionBatchLimit))
+		if err != nil {
+			return models.ModelRequest{}, err
+		}
+		recovery := planResearchDuplicateRecovery(duplicateSteps, unreadURLs, definitions)
+		definitions = recovery.definitions
+		if recovery.directive != "" {
+			system += "\n\n" + recovery.directive
+		}
+	}
+	if len(definitions) == 0 {
+		system += "\n\n" + researchFinalOnlyPrompt()
 	}
 	messages := []models.ModelMessage{
 		{Role: models.RoleSystem, Content: system},
 		{Role: models.RoleUser, Content: "Original request:\n" + originalRequest + "\n\nAccepted Research Plan (immutable):\n" + planJSON},
 	}
-	memory, err := r.loadResearchMemory(ctx, sessionID)
+	memory, err := r.loadResearchMemory(ctx, sessionID, len(definitions) > 0)
 	if err != nil {
 		return models.ModelRequest{}, err
+	}
+	if len(definitions) == 0 && memory != "" {
+		eligible, err := r.loadReadResearchURLSet(ctx, execution.RunID)
+		if err != nil {
+			return models.ModelRequest{}, err
+		}
+		memory, _ = rewriteResearchReportLinks(memory, eligible)
 	}
 	if memory != "" {
 		messages = append(messages, models.ModelMessage{Role: models.RoleAssistant, Content: memory})
 	}
-	projected, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
-		MessageID: execution.InputMessageID, Content: originalRequest,
-		Runs: []ChatLaneRun{{RunID: execution.RunID, Prefix: &prefix}},
-	}}}, nil)
-	if err != nil {
-		return models.ModelRequest{}, err
+	if includeExactResearchSuffix(definitions, duplicateSteps) {
+		projected, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
+			MessageID: execution.InputMessageID, Content: originalRequest,
+			Runs: []ChatLaneRun{{RunID: execution.RunID, Prefix: &prefix}},
+		}}}, nil)
+		if err != nil {
+			return models.ModelRequest{}, err
+		}
+		keepRecent := execution.ModelContext.Policy.KeepRecentTokens
+		if keepRecent > researchExactRecentTokens {
+			keepRecent = researchExactRecentTokens
+		}
+		exact := selectRecentResearchUnits(projected[1:], keepRecent)
+		messages = append(messages, FlattenContextUnits(exact)...)
 	}
-	keepRecent := execution.ModelContext.Policy.KeepRecentTokens
-	if keepRecent > researchExactRecentTokens {
-		keepRecent = researchExactRecentTokens
-	}
-	exact := selectRecentResearchUnits(projected[1:], keepRecent)
-	messages = append(messages, FlattenContextUnits(exact)...)
 	return models.ModelRequest{
 		Model: execution.Model, Messages: messages, ActionDefinitions: cloneActionDefinitions(definitions),
 		InvocationPolicy: execution.ModelInvocation,
 	}, nil
 }
 
+func includeExactResearchSuffix(definitions []models.ActionDefinition, duplicateSteps int) bool {
+	return len(definitions) > 0 && duplicateSteps == 0
+}
+
+func (r *ResearchRuntime) loadReadResearchURLSet(ctx context.Context, runID string) (map[string]bool, error) {
+	rows, err := r.pool.Query(ctx, `
+		select ledger.url,coalesce(ledger.final_url,'')
+		from research_evidence_ledger ledger
+		join research_sessions session on session.id=ledger.session_id
+		where session.execution_run_id=$1 and ledger.status='read'
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	eligible := map[string]bool{}
+	for rows.Next() {
+		var url, finalURL string
+		if err := rows.Scan(&url, &finalURL); err != nil {
+			return nil, err
+		}
+		eligible[url] = true
+		if finalURL != "" {
+			eligible[finalURL] = true
+		}
+	}
+	return eligible, rows.Err()
+}
+
 func researchExecutionControlPrompt(actionBatchLimit int) string {
 	return fmt.Sprintf("Tool-call contract: propose at most %d tool calls in one model decision. Each `web_search` call contains one to three queries. Each `read_url` call contains exactly one URL. Split larger reading sets across multiple decisions; never emit an oversized batch.", actionBatchLimit)
 }
 
-func (r *ResearchRuntime) PrepareFinal(ctx context.Context, _ Attempt, execution Execution, _ CheckpointPrefix, draft models.FinalDraft) (models.FinalDraft, error) {
+func researchRecoveryCandidateLimit(actionBatchLimit int) int {
+	if actionBatchLimit < 1 {
+		return 0
+	}
+	return actionBatchLimit * 4
+}
+
+func researchFinalOnlyPrompt() string {
+	return "Tool use is closed for this decision because the Run has reached its Action boundary. Return Final now: produce the complete report from the accepted Research Plan and successfully read Evidence Ledger. Do not emit, describe, or simulate any tool call."
+}
+
+func (r *ResearchRuntime) PrepareFinal(ctx context.Context, _ Attempt, execution Execution, prefix CheckpointPrefix, draft models.FinalDraft) (models.FinalDraft, error) {
 	if err := draft.Validate(); err != nil {
 		return models.FinalDraft{}, err
+	}
+	assembled, ok, err := loadAssembledResearchReport(ctx, r.workspace, prefix)
+	if err != nil {
+		return models.FinalDraft{}, err
+	}
+	if ok {
+		draft.Text = assembled
 	}
 	var total, discoveredOnly, read, failed int
 	if err := r.pool.QueryRow(ctx, `
@@ -201,6 +298,114 @@ func consecutiveResearchDuplicateSteps(prefix CheckpointPrefix) int {
 	return count
 }
 
+type researchDuplicateRecovery struct {
+	definitions []models.ActionDefinition
+	directive   string
+}
+
+func planResearchDuplicateRecovery(duplicateSteps int, unreadURLs []string, definitions []models.ActionDefinition) researchDuplicateRecovery {
+	recovery := researchDuplicateRecovery{definitions: cloneActionDefinitions(definitions)}
+	if duplicateSteps < 1 {
+		return recovery
+	}
+	if len(unreadURLs) > 0 {
+		if _, ok := actionDefinitionByName(definitions, "read_url"); ok {
+			var builder strings.Builder
+			builder.WriteString("Duplicate-action recovery: prior tool decisions repeated completed or failed inputs and produced no new evidence. Exact recent calls were removed from this request to reduce copying bias. Continue with a fresh unread Evidence Ledger URL below, a genuinely new query, or the next report-workspace step if the accepted plan is already satisfied. Repeating an attempted URL remains a domain error rather than aborting the Run:\n")
+			for _, url := range unreadURLs {
+				fmt.Fprintf(&builder, "- %s\n", url)
+			}
+			recovery.directive = strings.TrimSpace(builder.String())
+			return recovery
+		}
+	}
+	return recovery
+}
+
+func (r *ResearchRuntime) loadUnreadResearchURLs(ctx context.Context, sessionID string, limit int) ([]string, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	attempted, err := r.loadAttemptedResearchReadURLs(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.pool.Query(ctx, `
+		select coalesce(nullif(final_url,''),url)
+		from research_evidence_ledger
+		where session_id=$1 and status='discovered'
+		order by first_seen_at,url
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	candidates := make([]string, 0)
+	for rows.Next() {
+		var url string
+		if err := rows.Scan(&url); err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, url)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return selectUnattemptedResearchURLs(candidates, attempted, limit), nil
+}
+
+func (r *ResearchRuntime) loadAttemptedResearchReadURLs(ctx context.Context, sessionID string) (map[string]bool, error) {
+	rows, err := r.pool.Query(ctx, `
+		select checkpoint.payload
+		from research_sessions session
+		join agent_run_checkpoints checkpoint on checkpoint.run_id=session.execution_run_id
+		where session.id=$1 and checkpoint.kind='action_proposal'
+		order by checkpoint.sequence_no
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	attempted := map[string]bool{}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var proposal proposalCheckpointPayload
+		if json.Unmarshal(raw, &proposal) != nil {
+			continue
+		}
+		for _, action := range proposal.Actions {
+			if action.Name != "read_url" {
+				continue
+			}
+			var input readURLInput
+			if json.Unmarshal(action.Input, &input) == nil && input.URL != "" {
+				attempted[input.URL] = true
+			}
+		}
+	}
+	return attempted, rows.Err()
+}
+
+func selectUnattemptedResearchURLs(candidates []string, attempted map[string]bool, limit int) []string {
+	if limit < 1 {
+		return nil
+	}
+	selected := make([]string, 0, limit)
+	for _, url := range candidates {
+		if url == "" || attempted[url] {
+			continue
+		}
+		selected = append(selected, url)
+		if len(selected) == limit {
+			break
+		}
+	}
+	return selected
+}
+
 func (r *ResearchRuntime) PublishFinal(ctx context.Context, attempt Attempt, draft models.FinalDraft) error {
 	if err := draft.Validate(); err != nil {
 		return err
@@ -238,9 +443,6 @@ func (r *ResearchRuntime) PublishFinal(ctx context.Context, attempt Attempt, dra
 	reportText, removedLinks, err := sanitizeResearchReportLinks(ctx, tx, sessionID, draft.Text)
 	if err != nil {
 		return err
-	}
-	if len(removedLinks) > 0 {
-		reportText += fmt.Sprintf("\n\n> Publication note: %d discovered-only link(s) were downgraded to plain text because their pages were not successfully read.\n", len(removedLinks))
 	}
 	if err := storeConfiguredFinalResult(ctx, tx, attempt.RunID, reportText); err != nil {
 		return err
@@ -536,7 +738,7 @@ func combineResearchRollup(previous string, parts []string) string {
 	return compactMarkdownByParagraph(content, researchRollupMarkdownLimit)
 }
 
-func (r *ResearchRuntime) loadResearchMemory(ctx context.Context, sessionID string) (string, error) {
+func (r *ResearchRuntime) loadResearchMemory(ctx context.Context, sessionID string, includeDiscovered bool) (string, error) {
 	var builder strings.Builder
 	var rollup string
 	var rolledThrough int
@@ -597,7 +799,9 @@ func (r *ResearchRuntime) loadResearchMemory(ctx context.Context, sessionID stri
 		default:
 			discovered++
 		}
-		fmt.Fprintf(&builder, "- [%s](%s) — %s\n", title, finalURL, status)
+		if includeResearchLedgerURL(status, includeDiscovered) {
+			fmt.Fprintf(&builder, "- [%s](%s) — %s\n", title, finalURL, status)
+		}
 	}
 	if err := evidenceRows.Err(); err != nil {
 		evidenceRows.Close()
@@ -610,6 +814,10 @@ func (r *ResearchRuntime) loadResearchMemory(ctx context.Context, sessionID stri
 	}
 	directive := buildResearchRoutingDirective(discovered, read, failed, readURLs, recentQueries)
 	return directive + "\n" + compactMarkdownByParagraph(builder.String(), researchMemoryMarkdownLimit), nil
+}
+
+func includeResearchLedgerURL(status string, includeDiscovered bool) bool {
+	return status != "discovered" || includeDiscovered
 }
 
 func (r *ResearchRuntime) loadRecentResearchQueries(ctx context.Context, sessionID string) ([]string, error) {
@@ -697,17 +905,7 @@ func canonicalizeResearchEvidenceClaims(report string, total, discoveredOnly, re
 			corrections++
 		}
 	}
-	report = strings.Join(lines, "\n")
-	notice := fmt.Sprintf("> **系统核验的证据账本（权威）**：共 %d 个不同 URL；%d 个仅发现、%d 个成功读取、%d 个读取失败。搜索摘要仅是线索，只有成功读取的 %d 个材料可支撑事实主张。", total, discoveredOnly, read, failed, read)
-	if !containsHan(report) {
-		notice = fmt.Sprintf("> **System-verified Evidence Ledger (authoritative)**: %d unique URLs; %d discovered-only, %d successfully read, and %d failed. Search snippets are leads; only the %d successfully read sources may support factual claims.", total, discoveredOnly, read, failed, read)
-	}
-	if firstBreak := strings.Index(report, "\n"); firstBreak >= 0 && strings.HasPrefix(strings.TrimSpace(report[:firstBreak]), "#") {
-		report = report[:firstBreak+1] + "\n" + notice + "\n" + report[firstBreak+1:]
-	} else {
-		report = notice + "\n\n" + report
-	}
-	return report, corrections
+	return strings.Join(lines, "\n"), corrections
 }
 
 func selectRecentResearchUnits(units []ContextUnit, keepTokens int) []ContextUnit {

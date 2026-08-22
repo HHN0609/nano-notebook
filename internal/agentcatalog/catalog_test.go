@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 10; got != want {
+	if got, want := len(definitions), 12; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -42,9 +42,17 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			executor: "research_planner", model: "agent.deep-research-default@1",
 			tools: []string{"read_skill"},
 		},
+		"research.planner@5": {
+			executor: "research_planner", model: "agent.deep-research-default@1",
+			tools: []string{"read_skill"},
+		},
 		"research.executor@1": {
 			executor: "research_root", model: "agent.deep-research-default@1",
 			tools: []string{"read_url", "search_evidence", "web_search"},
+		},
+		"research.executor@6": {
+			executor: "research_root", model: "agent.deep-research-default@2",
+			tools: []string{"assemble_research_report", "list_research_files", "read_research_file", "read_url", "search_evidence", "web_search", "write_research_file"},
 		},
 		"studio.report@1": {
 			executor: "studio_structured_output", model: "agent.studio-default@1",
@@ -86,7 +94,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			t.Fatalf("immutable identity missing for %s: %+v", key, definition)
 		}
 	}
-	if got, want := len(catalog.ModelPolicies()), 4; got != want {
+	if got, want := len(catalog.ModelPolicies()), 5; got != want {
 		t.Fatalf("model policies=%d want=%d", got, want)
 	}
 	if got, want := len(catalog.Contracts()), 12; got != want {
@@ -119,9 +127,21 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 	if !ok || manifestV5.Roots["research_planner"].String() != "research.planner@1" || manifestV5.Roots["research"].String() != "research.executor@1" || manifestV5.Roots["chat"].String() != "chat.leader@3" {
 		t.Fatalf("v5 manifest=%+v ok=%v", manifestV5, ok)
 	}
+	manifestV12, ok := catalog.ResolveRelease(MustParseReference("nano.default@12"))
+	if !ok || manifestV12.Roots["research_planner"].String() != "research.planner@5" || manifestV12.Roots["research"].String() != "research.executor@6" || manifestV12.Roots["chat"].String() != "chat.leader@3" {
+		t.Fatalf("v12 manifest=%+v ok=%v", manifestV12, ok)
+	}
+	researchPolicy, ok := catalog.ResolveModelPolicy(MustParseReference("agent.deep-research-default@2"))
+	if !ok || researchPolicy.TimeoutMS != 200000 || researchPolicy.MaxOutputTokens != 16384 {
+		t.Fatalf("research policy=%+v ok=%v", researchPolicy, ok)
+	}
 	research, ok := catalog.ResolveDefinition(MustParseReference("research.executor@1"))
 	if !ok || research.Limits.ModelCalls < 100 || research.Limits.Actions < 80 || research.Limits.ActionBatch < 4 {
 		t.Fatalf("research definition=%+v ok=%v", research, ok)
+	}
+	researchV6, ok := catalog.ResolveDefinition(MustParseReference("research.executor@6"))
+	if !ok || researchV6.Prompts["executor"].String() != "agent.deep-research-executor@4" || researchV6.Prompts["reporter"].String() != "agent.deep-research-reporter@3" {
+		t.Fatalf("research v6 prompts=%+v ok=%v", researchV6.Prompts, ok)
 	}
 	planner, ok := catalog.ResolveDefinition(MustParseReference("research.planner@1"))
 	if !ok || len(planner.Skills) != 1 || planner.Skills[0].String() != "skill.grill-me@1" {

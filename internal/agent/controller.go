@@ -51,6 +51,22 @@ type ContextPreparationTraceRuntime interface {
 	PrepareDecisionRequestTraced(context.Context, *agentobs.Tracer, Execution, CheckpointPrefix, []models.ActionDefinition, DecisionModel, string) (models.ModelRequest, error)
 }
 
+// InvalidModelResponseRecoveryRuntime opts a runtime into bounded retries for a
+// provider response that could not be decoded into the Agent decision contract.
+// No checkpoint has been accepted at this point, so repeating the model call
+// cannot replay an external Action.
+type InvalidModelResponseRecoveryRuntime interface {
+	InvalidModelResponseRetryLimit() int
+}
+
+// DecisionResponsePreparationRuntime validates or canonicalizes a model
+// decision before the append-only checkpoint boundary. Returning an error
+// classifies the unaccepted response as invalid and lets an opted-in runtime
+// recover without persisting a bad Final or replaying an Action.
+type DecisionResponsePreparationRuntime interface {
+	PrepareDecisionResponse(context.Context, Execution, CheckpointPrefix, models.ModelDecision) (models.ModelDecision, error)
+}
+
 // QueryContextRuntime is implemented by runtimes that must force their
 // decision loop's first Action to be a specific, isolated-query search
 // before any free tool choice — today, only Studio Output generation
@@ -213,6 +229,8 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 		var outcome models.ModelOutcome
 		overflowRecoveryAttempt := 0
+		invalidResponseRecoveryAttempt := 0
+		invalidResponseRecoveryDetail := ""
 		for {
 			triggerReason := ""
 			if overflowRecoveryAttempt > 0 {
@@ -234,6 +252,16 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			}
 			request.ContextTelemetry.OverflowRecoveryAttempt = overflowRecoveryAttempt
 			request.InvocationPolicy = execution.ModelInvocation
+			if invalidResponseRecoveryAttempt > 0 {
+				detail := ""
+				if invalidResponseRecoveryDetail != "" {
+					detail = " Validation failure: " + invalidResponseRecoveryDetail + "."
+				}
+				request.Messages = append(request.Messages, models.ModelMessage{
+					Role:    models.RoleSystem,
+					Content: "The previous model response was invalid and was not accepted." + detail + " Retry this same decision now. Return exactly one valid decision matching the provided contract: either a tool-call batch with valid JSON arguments and unique call IDs, or a complete final answer. Do not describe the repair and do not repeat already completed tool calls.",
+				})
+			}
 			if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
 				return c.handleRuntimeError(ctx, attempt, err)
 			}
@@ -243,6 +271,9 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 				if overflowRecoveryAttempt > 0 {
 					modelIdentity = fmt.Sprintf("%s/overflow-recovery/%d", modelIdentity, overflowRecoveryAttempt)
 				}
+				if invalidResponseRecoveryAttempt > 0 {
+					modelIdentity = fmt.Sprintf("%s/invalid-response-recovery/%d", modelIdentity, invalidResponseRecoveryAttempt)
+				}
 				outcome, err = InvokeDecisionModel(ctx, tracer, c.model, request, decisionNo, ModelTraceOptions{
 					StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
 					DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: c.replayStager(),
@@ -251,6 +282,27 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 				})
 			} else {
 				outcome, err = c.model.Decide(ctx, request)
+			}
+			if err == nil {
+				if runtime, ok := c.runtime.(DecisionResponsePreparationRuntime); ok {
+					prepared, prepareErr := runtime.PrepareDecisionResponse(ctx, execution, prefix, outcome.ModelDecision)
+					if prepareErr != nil {
+						invalidResponseRecoveryDetail = prepareErr.Error()
+						err = &models.ModelError{Kind: models.ErrorInvalidResponse, Err: prepareErr}
+					} else {
+						outcome.ModelDecision = prepared
+					}
+				}
+			}
+			if isModelInvalidResponse(err) {
+				limit := 0
+				if runtime, ok := c.runtime.(InvalidModelResponseRecoveryRuntime); ok {
+					limit = runtime.InvalidModelResponseRetryLimit()
+				}
+				if invalidResponseRecoveryAttempt < limit {
+					invalidResponseRecoveryAttempt++
+					continue
+				}
 			}
 			if !isModelContextOverflow(err) {
 				break
@@ -334,6 +386,11 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 func isModelContextOverflow(err error) bool {
 	var modelErr *models.ModelError
 	return errors.As(err, &modelErr) && modelErr.Kind == models.ErrorContextOverflow
+}
+
+func isModelInvalidResponse(err error) bool {
+	var modelErr *models.ModelError
+	return errors.As(err, &modelErr) && modelErr.Kind == models.ErrorInvalidResponse
 }
 
 type CrashReplayPolicy interface {

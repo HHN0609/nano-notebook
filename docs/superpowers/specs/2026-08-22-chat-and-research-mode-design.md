@@ -151,6 +151,12 @@ materially change the investigation. Once the Member confirms the plan,
 execution does not return to the Member for ordinary research ambiguity or
 external-service failures.
 
+Planning has no Web-evidence authority. Its output is a proposal for Member
+review, and the confirmed or edited Plan Version is authoritative for execution.
+Prompts discourage invented exact repositories, URLs, paths, and metrics, but
+the first release does not attempt brittle semantic validation of every planning
+claim; the plan confirmation/edit surface is the product boundary.
+
 ## Agent definition and budgets
 
 `research.root@1` is a configured root, not a mode flag inside `chat.leader`.
@@ -161,14 +167,15 @@ Its catalog entry pins:
 - allowed tools and Skills;
 - model-call, Action, batch, context-byte, result-byte, Attempt, and absolute
   deadline limits;
-- one reserved Final/Report decision.
+- enough headroom for long search, reading, drafting, review, and assembly loops.
 
 Initial limits must permit at least a hundred sequential decisions and a larger
 Action budget. Exact numbers live in the versioned catalog/policy JSON, not in
 Controller branches. Planner, executor, compactor, and reporter model calls all
-consume explicit tree-level budgets. When the Action budget is exhausted, the
-runtime removes Action definitions and spends the reserved Report decision on
-the best supported deliverable possible.
+consume explicit tree-level budgets. Completion is model-led: the Controller
+does not impose a source-count or dedicated-second-Final gate. At a true budget
+boundary, the existing tool-closure path asks for the best supported deliverable
+possible from accepted progress.
 
 ## Prompt architecture
 
@@ -215,9 +222,34 @@ of Step Capsules.
 ### `agent.research-reporter@1`
 
 Produces the versioned Report contract from the accepted plan, eligible
-evidence, Rollup, Capsules, and exact suffix. It includes citations, separates
-fact from inference, describes material limitations, and never cites a URL that
-was only returned by search.
+evidence, Rollup, Capsules, and exact suffix. It writes a decision artifact,
+not a research transcript: conclusions, tradeoffs, risks, and actions determine
+the structure. It separates fact from inference, describes only limitations
+that change decision confidence, and never cites a URL that was only returned
+by search. URL counts, cross-validation mechanics, checkpoint progress, and
+other operational telemetry remain code-owned metadata instead of mandatory
+report sections.
+
+Later immutable Reporter versions tighten the same contract: a plain source
+title is not a citation, every material product-specific observation must link
+to a successfully read Ledger URL or be labelled as an evidence gap, and any
+discovered-only or failed URL is downgraded to plain text before publication.
+The downgrade is recorded in Report evidence statistics and never discards an
+otherwise complete Report.
+
+Research does not require a dedicated second reporting decision. A substantive
+Final may be accepted directly for backward compatibility, while a bare
+completion token such as `Final` or `done` is accepted only when a checkpointed
+assembled `report.md` exists. In that case the runtime publishes the assembled
+artifact rather than the token. Completion criteria guide the model's judgment
+and coverage telemetry, but never become a numeric publication gate.
+
+Duplicate Action recovery does not declare the investigation complete. It
+removes the raw recent Step suffix that can cause parameter-copying, retains
+Capsules and the Evidence Ledger, keeps the full allowed tool set, highlights
+fresh unread sources, and lets the Agent choose between further evidence work
+and workspace drafting. Only the Agent's completion judgment or a true catalog
+budget boundary closes tools.
 
 ## Skill infrastructure
 
@@ -253,6 +285,10 @@ The first Research root exposes:
 - `read_url`
 - `search_evidence`
 - `read_skill`
+- `write_research_file`
+- `read_research_file`
+- `list_research_files`
+- `assemble_research_report`
 
 ### `read_url`
 
@@ -279,6 +315,23 @@ Trace attributes, and Evidence Ledger projection.
 `web_search` remains ordered and provider-rate-limited. Independent
 `read_url` calls are read-only and crash-replay-safe; the scheduler may run an
 eligible batch concurrently within configured Web Reader capacity.
+
+### Research workspace
+
+The report workspace follows the planning-with-files pattern without exposing a
+host filesystem or shell. The model can write only `report_plan.md`,
+`review.md`, `notes/<slug>.md`, and `sections/<slug>.md`. It may list and read
+the latest checkpoint-accepted logical versions, then assemble an ordered set of
+section files into `report.md`; direct writes to `report.md` are rejected.
+
+Content is stored as immutable MinIO objects under the Run and a deterministic
+Action identity. Checkpoint results retain logical path, object key, content
+hash, and byte size. On replay, the same Action addresses the same object, while
+the latest accepted checkpoint prefix—not a mutable MinIO listing—decides which
+logical version is current. Reads verify stored size and SHA before returning
+content. Assembly is deterministic and reports whether an accepted `review.md`
+exists, but review and revision remain prompt-guided rather than Controller
+gates.
 
 ## Evidence Ledger
 
@@ -387,8 +440,10 @@ On every Controller iteration the Worker reloads the accepted prefix:
 3. Only after every result exists may the model make the next decision.
 
 `web_search`, `read_url`, `search_evidence`, and `read_skill` are read-only and
-crash-replay-safe. A Worker crash after an external call but before its Result
-checkpoint may repeat that Action with the same Action ID.
+crash-replay-safe. Workspace writes and assembly are also crash-replay-safe
+because their object identities are immutable and Action-derived. A Worker crash
+after an external call but before its Result checkpoint may repeat that Action
+with the same Action ID.
 
 External failures do not normally fail the Run:
 
@@ -398,13 +453,23 @@ External failures do not normally fail the Run:
 - a failed source family leaves a coverage gap while other plan branches
   continue;
 - bounded provider retries do not erase accepted progress;
+- a provider timeout or malformed decision retries from the same checkpoint
+  prefix within the Definition's Attempt and invalid-response limits;
 - the model does not ask the Member to resolve ordinary tool failures after
   plan confirmation.
+
+Research uses a separately versioned model-call timeout sized for long report
+generation. It must exceed the observed successful Provider latency while
+remaining below the enclosing Worker/Run deadline; changing it creates a new
+Model Policy, Definition, and Release rather than mutating an admitted Run.
 
 At a hard budget or deadline boundary, the runtime prioritizes a Report from all
 accepted evidence. A genuinely incomplete area is disclosed in the Report, but
 local service failure alone is not a reason to stop early. If publication
-fails, a Report Final checkpoint and content hash make retry idempotent.
+fails, a Report Final checkpoint and content hash make retry idempotent. The
+ordinary user-triggered retry API intentionally does not restart a terminal
+Research Run; recovery in this release is same-Run checkpoint recovery for
+retryable Worker/provider/tool attempts.
 
 ## Report product
 
@@ -412,14 +477,26 @@ Research Reports are separate from Studio Outputs because they are tied to a
 Chat request, dynamically discovered Web evidence, a confirmed Plan, and a
 long-horizon root Run.
 
-A Report has immutable versions. A completed version contains:
+A Report has immutable versions. A completed version contains decision-focused
+Markdown plus separately stored operational metadata:
 
-- title, executive summary, and structured Markdown sections;
+- a structure chosen for the Member's decision rather than fixed boilerplate;
 - accepted Plan Version and root Run identity;
 - citation list linked to Evidence Ledger entries;
 - creation model/prompt/configuration hashes;
-- explicit limitations and unresolved gaps;
+- material limitations and unresolved gaps that affect the decision;
 - content hash and publication timestamp.
+
+During execution, large working drafts live in the Run-scoped MinIO workspace.
+The model writes a plan and sections, reads them back, records review findings,
+and may revise sections before deterministic assembly. `PrepareFinal` prefers
+the accepted assembled artifact, with a substantive one-pass Final retained as
+a compatibility fallback when the workspace was not used.
+
+Coverage counts and citation eligibility are stored in Report metadata and UI
+projections. The runtime may correct a factual count already written by the
+model, but it does not inject an Evidence Ledger banner, method section,
+cross-validation table, or source inventory into the Report body.
 
 The Chat timeline shows a compact completion message and an action to open the
 full report. A follow-up may request a revised Report, which creates a new
@@ -504,7 +581,16 @@ Implementation follows test-first development.
   Report Final, and during publication.
 - Read-only Actions replay safely with the same Action ID.
 - Tool failure remains visible and allows a later alternative Action.
-- Budget exhaustion reserves a Report decision.
+- Budget exhaustion closes tools and requests the best supported Report from
+  accepted progress.
+- A Final containing any discovered-only citation is published with that link
+  downgraded to plain text and the downgrade count recorded only in Report
+  metadata, never as an operational note in the Report body.
+- Workspace paths are bounded, immutable object hashes are verified, replay is
+  idempotent, current versions derive from checkpoints, and assembly order is
+  deterministic.
+- A bare completion signal cannot become a five-character Report; it resolves
+  to an accepted assembled artifact or remains an invalid model response.
 
 ### API and UI tests
 
@@ -536,6 +622,8 @@ evidence-based, not just a green test:
 8. Checkpoint inspection proves the Run can resume without repeating completed
    Steps.
 9. Chat mode and its existing compaction regression suite remain green.
+10. Checkpoints show section-by-section workspace writes, read-back, review, and
+    deterministic assembly rather than a single oversized report response.
 
 If the live Report is superficial, misses essential source families, contains
 invalid citations, or stops after local tool failure, the feature is not

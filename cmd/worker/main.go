@@ -76,6 +76,7 @@ type workerConfig struct {
 	PurgeMaxBackoff                time.Duration
 	ReplayStagingS3                objectstore.S3Config
 	SourceS3                       objectstore.S3Config
+	ResearchWorkspaceS3            objectstore.S3Config
 	SourcePurgeLease               time.Duration
 	SourcePurgePoll                time.Duration
 	QdrantURL                      string
@@ -334,6 +335,15 @@ func main() {
 		slog.Error("Source object Store unavailable", "error", err)
 		os.Exit(1)
 	}
+	workspaceObjects, err := objectstore.NewS3Store(config.ResearchWorkspaceS3)
+	if err != nil {
+		slog.Error("Research workspace object Store invalid", "error", err)
+		os.Exit(1)
+	}
+	if err := workspaceObjects.CheckReady(ctx); err != nil {
+		slog.Error("Research workspace object Store unavailable", "error", err)
+		os.Exit(1)
+	}
 	qdrant, err := qdrantstore.New(qdrantstore.Config{
 		BaseURL: config.QdrantURL, APIKey: config.QdrantAPIKey, Collection: config.QdrantCollection,
 		DenseDimensions: config.QdrantDenseDimensions, RequestTimeout: config.HTTPTimeout,
@@ -469,9 +479,14 @@ func main() {
 	webSearchTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewWebSearchAction(searchProvider))
 	readSkillTool := agent.NewReadSkillAction(definitionCatalog, skillCatalog)
 	readURLTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewReadURLAction(webReaderAdapter))
-	registry, err := agent.NewActionRegistry(
-		calculateTool, currentTimeTool, searchEvidenceTool, webSearchTool, readSkillTool, readURLTool,
-	)
+	workspaceTools, err := agent.NewResearchWorkspaceActions(db.Pool(), workspaceObjects)
+	if err != nil {
+		slog.Error("Research workspace Tools invalid", "error", err)
+		os.Exit(1)
+	}
+	registryTools := []agent.Action{calculateTool, currentTimeTool, searchEvidenceTool, webSearchTool, readSkillTool, readURLTool}
+	registryTools = append(registryTools, workspaceTools...)
+	registry, err := agent.NewActionRegistry(registryTools...)
 	if err != nil {
 		slog.Error("worker Action registry invalid", "error", err)
 		os.Exit(1)
@@ -483,6 +498,15 @@ func main() {
 		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readSkillTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readURLTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+	}
+	for _, workspaceTool := range workspaceTools {
+		scheduling := agentcatalog.ToolParallel
+		if workspaceTool.Definition().Name == "write_research_file" || workspaceTool.Definition().Name == "assemble_research_report" {
+			scheduling = agentcatalog.ToolOrderedSync
+		}
+		mcpToolRegistrations = append(mcpToolRegistrations, agent.MCPToolRegistration{
+			Action: workspaceTool, Scheduling: scheduling, CrashReplaySafe: true,
+		})
 	}
 	configuredDelegationTools, err := agent.NewConfiguredDelegationToolRegistrations(definitionCatalog, db.Pool(), agent.ResearchAvailabilityFrom(searchProvider), traceExporter)
 	if err != nil {
@@ -507,7 +531,7 @@ func main() {
 		slog.Error("Research Planning Runtime invalid", "error", err)
 		os.Exit(1)
 	}
-	researchRuntime, err := agent.NewResearchRuntime(db.Pool(), promptCatalog)
+	researchRuntime, err := agent.NewResearchRuntime(db.Pool(), promptCatalog, workspaceObjects)
 	if err != nil {
 		slog.Error("Research Runtime invalid", "error", err)
 		os.Exit(1)
@@ -780,7 +804,7 @@ func shutdownTraceExporter(ctx context.Context, exporter interface {
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@5"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@12"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}
@@ -829,6 +853,10 @@ func loadWorkerConfig() (workerConfig, error) {
 		return workerConfig{}, err
 	}
 	sourceUseTLS, err := workerEnvBool("NANO_SOURCE_S3_USE_TLS", false)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	workspaceUseTLS, err := workerEnvBool("NANO_RESEARCH_WORKSPACE_S3_USE_TLS", false)
 	if err != nil {
 		return workerConfig{}, err
 	}
@@ -960,6 +988,13 @@ func loadWorkerConfig() (workerConfig, error) {
 			Bucket:          env("NANO_SOURCE_S3_BUCKET", "nano-sources"),
 			Region:          env("NANO_SOURCE_S3_REGION", "us-east-1"), UseTLS: sourceUseTLS,
 		},
+		ResearchWorkspaceS3: objectstore.S3Config{
+			Endpoint:        env("NANO_RESEARCH_WORKSPACE_S3_ENDPOINT", "127.0.0.1:59000"),
+			AccessKeyID:     env("NANO_RESEARCH_WORKSPACE_S3_ACCESS_KEY_ID", "nano"),
+			SecretAccessKey: env("NANO_RESEARCH_WORKSPACE_S3_SECRET_ACCESS_KEY", "nano-password"),
+			Bucket:          env("NANO_RESEARCH_WORKSPACE_S3_BUCKET", "nano-research-workspaces"),
+			Region:          env("NANO_RESEARCH_WORKSPACE_S3_REGION", "us-east-1"), UseTLS: workspaceUseTLS,
+		},
 		SourcePurgeLease: sourcePurgeLease, SourcePurgePoll: sourcePurgePoll,
 		QdrantURL:                    env("NANO_QDRANT_URL", "http://127.0.0.1:56333"),
 		QdrantAPIKey:                 strings.TrimSpace(os.Getenv("NANO_QDRANT_API_KEY")),
@@ -1003,7 +1038,9 @@ func loadWorkerConfig() (workerConfig, error) {
 		strings.TrimSpace(config.ReplayStagingS3.AccessKeyID) == "" || strings.TrimSpace(config.ReplayStagingS3.SecretAccessKey) == "" ||
 		strings.TrimSpace(config.ReplayStagingS3.Bucket) == "" || strings.TrimSpace(config.SourceS3.Endpoint) == "" ||
 		strings.TrimSpace(config.SourceS3.AccessKeyID) == "" || strings.TrimSpace(config.SourceS3.SecretAccessKey) == "" ||
-		strings.TrimSpace(config.SourceS3.Bucket) == "" || config.SourcePurgeLease <= 0 || config.SourcePurgePoll <= 0 ||
+		strings.TrimSpace(config.SourceS3.Bucket) == "" || strings.TrimSpace(config.ResearchWorkspaceS3.Endpoint) == "" ||
+		strings.TrimSpace(config.ResearchWorkspaceS3.AccessKeyID) == "" || strings.TrimSpace(config.ResearchWorkspaceS3.SecretAccessKey) == "" ||
+		strings.TrimSpace(config.ResearchWorkspaceS3.Bucket) == "" || config.SourcePurgeLease <= 0 || config.SourcePurgePoll <= 0 ||
 		strings.TrimSpace(config.QdrantURL) == "" || strings.TrimSpace(config.QdrantCollection) == "" || config.QdrantDenseDimensions <= 0 ||
 		(config.RetrievalBootstrapMode != "development" && config.RetrievalBootstrapMode != "required") ||
 		strings.TrimSpace(config.RetrievalBootstrapConfigPath) == "" ||

@@ -39,7 +39,7 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	if config.FetcherURL != "http://127.0.0.1:8083" {
 		t.Fatalf("Fetcher URL default=%q", config.FetcherURL)
 	}
-	if config.AgentRelease.String() != "nano.default@5" {
+	if config.AgentRelease.String() != "nano.default@12" {
 		t.Fatalf("Agent release default=%q", config.AgentRelease)
 	}
 }
@@ -214,6 +214,12 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_SOURCE_S3_BUCKET", "source-custody")
 	t.Setenv("NANO_SOURCE_S3_REGION", "cn-test-2")
 	t.Setenv("NANO_SOURCE_S3_USE_TLS", "true")
+	t.Setenv("NANO_RESEARCH_WORKSPACE_S3_ENDPOINT", "workspace.internal:9000")
+	t.Setenv("NANO_RESEARCH_WORKSPACE_S3_ACCESS_KEY_ID", "workspace-key")
+	t.Setenv("NANO_RESEARCH_WORKSPACE_S3_SECRET_ACCESS_KEY", "workspace-secret")
+	t.Setenv("NANO_RESEARCH_WORKSPACE_S3_BUCKET", "research-workspaces")
+	t.Setenv("NANO_RESEARCH_WORKSPACE_S3_REGION", "cn-test-3")
+	t.Setenv("NANO_RESEARCH_WORKSPACE_S3_USE_TLS", "true")
 	t.Setenv("NANO_QDRANT_URL", "http://qdrant.internal:6333")
 	t.Setenv("NANO_QDRANT_API_KEY", "qdrant-secret")
 	t.Setenv("NANO_QDRANT_COLLECTION", "source-evidence")
@@ -275,6 +281,11 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.SourceS3.SecretAccessKey != "worker-source-secret" || config.SourceS3.Bucket != "source-custody" ||
 		config.SourceS3.Region != "cn-test-2" || !config.SourceS3.UseTLS {
 		t.Fatalf("Source config = %#v", config)
+	}
+	if config.ResearchWorkspaceS3.Endpoint != "workspace.internal:9000" || config.ResearchWorkspaceS3.AccessKeyID != "workspace-key" ||
+		config.ResearchWorkspaceS3.SecretAccessKey != "workspace-secret" || config.ResearchWorkspaceS3.Bucket != "research-workspaces" ||
+		config.ResearchWorkspaceS3.Region != "cn-test-3" || !config.ResearchWorkspaceS3.UseTLS {
+		t.Fatalf("Research workspace config = %#v", config.ResearchWorkspaceS3)
 	}
 	if config.QdrantURL != "http://qdrant.internal:6333" || config.QdrantAPIKey != "qdrant-secret" ||
 		config.QdrantCollection != "source-evidence" || config.QdrantDenseDimensions != 768 ||
