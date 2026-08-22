@@ -902,6 +902,22 @@ func (s *Store) CreateConfiguredChatQueued(ctx context.Context, command Configur
 	return nil
 }
 
+func (s *Store) CreateConfiguredResearchPlanningQueued(ctx context.Context, sessionID string, command ConfiguredChatAdmission) error {
+	if strings.TrimSpace(sessionID) == "" || command.Definition.Executor != "research_planner" {
+		return errors.New("invalid configured Research planning admission")
+	}
+	if err := s.CreateConfiguredChatQueued(ctx, command); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into research_sessions(id,user_id,chat_id,input_message_id,status,planning_run_id)
+		values($1,$2,$3,$4,'planning',$5)
+	`, sessionID, command.UserID, command.ChatID, command.InputMessageID, command.RunID); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) FinalizeConfiguredChatOwnership(ctx context.Context, runID string) error {
 	if s == nil || s.db == nil || strings.TrimSpace(runID) == "" {
 		return errors.New("invalid configured Chat ownership finalization")

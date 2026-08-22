@@ -1,0 +1,26 @@
+{
+  "identity": "research.executor",
+  "version": 1,
+  "executor": "research_root",
+  "model_policy": "agent.deep-research-default@1",
+  "prompts": {
+    "executor": "agent.deep-research-executor@1",
+    "step_compactor": "agent.deep-research-step-compactor@1",
+    "rollup": "agent.deep-research-rollup@1",
+    "reporter": "agent.deep-research-reporter@1"
+  },
+  "contracts": {
+    "input": "research.plan-result@1",
+    "result": "research.report-result@1"
+  },
+  "tools": ["read_url", "search_evidence", "web_search"],
+  "children": [],
+  "limits": {
+    "model_calls": 120,
+    "actions": 100,
+    "action_batch": 6,
+    "context_bytes": 8388608,
+    "result_bytes": 33554432,
+    "attempts": 5
+  }
+}

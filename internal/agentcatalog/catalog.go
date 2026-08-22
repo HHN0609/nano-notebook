@@ -98,6 +98,7 @@ type Definition struct {
 	ModelPolicy Reference            `json:"model_policy"`
 	Prompts     map[string]Reference `json:"prompts"`
 	Contracts   ContractBindings     `json:"contracts"`
+	Skills      []Reference          `json:"skills,omitempty"`
 	Tools       []string             `json:"tools"`
 	Children    []Reference          `json:"children"`
 	Limits      Limits               `json:"limits"`
@@ -629,6 +630,13 @@ func validateDefinition(value Definition) error {
 	if validateReference(value.Contracts.Input) != nil || validateReference(value.Contracts.Result) != nil {
 		return errors.New("definition has invalid contract binding")
 	}
+	seenSkills := make(map[Reference]bool)
+	for _, skill := range value.Skills {
+		if validateReference(skill) != nil || seenSkills[skill] {
+			return errors.New("definition has invalid or duplicate skill")
+		}
+		seenSkills[skill] = true
+	}
 	seenTools := make(map[string]bool)
 	for _, tool := range value.Tools {
 		if !validToolName(tool) || seenTools[tool] {
@@ -743,6 +751,7 @@ func lessReference(left, right Reference) bool {
 
 func cloneDefinition(value Definition) Definition {
 	value.Prompts = cloneMap(value.Prompts)
+	value.Skills = cloneSlice(value.Skills)
 	value.Tools = cloneSlice(value.Tools)
 	value.Children = cloneSlice(value.Children)
 	if value.Delegation != nil {

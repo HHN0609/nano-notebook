@@ -34,6 +34,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
+	"github.com/huangxinxinyu/nano-notebook/internal/skillcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
@@ -208,6 +209,17 @@ func main() {
 		slog.Error("worker Prompt Catalog invalid", "error", err)
 		os.Exit(1)
 	}
+	skillCatalog, err := skillcatalog.LoadEmbedded()
+	if err != nil {
+		slog.Error("worker Skill Catalog invalid", "error", err)
+		os.Exit(1)
+	}
+	if err := retryUntilReady(ctx, "worker Skill Catalog readiness", func() error {
+		return app.VerifySkillCatalogReady(ctx, db, skillCatalog)
+	}); err != nil {
+		slog.Error("worker Skill Catalog readiness failed", "error", err)
+		os.Exit(1)
+	}
 	var activeRelease agentcatalog.ReleaseManifest
 	if err := retryUntilReady(ctx, "worker Agent Catalog readiness", func() error {
 		var readyErr error
@@ -236,6 +248,16 @@ func main() {
 	researchResultContract, ok := definitionCatalog.ResolveContract(researchDefinition.Contracts.Result)
 	if !ok {
 		slog.Error("worker Research child Result Contract is missing", "contract", researchDefinition.Contracts.Result)
+		os.Exit(1)
+	}
+	researchPlannerRoot, ok := activeRelease.Roots["research_planner"]
+	if !ok {
+		slog.Error("worker Agent Catalog release has no Research Planner root", "release", config.AgentRelease)
+		os.Exit(1)
+	}
+	deepResearchRoot, ok := activeRelease.Roots["research"]
+	if !ok {
+		slog.Error("worker Agent Catalog release has no Research root", "release", config.AgentRelease)
 		os.Exit(1)
 	}
 	_, supportedAgentConfiguration, err := agent.DefaultAgentConfigurationBundle(
@@ -287,7 +309,7 @@ func main() {
 		}
 	})
 
-	modelClient := models.NewBifrostClient(env("NANO_BIFROST_URL", "http://127.0.0.1:56666"), &http.Client{}, 2048)
+	modelClient := models.NewBifrostClient(env("NANO_BIFROST_URL", "http://127.0.0.1:56666"), &http.Client{}, 32*1024)
 	traceBridge, err := otelbridge.New(otel.Tracer("nano-agent-observability"))
 	if err != nil {
 		slog.Error("Agent Trace telemetry bridge unavailable", "error", err)
@@ -424,6 +446,18 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	var webReaderAdapter webreader.Adapter
+	if strings.TrimSpace(config.WebReaderURL) != "" {
+		webReaderHTTPAdapter, err := webreader.NewHTTPAdapter(webreader.HTTPConfig{
+			Endpoint: config.WebReaderURL, ServiceToken: config.WebReaderServiceToken,
+			HTTPClient: &http.Client{Timeout: config.WebReaderTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+		})
+		if err != nil {
+			slog.Error("web reader Adapter invalid", "error", err)
+			os.Exit(1)
+		}
+		webReaderAdapter = webReaderHTTPAdapter
+	}
 	grounder := agent.NewGroundingService(db.Pool())
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
 		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge),
@@ -432,9 +466,11 @@ func main() {
 	calculateTool := agent.NewCalculateAction()
 	currentTimeTool := agent.NewCurrentTimeAction(nil)
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
-	webSearchTool := agent.NewWebSearchAction(searchProvider)
+	webSearchTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewWebSearchAction(searchProvider))
+	readSkillTool := agent.NewReadSkillAction(definitionCatalog, skillCatalog)
+	readURLTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewReadURLAction(webReaderAdapter))
 	registry, err := agent.NewActionRegistry(
-		calculateTool, currentTimeTool, searchEvidenceTool, webSearchTool,
+		calculateTool, currentTimeTool, searchEvidenceTool, webSearchTool, readSkillTool, readURLTool,
 	)
 	if err != nil {
 		slog.Error("worker Action registry invalid", "error", err)
@@ -445,6 +481,8 @@ func main() {
 		agent.MCPToolRegistration{Action: currentTimeTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: readSkillTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: readURLTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 	}
 	configuredDelegationTools, err := agent.NewConfiguredDelegationToolRegistrations(definitionCatalog, db.Pool(), agent.ResearchAvailabilityFrom(searchProvider), traceExporter)
 	if err != nil {
@@ -464,6 +502,22 @@ func main() {
 	}
 	mcpToolHost.WithMetrics(taskMetrics)
 	controller := agent.NewMCPController(runtime, modelClient, registry, mcpToolHost, chatRoot).WithControllerMetrics(taskMetrics)
+	researchPlanningRuntime, err := agent.NewResearchPlanningRuntime(db.Pool(), promptCatalog, skillCatalog)
+	if err != nil {
+		slog.Error("Research Planning Runtime invalid", "error", err)
+		os.Exit(1)
+	}
+	researchRuntime, err := agent.NewResearchRuntime(db.Pool(), promptCatalog)
+	if err != nil {
+		slog.Error("Research Runtime invalid", "error", err)
+		os.Exit(1)
+	}
+	researchPlanningController := agent.NewMCPController(
+		researchPlanningRuntime, modelClient, registry, mcpToolHost, researchPlannerRoot,
+	).WithControllerMetrics(taskMetrics)
+	researchController := agent.NewMCPController(
+		researchRuntime, modelClient, registry, mcpToolHost, deepResearchRoot,
+	).WithControllerMetrics(taskMetrics)
 	studioExecutor, err := agent.NewStudioDefinitionExecutor(db.Pool(), runtime, modelClient, registry, mcpToolHost, definitionCatalog, taskMetrics)
 	if err != nil {
 		slog.Error("Studio Executor invalid", "error", err)
@@ -477,18 +531,6 @@ func main() {
 	if err != nil {
 		slog.Error("Source Discovery Fetcher client invalid", "error", err)
 		os.Exit(1)
-	}
-	var webReaderAdapter webreader.Adapter
-	if strings.TrimSpace(config.WebReaderURL) != "" {
-		webReaderHTTPAdapter, err := webreader.NewHTTPAdapter(webreader.HTTPConfig{
-			Endpoint: config.WebReaderURL, ServiceToken: config.WebReaderServiceToken,
-			HTTPClient: &http.Client{Timeout: config.WebReaderTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
-		})
-		if err != nil {
-			slog.Error("web reader Adapter invalid", "error", err)
-			os.Exit(1)
-		}
-		webReaderAdapter = webReaderHTTPAdapter
 	}
 	sourceExtractor := sourceprocessing.NewNativeExtractorWithWebReader(modelClient, webReaderAdapter, sourceprocessing.NativeExtractorConfig{
 		VisionModel: config.SourceVisionModel, TranscriptionModel: config.SourceTranscriptionModel,
@@ -508,8 +550,10 @@ func main() {
 	leaderExecutor := agent.NewLeaderRoleExecutor(roleRuntime)
 	researchExecutor := agent.NewResearchRoleExecutor(roleRuntime)
 	configuredRegistry, err := agent.NewNanoExecutorRegistry(
-		definitionCatalog, promptCatalog,
+		definitionCatalog, promptCatalog, skillCatalog,
 		agent.NewChatLeaderDefinitionExecutor(roleRuntime), agent.NewResearchDefinitionExecutor(roleRuntime),
+		agent.NewResearchPlanningDefinitionExecutor(researchPlanningController),
+		agent.NewResearchRootDefinitionExecutor(researchController),
 		studioExecutor,
 	)
 	if err != nil {
@@ -736,7 +780,7 @@ func shutdownTraceExporter(ctx context.Context, exporter interface {
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@4"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@5"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}
@@ -935,9 +979,9 @@ func loadWorkerConfig() (workerConfig, error) {
 		DocumentRenderTimeout:        documentRenderTimeout, DocumentRenderMaxPages: documentRenderMaxPages,
 		DocumentRenderDPI: documentRenderDPI, DocumentRenderMaxPixelsPerPage: int64(documentRenderMaxPixels),
 		DocumentRenderMaxOutputBytes: int64(documentRenderMaxOutput),
-		WebReaderURL:          strings.TrimRight(env("NANO_WEB_READER_URL", "http://127.0.0.1:8085"), "/"),
-		WebReaderServiceToken: env("NANO_WEB_READER_SERVICE_TOKEN", "nano-local-reader-token"),
-		WebReaderTimeout:      webReaderTimeout,
+		WebReaderURL:                 strings.TrimRight(env("NANO_WEB_READER_URL", "http://127.0.0.1:8085"), "/"),
+		WebReaderServiceToken:        env("NANO_WEB_READER_SERVICE_TOKEN", "nano-local-reader-token"),
+		WebReaderTimeout:             webReaderTimeout,
 		SourceProcessingMaxBytes:     int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
 		FetcherURL:           strings.TrimRight(env("NANO_FETCHER_URL", "http://127.0.0.1:8083"), "/"),
 		BraveSearchAPIKey:    strings.TrimSpace(os.Getenv("NANO_BRAVE_SEARCH_API_KEY")),

@@ -1,0 +1,8 @@
+{
+  "identity": "agent.deep-research-default",
+  "version": 1,
+  "provider_model": "aliyun/qwen-plus",
+  "temperature": 0,
+  "max_output_tokens": 16384,
+  "timeout_ms": 120000
+}

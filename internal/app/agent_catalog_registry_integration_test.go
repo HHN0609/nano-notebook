@@ -9,7 +9,37 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/skillcatalog"
 )
+
+func TestSkillCatalogRegistersIdempotentlyAndRejectsMutation(t *testing.T) {
+	api := newTestAPI(t)
+	ctx := context.Background()
+	catalog, err := skillcatalog.New([]skillcatalog.SkillVersion{{
+		Identity: "skill.test", Version: 1, Name: "Test", Description: "Test skill", Body: "Instructions.", SourcePath: "skills/test.v1.md",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RegisterSkillCatalog(ctx, api.db, catalog); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RegisterSkillCatalog(ctx, api.db, catalog); err != nil {
+		t.Fatalf("idempotent registration: %v", err)
+	}
+	if err := app.VerifySkillCatalogReady(ctx, api.db, catalog); err != nil {
+		t.Fatal(err)
+	}
+	mutated, err := skillcatalog.New([]skillcatalog.SkillVersion{{
+		Identity: "skill.test", Version: 1, Name: "Test", Description: "Test skill", Body: "Changed.", SourcePath: "skills/test.v1.md",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RegisterSkillCatalog(ctx, api.db, mutated); err == nil || !strings.Contains(err.Error(), "immutable skill conflict") {
+		t.Fatalf("mutation err=%v", err)
+	}
+}
 
 func TestAgentCatalogRegistersIdempotentlyAndSelectsExactRelease(t *testing.T) {
 	api := newTestAPI(t)

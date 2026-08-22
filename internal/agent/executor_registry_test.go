@@ -7,6 +7,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
+	"github.com/huangxinxinyu/nano-notebook/internal/skillcatalog"
 )
 
 type noopDefinitionExecutor struct{}
@@ -26,6 +27,8 @@ func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testi
 	want := map[string]agentcatalog.ToolScheduling{
 		"calculate":       agentcatalog.ToolParallel,
 		"current_time":    agentcatalog.ToolParallel,
+		"read_skill":      agentcatalog.ToolParallel,
+		"read_url":        agentcatalog.ToolParallel,
 		"search_evidence": agentcatalog.ToolParallel,
 		"web_search":      agentcatalog.ToolOrderedSync,
 	}
@@ -88,8 +91,11 @@ func TestExecutorRegistryRejectsDuplicateMissingAndCapabilityExpansion(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	skills := skillcatalog.MustLoadEmbedded()
 	tools := productionToolCapabilities()
 	registrations := productionExecutorRegistrations()
+	missingTool := append([]ExecutorRegistration(nil), registrations...)
+	missingTool[0] = ExecutorRegistration{Identity: "chat_leader", Executor: noopDefinitionExecutor{}, Capability: leaderExecutorCapability(map[string]bool{"current_time": true, "search_evidence": true})}
 	for _, test := range []struct {
 		name          string
 		registrations []ExecutorRegistration
@@ -97,14 +103,10 @@ func TestExecutorRegistryRejectsDuplicateMissingAndCapabilityExpansion(t *testin
 	}{
 		{"duplicate", append(registrations, registrations[0]), "duplicate Executor"},
 		{"missing", registrations[:1], "unknown executor"},
-		{"missing tool ceiling", []ExecutorRegistration{
-			{Identity: "chat_leader", Executor: noopDefinitionExecutor{}, Capability: leaderExecutorCapability(map[string]bool{"current_time": true, "search_evidence": true})},
-			registrations[1],
-			registrations[2],
-		}, "tool"},
+		{"missing tool ceiling", missingTool, "tool"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := NewExecutorRegistry(catalog, prompts, tools, test.registrations...); err == nil || !strings.Contains(err.Error(), test.want) {
+			if _, err := NewExecutorRegistry(catalog, prompts, skills, tools, test.registrations...); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("err=%v want=%q", err, test.want)
 			}
 		})
@@ -151,7 +153,8 @@ func newTestExecutorRegistry(t *testing.T) *ExecutorRegistry {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := NewExecutorRegistry(catalog, prompts, productionToolCapabilities(), productionExecutorRegistrations()...)
+	skills := skillcatalog.MustLoadEmbedded()
+	registry, err := NewExecutorRegistry(catalog, prompts, skills, productionToolCapabilities(), productionExecutorRegistrations()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +165,8 @@ func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 	return map[string]agentcatalog.ToolCapability{
 		"calculate":       {Scheduling: agentcatalog.ToolOrderedSync},
 		"current_time":    {Scheduling: agentcatalog.ToolOrderedSync},
+		"read_skill":      {Scheduling: agentcatalog.ToolOrderedSync},
+		"read_url":        {Scheduling: agentcatalog.ToolOrderedSync},
 		"search_evidence": {Scheduling: agentcatalog.ToolOrderedSync},
 		"web_search":      {Scheduling: agentcatalog.ToolOrderedSync},
 	}
@@ -183,6 +188,8 @@ func productionExecutorRegistrations() []ExecutorRegistration {
 				ModelCalls: 1, Actions: 1, ActionBatch: 1, ContextBytes: 65536, ResultBytes: 262144, Attempts: 3,
 			},
 		}},
+		{Identity: "research_planner", Executor: noopDefinitionExecutor{}, Capability: ResearchPlannerExecutorCapability()},
+		{Identity: "research_root", Executor: noopDefinitionExecutor{}, Capability: ResearchRootExecutorCapability()},
 		{Identity: "studio_structured_output", Executor: noopDefinitionExecutor{}, Capability: StudioStructuredOutputExecutorCapability()},
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
+	"github.com/huangxinxinyu/nano-notebook/internal/skillcatalog"
 )
 
 type DefinitionExecutor interface {
@@ -27,22 +28,28 @@ type ResolvedExecution struct {
 	ModelContext agentcatalog.ResolvedModelContextPolicy
 	Executor     DefinitionExecutor
 	Capability   agentcatalog.ExecutorCapability
+	Skills       []skillcatalog.SkillVersion
 }
 
 type ExecutorRegistry struct {
 	catalog       agentcatalog.Catalog
+	skills        skillcatalog.Catalog
 	registrations map[string]ExecutorRegistration
 }
 
-func NewExecutorRegistry(catalog agentcatalog.Catalog, prompts promptcatalog.Catalog, tools map[string]agentcatalog.ToolCapability, registrations ...ExecutorRegistration) (*ExecutorRegistry, error) {
-	registry := &ExecutorRegistry{catalog: catalog, registrations: make(map[string]ExecutorRegistration, len(registrations))}
+func NewExecutorRegistry(catalog agentcatalog.Catalog, prompts promptcatalog.Catalog, skills skillcatalog.Catalog, tools map[string]agentcatalog.ToolCapability, registrations ...ExecutorRegistration) (*ExecutorRegistry, error) {
+	registry := &ExecutorRegistry{catalog: catalog, skills: skills, registrations: make(map[string]ExecutorRegistration, len(registrations))}
 	bindings := agentcatalog.Bindings{
 		Prompts:   make(map[agentcatalog.Reference]bool),
+		Skills:    make(map[agentcatalog.Reference]bool),
 		Tools:     cloneToolCapabilities(tools),
 		Executors: make(map[string]agentcatalog.ExecutorCapability, len(registrations)),
 	}
 	for _, prompt := range prompts.Versions() {
 		bindings.Prompts[agentcatalog.Reference{Identity: prompt.Identity, Version: prompt.Version}] = true
+	}
+	for _, skill := range skills.Versions() {
+		bindings.Skills[agentcatalog.Reference{Identity: skill.Identity, Version: skill.Version}] = true
 	}
 	for _, registration := range registrations {
 		registration.Identity = strings.TrimSpace(registration.Identity)
@@ -74,14 +81,22 @@ func NewExecutorRegistry(catalog agentcatalog.Catalog, prompts promptcatalog.Cat
 	return registry, nil
 }
 
-func NewNanoExecutorRegistry(catalog agentcatalog.Catalog, prompts promptcatalog.Catalog, chatLeader, research DefinitionExecutor, studio ...DefinitionExecutor) (*ExecutorRegistry, error) {
+func NewNanoExecutorRegistry(catalog agentcatalog.Catalog, prompts promptcatalog.Catalog, skills skillcatalog.Catalog, chatLeader, research, researchPlanner, researchRoot DefinitionExecutor, studio ...DefinitionExecutor) (*ExecutorRegistry, error) {
+	if researchPlanner == nil {
+		researchPlanner = unavailableDefinitionExecutor{code: "research_planner_executor_unavailable"}
+	}
+	if researchRoot == nil {
+		researchRoot = unavailableDefinitionExecutor{code: "research_root_executor_unavailable"}
+	}
 	studioExecutor := DefinitionExecutor(unavailableStudioExecutor{})
 	if len(studio) > 0 && studio[0] != nil {
 		studioExecutor = studio[0]
 	}
-	return NewExecutorRegistry(catalog, prompts, NanoToolCapabilities(),
+	return NewExecutorRegistry(catalog, prompts, skills, NanoToolCapabilities(),
 		ExecutorRegistration{Identity: "chat_leader", Executor: chatLeader, Capability: ChatLeaderExecutorCapability()},
 		ExecutorRegistration{Identity: "research", Executor: research, Capability: ResearchExecutorCapability()},
+		ExecutorRegistration{Identity: "research_planner", Executor: researchPlanner, Capability: ResearchPlannerExecutorCapability()},
+		ExecutorRegistration{Identity: "research_root", Executor: researchRoot, Capability: ResearchRootExecutorCapability()},
 		ExecutorRegistration{Identity: "studio_structured_output", Executor: studioExecutor, Capability: StudioStructuredOutputExecutorCapability()},
 	)
 }
@@ -90,6 +105,12 @@ type unavailableStudioExecutor struct{}
 
 func (unavailableStudioExecutor) ExecuteAttempt(context.Context, Attempt) AttemptResolution {
 	return AttemptResolution{Disposition: AttemptTerminal, ErrorCode: "studio_executor_unavailable"}
+}
+
+type unavailableDefinitionExecutor struct{ code string }
+
+func (e unavailableDefinitionExecutor) ExecuteAttempt(context.Context, Attempt) AttemptResolution {
+	return AttemptResolution{Disposition: AttemptTerminal, ErrorCode: e.code}
 }
 
 func (r *ExecutorRegistry) Resolve(reference agentcatalog.Reference) (ResolvedExecution, error) {
@@ -112,9 +133,17 @@ func (r *ExecutorRegistry) Resolve(reference agentcatalog.Reference) (ResolvedEx
 	if err != nil {
 		return ResolvedExecution{}, err
 	}
+	resolvedSkills := make([]skillcatalog.SkillVersion, 0, len(definition.Skills))
+	for _, reference := range definition.Skills {
+		skill, ok := r.skills.Resolve(reference.Identity, reference.Version)
+		if !ok {
+			return ResolvedExecution{}, fmt.Errorf("Agent Definition %s has no Skill %s", reference, reference)
+		}
+		resolvedSkills = append(resolvedSkills, skill)
+	}
 	return ResolvedExecution{
 		Definition: definition, ModelPolicy: policy, ModelContext: modelContext, Executor: registration.Executor,
-		Capability: cloneExecutorCapability(registration.Capability),
+		Capability: cloneExecutorCapability(registration.Capability), Skills: resolvedSkills,
 	}, nil
 }
 
@@ -127,6 +156,8 @@ func NanoToolCapabilities() map[string]agentcatalog.ToolCapability {
 	return map[string]agentcatalog.ToolCapability{
 		"calculate":       {Scheduling: agentcatalog.ToolParallel},
 		"current_time":    {Scheduling: agentcatalog.ToolParallel},
+		"read_skill":      {Scheduling: agentcatalog.ToolParallel},
+		"read_url":        {Scheduling: agentcatalog.ToolParallel},
 		"search_evidence": {Scheduling: agentcatalog.ToolParallel},
 		"web_search":      {Scheduling: agentcatalog.ToolOrderedSync},
 	}
@@ -164,6 +195,37 @@ func ResearchExecutorCapability() agentcatalog.ExecutorCapability {
 		MaxLimits: agentcatalog.Limits{
 			ModelCalls: 1, Actions: 1, ActionBatch: 1, ContextBytes: 65536, ResultBytes: 262144, Attempts: 3,
 		},
+	}
+}
+
+func ResearchPlannerExecutorCapability() agentcatalog.ExecutorCapability {
+	return agentcatalog.ExecutorCapability{
+		PromptPurposes: map[string]bool{"planner": true},
+		Contracts: map[agentcatalog.Reference]bool{
+			agentcatalog.MustParseReference("research.plan-request@1"): true,
+			agentcatalog.MustParseReference("research.plan-result@1"):  true,
+		},
+		Skills: map[agentcatalog.Reference]bool{agentcatalog.MustParseReference("skill.grill-me@1"): true},
+		Tools:  map[string]bool{"read_skill": true},
+		MaxLimits: agentcatalog.Limits{
+			ModelCalls: 4, Actions: 2, ActionBatch: 1, ContextBytes: 262144, ResultBytes: 131072, Attempts: 3,
+		},
+		MemberVisible: true, CanPublish: true,
+	}
+}
+
+func ResearchRootExecutorCapability() agentcatalog.ExecutorCapability {
+	return agentcatalog.ExecutorCapability{
+		PromptPurposes: map[string]bool{"executor": true, "step_compactor": true, "rollup": true, "reporter": true},
+		Contracts: map[agentcatalog.Reference]bool{
+			agentcatalog.MustParseReference("research.plan-result@1"):   true,
+			agentcatalog.MustParseReference("research.report-result@1"): true,
+		},
+		Tools: map[string]bool{"read_url": true, "search_evidence": true, "web_search": true},
+		MaxLimits: agentcatalog.Limits{
+			ModelCalls: 120, Actions: 100, ActionBatch: 6, ContextBytes: 8388608, ResultBytes: 33554432, Attempts: 5,
+		},
+		MemberVisible: true, CanPublish: true,
 	}
 }
 
@@ -211,6 +273,7 @@ func cloneToolCapabilities(source map[string]agentcatalog.ToolCapability) map[st
 func cloneExecutorCapability(source agentcatalog.ExecutorCapability) agentcatalog.ExecutorCapability {
 	source.PromptPurposes = cloneBoolMap(source.PromptPurposes)
 	source.Contracts = cloneBoolMap(source.Contracts)
+	source.Skills = cloneBoolMap(source.Skills)
 	source.Tools = cloneBoolMap(source.Tools)
 	source.ChildExecutors = cloneBoolMap(source.ChildExecutors)
 	return source

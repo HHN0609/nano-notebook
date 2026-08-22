@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
+	"github.com/huangxinxinyu/nano-notebook/internal/skillcatalog"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -17,11 +18,62 @@ type registeredCatalogEntry struct {
 }
 
 func registerEmbeddedAgentCatalog(ctx context.Context, db *DB) error {
+	skills, err := skillcatalog.LoadEmbedded()
+	if err != nil {
+		return fmt.Errorf("load embedded Skill Catalog: %w", err)
+	}
+	if err := RegisterSkillCatalog(ctx, db, skills); err != nil {
+		return err
+	}
 	catalog, err := agentcatalog.LoadEmbedded()
 	if err != nil {
 		return fmt.Errorf("load embedded Agent Catalog: %w", err)
 	}
 	return RegisterAgentCatalog(ctx, db, catalog)
+}
+
+func RegisterSkillCatalog(ctx context.Context, db *DB, catalog skillcatalog.Catalog) error {
+	if db == nil || db.pool == nil {
+		return errors.New("nil database")
+	}
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, skill := range catalog.Versions() {
+		payload, err := json.Marshal(skill)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into agent_skill_versions(
+				skill_identity,skill_version,canonical_sha256,name,description,body,canonical_payload,source_path
+			) values($1,$2,$3,$4,$5,$6,$7::jsonb,$8)
+			on conflict(skill_identity,skill_version) do nothing
+		`, skill.Identity, skill.Version, skill.SHA256, skill.Name, skill.Description, skill.Body, string(payload), skill.SourcePath); err != nil {
+			return fmt.Errorf("register skill %s@%d: %w", skill.Identity, skill.Version, err)
+		}
+		reference := agentcatalog.Reference{Identity: skill.Identity, Version: skill.Version}
+		if err := verifyCatalogEntry(ctx, tx, "agent_skill_versions", "skill_identity", "skill_version", reference, skill.SHA256, payload, skill.SourcePath, "skill"); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func VerifySkillCatalogReady(ctx context.Context, db *DB, catalog skillcatalog.Catalog) error {
+	if db == nil || db.pool == nil {
+		return errors.New("nil database")
+	}
+	for _, skill := range catalog.Versions() {
+		payload, _ := json.Marshal(skill)
+		reference := agentcatalog.Reference{Identity: skill.Identity, Version: skill.Version}
+		if err := verifyCatalogEntry(ctx, db.pool, "agent_skill_versions", "skill_identity", "skill_version", reference, skill.SHA256, payload, skill.SourcePath, "skill"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func RegisterAgentCatalog(ctx context.Context, db *DB, catalog agentcatalog.Catalog) error {
@@ -120,6 +172,11 @@ func RegisterAgentCatalog(ctx context.Context, db *DB, catalog agentcatalog.Cata
 			return err
 		}
 		prompts, _ := json.Marshal(definition.Prompts)
+		skillAllowlist := definition.Skills
+		if skillAllowlist == nil {
+			skillAllowlist = []agentcatalog.Reference{}
+		}
+		skills, _ := json.Marshal(skillAllowlist)
 		tools, _ := json.Marshal(definition.Tools)
 		children, _ := json.Marshal(definition.Children)
 		limits, _ := json.Marshal(definition.Limits)
@@ -136,14 +193,14 @@ func RegisterAgentCatalog(ctx context.Context, db *DB, catalog agentcatalog.Cata
 				definition_identity,definition_version,canonical_sha256,executor,
 				model_policy_identity,model_policy_version,prompt_bindings,
 				input_contract_identity,input_contract_version,result_contract_identity,result_contract_version,
-				tool_allowlist,children,limits,delegation,canonical_payload,source_path
-			) values($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17)
+				skill_allowlist,tool_allowlist,children,limits,delegation,canonical_payload,source_path
+			) values($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,$18)
 			on conflict(definition_identity,definition_version) do nothing
 		`, definition.Identity, definition.Version, definition.SHA256, definition.Executor,
 			definition.ModelPolicy.Identity, definition.ModelPolicy.Version, string(prompts),
 			definition.Contracts.Input.Identity, definition.Contracts.Input.Version,
 			definition.Contracts.Result.Identity, definition.Contracts.Result.Version,
-			string(tools), string(children), string(limits), delegation, string(payload), definition.SourcePath); err != nil {
+			string(skills), string(tools), string(children), string(limits), delegation, string(payload), definition.SourcePath); err != nil {
 			return fmt.Errorf("register definition %s: %w", definition.Reference(), err)
 		}
 		if err := verifyCatalogEntry(ctx, tx, "agent_definition_versions", "definition_identity", "definition_version", definition.Reference(), definition.SHA256, payload, definition.SourcePath, "definition"); err != nil {

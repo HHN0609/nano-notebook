@@ -25,6 +25,8 @@ func TerminalizeAttemptStateInTx(ctx context.Context, tx pgx.Tx, attempt Attempt
 	isChatLeader := (runtimeKind == "legacy_role" && role != nil && *role == RoleLeader) ||
 		(runtimeKind == "configured" && executorIdentity != nil && *executorIdentity == "chat_leader")
 	isStudio := runtimeKind == "configured" && executorIdentity != nil && *executorIdentity == "studio_structured_output"
+	isConfiguredResearch := runtimeKind == "configured" && executorIdentity != nil &&
+		(*executorIdentity == "research_planner" || *executorIdentity == "research_root")
 	if isResearch {
 		if err := FailResearchPayloadInTx(ctx, tx, attempt.RunID, errorCode); err != nil {
 			return err
@@ -32,7 +34,7 @@ func TerminalizeAttemptStateInTx(ctx context.Context, tx pgx.Tx, attempt Attempt
 		if err := (DelegationKernel{}).TerminalizeInTx(ctx, tx, attempt, DelegationFailed, errorCode); err != nil {
 			return err
 		}
-	} else if isChatLeader || isStudio {
+	} else if isChatLeader || isStudio || isConfiguredResearch {
 		jobTag, err := tx.Exec(ctx, `
 			update agent_jobs set status='failed',lease_token=null,lease_expires_at=null,last_error_code=$4,
 				finished_at=now(),updated_at=now()
@@ -50,6 +52,19 @@ func TerminalizeAttemptStateInTx(ctx context.Context, tx pgx.Tx, attempt Attempt
 		}
 		if jobTag.RowsAffected() != 1 || runTag.RowsAffected() != 1 {
 			return ErrLeaseLost
+		}
+		if isConfiguredResearch {
+			sessionTag, err := tx.Exec(ctx, `
+				update research_sessions set status='failed',error_code=$2,updated_at=now()
+				where (planning_run_id=$1 and status='planning')
+				   or (execution_run_id=$1 and status in ('queued','running','publishing'))
+			`, attempt.RunID, errorCode)
+			if err != nil {
+				return err
+			}
+			if sessionTag.RowsAffected() != 1 {
+				return ErrLeaseLost
+			}
 		}
 		if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs',$1)`, attempt.RunID); err != nil {
 			return err

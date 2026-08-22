@@ -104,6 +104,8 @@ type LeaderRoleExecutor struct{ runtime *LeaderExecutor }
 type ResearchRoleExecutor struct{ runtime *LeaderExecutor }
 type ChatLeaderDefinitionExecutor struct{ runtime *LeaderExecutor }
 type ResearchDefinitionExecutor struct{ runtime *LeaderExecutor }
+type ResearchPlanningDefinitionExecutor struct{ controller *Controller }
+type ResearchRootDefinitionExecutor struct{ controller *Controller }
 
 func NewLeaderRoleExecutor(runtime *LeaderExecutor) *LeaderRoleExecutor {
 	return &LeaderRoleExecutor{runtime: runtime}
@@ -119,6 +121,14 @@ func NewChatLeaderDefinitionExecutor(runtime *LeaderExecutor) *ChatLeaderDefinit
 
 func NewResearchDefinitionExecutor(runtime *LeaderExecutor) *ResearchDefinitionExecutor {
 	return &ResearchDefinitionExecutor{runtime: runtime}
+}
+
+func NewResearchPlanningDefinitionExecutor(controller *Controller) *ResearchPlanningDefinitionExecutor {
+	return &ResearchPlanningDefinitionExecutor{controller: controller}
+}
+
+func NewResearchRootDefinitionExecutor(controller *Controller) *ResearchRootDefinitionExecutor {
+	return &ResearchRootDefinitionExecutor{controller: controller}
 }
 
 func (e *LeaderRoleExecutor) ExecuteAttempt(ctx context.Context, attempt Attempt) AttemptResolution {
@@ -147,4 +157,18 @@ func (e *ResearchDefinitionExecutor) ExecuteAttempt(ctx context.Context, attempt
 		return ClassifyAttempt(errors.New("Research Definition Executor is invalid"), context.Cause(ctx))
 	}
 	return ClassifyAttempt(e.runtime.executeExpectedDefinition(ctx, attempt, "research"), context.Cause(ctx))
+}
+
+func (e *ResearchPlanningDefinitionExecutor) ExecuteAttempt(ctx context.Context, attempt Attempt) AttemptResolution {
+	if e == nil || e.controller == nil {
+		return ClassifyAttempt(errors.New("Research Planning Definition Executor is invalid"), context.Cause(ctx))
+	}
+	return ClassifyAttempt(e.controller.Execute(ctx, attempt), context.Cause(ctx))
+}
+
+func (e *ResearchRootDefinitionExecutor) ExecuteAttempt(ctx context.Context, attempt Attempt) AttemptResolution {
+	if e == nil || e.controller == nil {
+		return ClassifyAttempt(errors.New("Research Root Definition Executor is invalid"), context.Cause(ctx))
+	}
+	return ClassifyAttempt(e.controller.Execute(ctx, attempt), context.Cause(ctx))
 }

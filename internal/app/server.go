@@ -47,6 +47,7 @@ type Config struct {
 	Version             string
 	DefaultModel        string
 	AgentRun            agent.RunConfig
+	ResearchDeadline    time.Duration
 	AgentConfiguration  agent.AgentConfigurationSet
 	AgentCatalog        agentcatalog.Catalog
 	AgentRelease        agentcatalog.Reference
@@ -73,6 +74,8 @@ type Server struct {
 	adminTraceAnalytics collector.AnalyticsQueryClient
 	replaySealer        *replay.Sealer
 	chatAgent           *configuredChatAgent
+	researchPlanner     *configuredChatAgent
+	researchAgent       *configuredChatAgent
 	studioAgents        map[studio.Kind]configuredStudioAgent
 	metrics             *metrics.Catalog
 	taskMetrics         *agent.TaskMetricsRecorder
@@ -138,6 +141,30 @@ func NewServer(cfg Config, db *DB) *Server {
 		panic(err)
 	}
 	chatAgent = &configuredChatAgent{Release: cfg.AgentRelease, Definition: definition, Policy: policy, Context: modelContext}
+	var researchPlanner, researchAgent *configuredChatAgent
+	if plannerRoot, plannerExists := release.Roots["research_planner"]; plannerExists {
+		researchRoot, researchExists := release.Roots["research"]
+		if !researchExists {
+			panic(fmt.Errorf("Agent release %s has Research planner but no Research root", cfg.AgentRelease))
+		}
+		resolveResearch := func(root agentcatalog.Reference) *configuredChatAgent {
+			definition, exists := cfg.AgentCatalog.ResolveDefinition(root)
+			if !exists {
+				panic(fmt.Errorf("Agent release %s has unknown Research root %s", cfg.AgentRelease, root))
+			}
+			policy, exists := cfg.AgentCatalog.ResolveModelPolicy(definition.ModelPolicy)
+			if !exists {
+				panic(fmt.Errorf("Research Agent Definition %s has unknown Model Policy %s", root, definition.ModelPolicy))
+			}
+			modelContext, contextErr := cfg.AgentCatalog.ResolveModelContextPolicy(policy.Reference())
+			if contextErr != nil {
+				panic(contextErr)
+			}
+			return &configuredChatAgent{Release: cfg.AgentRelease, Definition: definition, Policy: policy, Context: modelContext}
+		}
+		researchPlanner = resolveResearch(plannerRoot)
+		researchAgent = resolveResearch(researchRoot)
+	}
 	for kind, purpose := range map[studio.Kind]string{
 		studio.KindReport: "studio_report", studio.KindFlashcards: "studio_flashcards",
 		studio.KindMindMap: "studio_mind_map", studio.KindDataTable: "studio_data_table",
@@ -164,7 +191,7 @@ func NewServer(cfg Config, db *DB) *Server {
 		cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(),
 		runHub: newRunHubWithMetrics(cfg.Metrics), discoveryHub: newRunHubWithMetrics(cfg.Metrics), sourceHub: newRunHubWithMetrics(cfg.Metrics),
 		adminTraces: cfg.AdminTraces, adminTraceAnalytics: cfg.AdminTraceAnalytics, replaySealer: cfg.ReplaySealer,
-		chatAgent: chatAgent, studioAgents: studioAgents,
+		chatAgent: chatAgent, researchPlanner: researchPlanner, researchAgent: researchAgent, studioAgents: studioAgents,
 		metrics: cfg.Metrics, taskMetrics: agent.NewTaskMetricsRecorder(cfg.Metrics),
 	}
 	s.routes()
@@ -216,6 +243,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/source-upload-intents/", s.sourceUploadIntentByID)
 	s.mux.HandleFunc("/api/v1/source-discovery-sessions/", s.sourceDiscoverySessionByID)
 	s.mux.HandleFunc("/api/v1/studio-outputs/", s.studioOutputByID)
+	s.mux.HandleFunc("/api/v1/research-sessions/", s.researchSessionByID)
 	s.mux.HandleFunc("/api/v1/chats/", s.chatByID)
 	s.mux.HandleFunc("/api/v1/agent-runs/", s.agentRunByID)
 	s.mux.HandleFunc("/api/admin/traces", s.adminTraceList)
@@ -1007,6 +1035,7 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 	var runs []agent.RunSnapshot
 	var citations []agent.CitationSnapshot
 	var selectedSourceIDs []string
+	var researchSessions []researchSessionSummary
 	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		chatStore := chat.NewStore(tx)
 		var err error
@@ -1027,6 +1056,10 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 			return err
 		}
 		selectedSourceIDs, err = chatStore.SelectedSourceIDs(r.Context(), userID, chatID)
+		if err != nil {
+			return err
+		}
+		researchSessions, err = listResearchSessionSummaries(r, tx, userID, chatID)
 		return err
 	})
 	if errors.Is(err, chat.ErrNotFound) {
@@ -1037,7 +1070,7 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"chat": chatResult, "messages": messages, "runs": runs, "citations": citations, "source_ids": selectedSourceIDs})
+	writeJSON(w, http.StatusOK, map[string]any{"chat": chatResult, "messages": messages, "runs": runs, "citations": citations, "source_ids": selectedSourceIDs, "research_sessions": researchSessions})
 }
 
 func (s *Server) agentRunByID(w http.ResponseWriter, r *http.Request) {
@@ -1076,6 +1109,14 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, userID, runID
 	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		var err error
 		run, err = agent.NewStore(tx).CancelWithMetrics(r.Context(), userID, runID, s.taskMetrics)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(r.Context(), `
+			update research_sessions set status='cancelled',error_code='member_cancelled',updated_at=now()
+			where user_id=$1 and status in ('planning','queued','running','publishing')
+			  and (planning_run_id=$2 or execution_run_id=$2)
+		`, userID, runID)
 		return err
 	})
 	if errors.Is(err, agent.ErrRunNotFound) {
@@ -1124,6 +1165,13 @@ func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, source
 	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		var err error
 		store := agent.NewStore(tx)
+		var researchRun bool
+		if err := tx.QueryRow(r.Context(), `select exists(select 1 from research_sessions where user_id=$1 and (planning_run_id=$2 or execution_run_id=$2))`, userID, sourceRunID).Scan(&researchRun); err != nil {
+			return err
+		}
+		if researchRun {
+			return agent.ErrRunNotRetryable
+		}
 		manifest, marshalErr := json.Marshal(map[string]any{
 			"agent_release": s.chatAgent.Release.String(), "time_zone": timeZone,
 		})
@@ -1291,6 +1339,7 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		ID        string    `json:"id"`
 		Content   string    `json:"content"`
 		TimeZone  string    `json:"time_zone"`
+		Mode      string    `json:"mode,omitempty"`
 		SourceIDs *[]string `json:"source_ids,omitempty"`
 	}
 	if !readJSON(w, r, &req) {
@@ -1299,6 +1348,22 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 	if _, err := uuid.Parse(req.ID); err != nil || len(req.ID) != 36 || strings.TrimSpace(req.Content) == "" || len([]rune(req.Content)) > 8000 {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.message_invalid")
 		return
+	}
+	req.Mode = strings.TrimSpace(req.Mode)
+	if req.Mode == "" {
+		req.Mode = "chat"
+	}
+	if req.Mode != "chat" && req.Mode != "research" {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.message_invalid")
+		return
+	}
+	selectedAgent := s.chatAgent
+	if req.Mode == "research" {
+		selectedAgent = s.researchPlanner
+		if selectedAgent == nil || s.researchAgent == nil {
+			writeError(w, r, http.StatusConflict, "research_mode_unavailable", "error.research_mode_unavailable")
+			return
+		}
 	}
 	if req.SourceIDs != nil {
 		if len(*req.SourceIDs) > 50 {
@@ -1323,7 +1388,18 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
+	researchSessionID := ""
+	if req.Mode == "research" {
+		researchSessionID, err = newOpaqueID("research")
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+			return
+		}
+	}
 	status := "queued"
+	if req.Mode == "research" {
+		status = "planning"
+	}
 	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "admit_agent_run:"+userID); err != nil {
 			return err
@@ -1340,9 +1416,24 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 			if existing.ChatID != chatID || existing.Role != "user" || existing.Content != req.Content {
 				return chat.ErrMessageConflict
 			}
+			var storedResearch bool
+			if err := tx.QueryRow(r.Context(), `select exists(select 1 from research_sessions where input_message_id=$1)`, req.ID).Scan(&storedResearch); err != nil {
+				return err
+			}
+			if storedResearch != (req.Mode == "research") {
+				return chat.ErrMessageConflict
+			}
 			run, err := agent.NewStore(tx).ByInputMessage(r.Context(), req.ID)
 			if err != nil {
 				return err
+			}
+			if storedResearch {
+				if err := tx.QueryRow(r.Context(), `select id,status,planning_run_id from research_sessions where input_message_id=$1`, req.ID).Scan(&researchSessionID, &status, &runID); err != nil {
+					return err
+				}
+				run.ID = runID
+			} else {
+				status = run.Status
 			}
 			if req.SourceIDs != nil {
 				matches, err := agent.NewStore(tx).EvidenceSetMatches(r.Context(), run.ID, *req.SourceIDs)
@@ -1354,7 +1445,6 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 				}
 			}
 			runID = run.ID
-			status = run.Status
 			return nil
 		}
 		agentStore := agent.NewStore(tx)
@@ -1381,23 +1471,25 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		if err := chatStore.InsertUserMessage(r.Context(), req.ID, chatID, req.Content); err != nil {
 			return err
 		}
-		promptVersion := agent.BarePromptVersion
-		if len(sourceIDs) > 0 {
-			promptVersion = agent.GroundedPromptVersion
-		}
 		timeZone := normalizeBrowserTimeZone(req.TimeZone)
 		manifest, err := json.Marshal(map[string]any{
-			"agent_release": s.chatAgent.Release.String(), "time_zone": timeZone,
-			"selected_source_count": len(sourceIDs),
+			"agent_release": selectedAgent.Release.String(), "time_zone": timeZone,
+			"selected_source_count": len(sourceIDs), "mode": req.Mode,
+			"research_session_id": researchSessionID,
 		})
 		if err != nil {
 			return err
 		}
-		if err := agentStore.CreateConfiguredChatQueued(r.Context(), agent.ConfiguredChatAdmission{
+		admission := agent.ConfiguredChatAdmission{
 			RunID: runID, UserID: userID, ChatID: chatID, InputMessageID: req.ID,
-			Definition: s.chatAgent.Definition, ModelPolicy: s.chatAgent.Policy, ModelContext: s.chatAgent.Context,
+			Definition: selectedAgent.Definition, ModelPolicy: selectedAgent.Policy, ModelContext: selectedAgent.Context,
 			DeadlineAt: time.Now().Add(s.cfg.AgentRun.Deadline), ContextManifest: manifest,
-		}); err != nil {
+		}
+		if req.Mode == "research" {
+			if err := agentStore.CreateConfiguredResearchPlanningQueued(r.Context(), researchSessionID, admission); err != nil {
+				return err
+			}
+		} else if err := agentStore.CreateConfiguredChatQueued(r.Context(), admission); err != nil {
 			return err
 		}
 		if err := agentStore.PinEvidenceSet(r.Context(), runID, userID, sourceIDs); err != nil {
@@ -1406,8 +1498,7 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {
 			return err
 		}
-		traceModel, tracePrompt := s.cfg.DefaultModel, promptVersion
-		traceModel, tracePrompt = s.chatAgent.Policy.ProviderModel, s.chatAgent.Definition.Reference().String()
+		traceModel, tracePrompt := selectedAgent.Policy.ProviderModel, selectedAgent.Definition.Reference().String()
 		if err := agent.StartRunTraceInTx(r.Context(), tx, runID, traceModel, tracePrompt, nil); err != nil {
 			return err
 		}
@@ -1438,7 +1529,11 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"message_id": req.ID, "run_id": runID, "status": status})
+	response := map[string]any{"message_id": req.ID, "mode": req.Mode, "run_id": runID, "status": status}
+	if researchSessionID != "" {
+		response["research_session_id"] = researchSessionID
+	}
+	writeJSON(w, http.StatusAccepted, response)
 }
 
 func normalizeBrowserTimeZone(value string) string {

@@ -119,8 +119,10 @@ type finalDraftCheckpointPayload struct {
 	Text string `json:"text"`
 }
 
+const maxFinalDraftCheckpointBytes = 512 * 1024
+
 func NewFinalDraftCheckpoint(decisionNo int, draft models.FinalDraft) (PendingCheckpoint, error) {
-	if decisionNo < 1 || len([]byte(draft.Text)) > 64*1024 || draft.Validate() != nil {
+	if decisionNo < 1 || len([]byte(draft.Text)) > maxFinalDraftCheckpointBytes || draft.Validate() != nil {
 		return PendingCheckpoint{}, errors.New("invalid Final Draft checkpoint")
 	}
 	encoded, err := json.Marshal(finalDraftCheckpointPayload{Text: draft.Text})

@@ -40,6 +40,8 @@ func NewWebSearchAction(provider websearch.Provider) Action {
 	return &webSearchAction{provider: provider}
 }
 
+func (*webSearchAction) CrashReplaySafe() bool { return true }
+
 func (*webSearchAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
 		Name:        "web_search",
@@ -55,7 +57,7 @@ func (a *webSearchAction) ValidateInput(raw json.RawMessage) error {
 
 func (a *webSearchAction) Execute(ctx context.Context, request ActionRequest) (ActionResult, error) {
 	if a == nil || a.provider == nil {
-		return ActionResult{}, websearch.ErrNotConfigured
+		return ActionResult{Status: ActionDomainError, ErrorCode: "web_search_unavailable"}, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return ActionResult{}, err
@@ -68,10 +70,13 @@ func (a *webSearchAction) Execute(ctx context.Context, request ActionRequest) (A
 	for _, query := range input.Queries {
 		candidates, err := a.provider.Search(ctx, websearch.Request{Query: query, Count: 10})
 		if err != nil {
-			return ActionResult{}, err
+			if contextErr := ctx.Err(); contextErr != nil {
+				return ActionResult{}, contextErr
+			}
+			return webSearchDomainError(err), nil
 		}
 		if len(candidates) > 10 {
-			return ActionResult{}, websearch.ErrInvalidResponse
+			return ActionResult{Status: ActionDomainError, ErrorCode: "web_search_invalid_response"}, nil
 		}
 		result := webSearchQueryResult{Query: query, Candidates: make([]webSearchCandidateView, 0, len(candidates))}
 		for _, candidate := range candidates {
@@ -87,6 +92,19 @@ func (a *webSearchAction) Execute(ctx context.Context, request ActionRequest) (A
 		return ActionResult{}, err
 	}
 	return ActionResult{Status: ActionSucceeded, Output: payload}, nil
+}
+
+func webSearchDomainError(err error) ActionResult {
+	code := "web_search_unavailable"
+	switch {
+	case errors.Is(err, websearch.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
+		code = "web_search_timeout"
+	case errors.Is(err, websearch.ErrRateLimited):
+		code = "web_search_rate_limited"
+	case errors.Is(err, websearch.ErrInvalidResponse), errors.Is(err, websearch.ErrInvalidQuery):
+		code = "web_search_invalid_response"
+	}
+	return ActionResult{Status: ActionDomainError, ErrorCode: code}
 }
 
 func decodeWebSearchInput(raw json.RawMessage) (webSearchInput, error) {

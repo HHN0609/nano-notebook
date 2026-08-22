@@ -13,6 +13,11 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 	want := map[string]string{
 		"agent.leader-router":                         "select_leader_route.v1",
 		"agent.research-planner":                      "submit_research_queries.v1",
+		"agent.deep-research-planner":                 "research_plan_text.v1",
+		"agent.deep-research-executor":                "research_execution_text.v1",
+		"agent.deep-research-step-compactor":          "research_step_capsule_text.v1",
+		"agent.deep-research-rollup":                  "research_rollup_text.v1",
+		"agent.deep-research-reporter":                "research_report_text.v1",
 		"agent.chat-composer-bare":                    "final_draft_text.v1",
 		"agent.chat-composer-grounded":                "grounded_final_draft_text.v1",
 		"agent.query-contextualizer":                  "search_evidence.v1",

@@ -21,6 +21,7 @@ type ToolCapability struct {
 type ExecutorCapability struct {
 	PromptPurposes map[string]bool
 	Contracts      map[Reference]bool
+	Skills         map[Reference]bool
 	Tools          map[string]bool
 	ChildExecutors map[string]bool
 	MaxLimits      Limits
@@ -31,6 +32,7 @@ type ExecutorCapability struct {
 
 type Bindings struct {
 	Prompts   map[Reference]bool
+	Skills    map[Reference]bool
 	Tools     map[string]ToolCapability
 	Executors map[string]ExecutorCapability
 }
@@ -58,6 +60,11 @@ func (c Catalog) ValidateBindings(bindings Bindings) error {
 		for _, contract := range []Reference{definition.Contracts.Input, definition.Contracts.Result} {
 			if !capability.Contracts[contract] {
 				return fmt.Errorf("definition %s uses unsupported contract %s", reference, contract)
+			}
+		}
+		for _, skill := range definition.Skills {
+			if !bindings.Skills[skill] || !capability.Skills[skill] {
+				return fmt.Errorf("definition %s references unbound skill %s", reference, skill)
 			}
 		}
 		for _, tool := range definition.Tools {

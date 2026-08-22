@@ -346,7 +346,7 @@ func TestControllerExecutesAcceptedProductionActionOnlyAcrossMCP(t *testing.T) {
 	}
 }
 
-func TestMCPToolPlaneClassifiesRetryableWebSearchFailure(t *testing.T) {
+func TestMCPToolPlaneReturnsRecoverableWebSearchFailureToTheModel(t *testing.T) {
 	catalog, _ := agentcatalog.LoadEmbedded()
 	provider := &webSearchActionProvider{err: websearch.ErrRateLimited}
 	registry, err := NewMCPToolRegistry(MCPToolRegistration{Action: NewWebSearchAction(provider), Scheduling: agentcatalog.ToolOrderedSync})
@@ -365,9 +365,9 @@ func TestMCPToolPlaneClassifiesRetryableWebSearchFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	_, err = session.CallTool(context.Background(), "web_search", json.RawMessage(`{"queries":["alpha"]}`), "research:web_search:0")
-	if !isToolErrorKind(err, ToolErrorInfrastructure) || !errors.Is(err, websearch.ErrRateLimited) {
-		t.Fatalf("err=%v", err)
+	result, err := session.CallTool(context.Background(), "web_search", json.RawMessage(`{"queries":["alpha"]}`), "research:web_search:0")
+	if err != nil || result.Status != ActionDomainError || result.ErrorCode != "web_search_rate_limited" {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
 

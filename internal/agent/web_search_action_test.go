@@ -54,6 +54,13 @@ func TestWebSearchActionExecutesOneBoundedOrderedBatch(t *testing.T) {
 	}
 }
 
+func TestWebSearchActionIsCheckpointReplaySafe(t *testing.T) {
+	policy, ok := NewWebSearchAction(&webSearchActionProvider{}).(CrashReplayPolicy)
+	if !ok || !policy.CrashReplaySafe() {
+		t.Fatal("web_search must replay an incomplete checkpoint after a Worker crash")
+	}
+}
+
 func TestWebSearchActionRejectsUnboundedOrMutableInputShape(t *testing.T) {
 	action := NewWebSearchAction(&webSearchActionProvider{})
 	tooLong := strings.Repeat("界", 501)
@@ -68,12 +75,30 @@ func TestWebSearchActionRejectsUnboundedOrMutableInputShape(t *testing.T) {
 	}
 }
 
-func TestWebSearchActionPreservesProviderFailureForToolClassification(t *testing.T) {
-	provider := &webSearchActionProvider{err: websearch.ErrRateLimited}
-	action := NewWebSearchAction(provider)
-	_, err := action.Execute(context.Background(), ActionRequest{Input: json.RawMessage(`{"queries":["alpha"]}`)})
-	if !errors.Is(err, websearch.ErrRateLimited) {
-		t.Fatalf("err=%v", err)
+func TestWebSearchActionReturnsRecoverableProviderFailuresToTheModel(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		code string
+	}{
+		{err: websearch.ErrNotConfigured, code: "web_search_unavailable"},
+		{err: websearch.ErrTimeout, code: "web_search_timeout"},
+		{err: websearch.ErrRateLimited, code: "web_search_rate_limited"},
+		{err: websearch.ErrUnavailable, code: "web_search_unavailable"},
+		{err: websearch.ErrInvalidResponse, code: "web_search_invalid_response"},
+	} {
+		provider := &webSearchActionProvider{err: test.err}
+		action := NewWebSearchAction(provider)
+		result, err := action.Execute(context.Background(), ActionRequest{Input: json.RawMessage(`{"queries":["alpha"]}`)})
+		if err != nil || result.Status != ActionDomainError || result.ErrorCode != test.code {
+			t.Fatalf("provider error=%v result=%+v err=%v", test.err, result, err)
+		}
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewWebSearchAction(&webSearchActionProvider{}).Execute(canceled, ActionRequest{Input: json.RawMessage(`{"queries":["alpha"]}`)})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled err=%v", err)
 	}
 }
 

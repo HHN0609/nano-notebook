@@ -44,7 +44,7 @@ during the run.
 3. Add a dedicated `research.root` definition with versioned prompts, model
    policy, context policy, Skill allowlist, tools, and long-horizon limits.
 4. Add a trusted, immutable Skill Catalog with progressive disclosure and ship
-   `grill-me@1`.
+   `skill.grill-me@1`.
 5. Wrap the newly added Web Reader service as a model-callable `read_url` Tool.
 6. Support durable multi-round use of `web_search`, `read_url`, Notebook
    evidence, and Skills.
@@ -237,7 +237,7 @@ context.
 `read_skill` accepts only an allowed embedded identity and version. It cannot
 read files or arbitrary paths.
 
-`grill-me@1` helps the Planner identify decisions that materially affect scope
+`skill.grill-me@1` helps the Planner identify decisions that materially affect scope
 or the report. It is optional: explicit Member intent or genuine plan ambiguity
 may trigger it; clear tasks proceed directly to a plan. It must not create an
 unbounded interview.

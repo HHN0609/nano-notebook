@@ -836,6 +836,19 @@ create trigger agent_prompt_versions_immutable
 revoke all on agent_prompt_versions from nano_app, nano_worker;
 grant select on agent_prompt_versions to nano_worker;
 
+create table if not exists agent_skill_versions (
+	skill_identity text not null check (char_length(skill_identity) between 3 and 255),
+	skill_version integer not null check (skill_version > 0),
+	canonical_sha256 text not null check (canonical_sha256 ~ '^[0-9a-f]{64}$'),
+	name text not null check (char_length(name) between 1 and 100),
+	description text not null check (char_length(description) between 1 and 500),
+	body text not null check (char_length(body) > 0),
+	canonical_payload jsonb not null check (jsonb_typeof(canonical_payload)='object'),
+	source_path text not null check (char_length(source_path) between 1 and 500),
+	registered_at timestamptz not null default now(),
+	primary key (skill_identity,skill_version)
+);
+
 create table if not exists agent_contract_versions (
 	contract_identity text not null check (char_length(contract_identity) between 3 and 255),
 	contract_version integer not null check (contract_version > 0),
@@ -916,6 +929,7 @@ create table if not exists agent_definition_versions (
 	input_contract_version integer not null,
 	result_contract_identity text not null,
 	result_contract_version integer not null,
+	skill_allowlist jsonb not null default '[]'::jsonb check (jsonb_typeof(skill_allowlist)='array'),
 	tool_allowlist jsonb not null check (jsonb_typeof(tool_allowlist)='array'),
 	children jsonb not null check (jsonb_typeof(children)='array'),
 	limits jsonb not null check (jsonb_typeof(limits)='object'),
@@ -931,6 +945,9 @@ create table if not exists agent_definition_versions (
 	foreign key (result_contract_identity,result_contract_version)
 		references agent_contract_versions(contract_identity,contract_version)
 );
+
+alter table agent_definition_versions
+	add column if not exists skill_allowlist jsonb not null default '[]'::jsonb check (jsonb_typeof(skill_allowlist)='array');
 
 create table if not exists agent_release_manifests (
 	release_identity text not null check (char_length(release_identity) between 3 and 255),
@@ -955,6 +972,9 @@ $$;
 drop trigger if exists agent_contract_versions_immutable on agent_contract_versions;
 create trigger agent_contract_versions_immutable before update or delete on agent_contract_versions
 	for each row execute function nano_reject_agent_catalog_mutation();
+drop trigger if exists agent_skill_versions_immutable on agent_skill_versions;
+create trigger agent_skill_versions_immutable before update or delete on agent_skill_versions
+	for each row execute function nano_reject_agent_catalog_mutation();
 drop trigger if exists agent_model_policy_versions_immutable on agent_model_policy_versions;
 create trigger agent_model_policy_versions_immutable before update or delete on agent_model_policy_versions
 	for each row execute function nano_reject_agent_catalog_mutation();
@@ -971,8 +991,8 @@ drop trigger if exists agent_release_manifests_immutable on agent_release_manife
 create trigger agent_release_manifests_immutable before update or delete on agent_release_manifests
 	for each row execute function nano_reject_agent_catalog_mutation();
 
-revoke all on agent_contract_versions,agent_model_policy_versions,provider_model_capability_versions,agent_model_context_policy_versions,agent_definition_versions,agent_release_manifests from nano_app,nano_worker;
-grant select on agent_contract_versions,agent_model_policy_versions,provider_model_capability_versions,agent_model_context_policy_versions,agent_definition_versions,agent_release_manifests to nano_worker;
+revoke all on agent_skill_versions,agent_contract_versions,agent_model_policy_versions,provider_model_capability_versions,agent_model_context_policy_versions,agent_definition_versions,agent_release_manifests from nano_app,nano_worker;
+grant select on agent_skill_versions,agent_contract_versions,agent_model_policy_versions,provider_model_capability_versions,agent_model_context_policy_versions,agent_definition_versions,agent_release_manifests to nano_worker;
 
 create table if not exists agent_prompt_sets (
 	id text primary key check (char_length(id) between 3 and 255),
@@ -1241,6 +1261,107 @@ drop trigger if exists agent_runs_sync_chat_run on agent_runs;
 create trigger agent_runs_sync_chat_run
 	after update of output_message_id,status,error_code,started_at,finished_at,updated_at on agent_runs
 	for each row execute function nano_sync_chat_run_projection();
+
+create table if not exists research_sessions (
+	id text primary key check (char_length(id) between 3 and 255),
+	user_id text not null references identity_users(id) on delete cascade,
+	chat_id text not null references chat_chats(id) on delete cascade,
+	input_message_id text not null unique references chat_messages(id) on delete restrict,
+	status text not null check (status in ('planning','awaiting_confirmation','queued','running','publishing','completed','failed','cancelled')),
+	planning_run_id text unique references agent_runs(id) on delete set null,
+	accepted_plan_version integer,
+	execution_run_id text unique references agent_runs(id) on delete set null,
+	current_report_version integer,
+	error_code text check (error_code is null or char_length(error_code) between 1 and 64),
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	completed_at timestamptz,
+	check (status not in ('queued','running','publishing','completed') or accepted_plan_version is not null),
+	check (status not in ('queued','running','publishing','completed') or execution_run_id is not null),
+	check (status <> 'completed' or current_report_version is not null)
+);
+
+create table if not exists research_plan_versions (
+	session_id text not null references research_sessions(id) on delete cascade,
+	version integer not null check (version > 0),
+	plan_json jsonb not null check (jsonb_typeof(plan_json)='object'),
+	producer_run_id text references agent_runs(id) on delete set null,
+	created_by text not null check (created_by in ('model','member')),
+	created_at timestamptz not null default now(),
+	primary key (session_id,version)
+);
+
+create table if not exists research_report_versions (
+	session_id text not null references research_sessions(id) on delete cascade,
+	version integer not null check (version > 0),
+	producer_run_id text not null unique references agent_runs(id) on delete restrict,
+	content_markdown text not null check (char_length(content_markdown) > 0),
+	evidence_stats jsonb not null default '{}'::jsonb check (jsonb_typeof(evidence_stats)='object'),
+	created_at timestamptz not null default now(),
+	primary key (session_id,version)
+);
+
+create table if not exists research_evidence_ledger (
+	session_id text not null references research_sessions(id) on delete cascade,
+	url text not null check (char_length(url) between 1 and 4096),
+	final_url text check (final_url is null or char_length(final_url) between 1 and 4096),
+	title text not null default '' check (char_length(title) <= 2048),
+	status text not null check (status in ('discovered','read','failed')),
+	read_run_id text references agent_runs(id) on delete set null,
+	read_action_id text,
+	content_sha256 text check (content_sha256 is null or content_sha256 ~ '^[0-9a-f]{64}$'),
+	word_count integer check (word_count is null or word_count >= 0),
+	engine text,
+	first_seen_at timestamptz not null default now(),
+	last_seen_at timestamptz not null default now(),
+	primary key (session_id,url)
+);
+
+create table if not exists research_step_capsules (
+	session_id text not null references research_sessions(id) on delete cascade,
+	run_id text not null references agent_runs(id) on delete cascade,
+	decision_no integer not null check (decision_no > 0),
+	start_checkpoint_seq integer not null check (start_checkpoint_seq > 0),
+	end_checkpoint_seq integer not null check (end_checkpoint_seq >= start_checkpoint_seq),
+	content_markdown text not null check (char_length(content_markdown) > 0),
+	source_checkpoint_sha256 text not null check (source_checkpoint_sha256 ~ '^[0-9a-f]{64}$'),
+	created_at timestamptz not null default now(),
+	primary key (session_id,run_id,decision_no),
+	unique (run_id,decision_no)
+);
+
+create table if not exists research_rollups (
+	session_id text not null references research_sessions(id) on delete cascade,
+	version integer not null check (version > 0),
+	first_decision_no integer not null check (first_decision_no > 0),
+	last_decision_no integer not null check (last_decision_no >= first_decision_no),
+	content_markdown text not null check (char_length(content_markdown) > 0),
+	source_capsules_sha256 text not null check (source_capsules_sha256 ~ '^[0-9a-f]{64}$'),
+	created_at timestamptz not null default now(),
+	primary key (session_id,version)
+);
+
+create or replace function nano_reject_research_artifact_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+	raise exception 'Research artifact versions are immutable';
+end
+$$;
+
+drop trigger if exists research_plan_versions_immutable on research_plan_versions;
+create trigger research_plan_versions_immutable before update or delete on research_plan_versions
+	for each row execute function nano_reject_research_artifact_mutation();
+drop trigger if exists research_report_versions_immutable on research_report_versions;
+create trigger research_report_versions_immutable before update or delete on research_report_versions
+	for each row execute function nano_reject_research_artifact_mutation();
+drop trigger if exists research_step_capsules_immutable on research_step_capsules;
+create trigger research_step_capsules_immutable before update or delete on research_step_capsules
+	for each row execute function nano_reject_research_artifact_mutation();
+drop trigger if exists research_rollups_immutable on research_rollups;
+create trigger research_rollups_immutable before update or delete on research_rollups
+	for each row execute function nano_reject_research_artifact_mutation();
 
 create table if not exists agent_run_results (
 	id text primary key check (char_length(id) between 3 and 255),
@@ -2185,6 +2306,12 @@ alter table source_discovery_candidates enable row level security;
 alter table source_discovery_jobs enable row level security;
 alter table agent_runs enable row level security;
 alter table chat_runs enable row level security;
+alter table research_sessions enable row level security;
+alter table research_plan_versions enable row level security;
+alter table research_report_versions enable row level security;
+alter table research_evidence_ledger enable row level security;
+alter table research_step_capsules enable row level security;
+alter table research_rollups enable row level security;
 alter table agent_trees enable row level security;
 alter table agent_run_results enable row level security;
 alter table studio_outputs enable row level security;
@@ -2236,6 +2363,12 @@ grant select, insert, update, delete on
 	chat_messages,
 	agent_runs,
 	chat_runs,
+	research_sessions,
+	research_plan_versions,
+	research_report_versions,
+	research_evidence_ledger,
+	research_step_capsules,
+	research_rollups,
 	studio_outputs,
 	agent_trees,
 	agent_run_evidence_set,
@@ -2260,6 +2393,12 @@ grant select on
 	chat_messages,
 	agent_runs,
 	chat_runs,
+	research_sessions,
+	research_plan_versions,
+	research_report_versions,
+	research_evidence_ledger,
+	research_step_capsules,
+	research_rollups,
 	studio_outputs,
 	agent_trees,
 	agent_run_evidence_set,
@@ -2272,6 +2411,8 @@ to nano_worker;
 grant insert on agent_run_evidence_set to nano_worker;
 grant select, insert on agent_run_results to nano_worker;
 grant insert, update on chat_runs,agent_trees to nano_worker;
+grant select, insert, update on research_sessions,research_evidence_ledger to nano_worker;
+grant select, insert on research_plan_versions,research_report_versions,research_step_capsules,research_rollups to nano_worker;
 grant select, insert, update on studio_outputs to nano_worker;
 grant select, insert, update, delete on
 	agent_run_grounding_plans,
@@ -2975,6 +3116,68 @@ create policy chat_runs_private on chat_runs
 
 drop policy if exists chat_runs_worker on chat_runs;
 create policy chat_runs_worker on chat_runs
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists research_sessions_private on research_sessions;
+create policy research_sessions_private on research_sessions
+	for all to nano_app
+	using (user_id = nullif(current_setting('app.principal_id', true), ''))
+	with check (user_id = nullif(current_setting('app.principal_id', true), ''));
+drop policy if exists research_sessions_worker on research_sessions;
+create policy research_sessions_worker on research_sessions
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists research_plan_versions_private on research_plan_versions;
+create policy research_plan_versions_private on research_plan_versions
+	for all to nano_app using (exists (
+		select 1 from research_sessions session where session.id=research_plan_versions.session_id
+		  and session.user_id=nullif(current_setting('app.principal_id', true), '')
+	)) with check (exists (
+		select 1 from research_sessions session where session.id=research_plan_versions.session_id
+		  and session.user_id=nullif(current_setting('app.principal_id', true), '')
+	));
+drop policy if exists research_plan_versions_worker on research_plan_versions;
+create policy research_plan_versions_worker on research_plan_versions
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists research_report_versions_private on research_report_versions;
+create policy research_report_versions_private on research_report_versions
+	for select to nano_app using (exists (
+		select 1 from research_sessions session where session.id=research_report_versions.session_id
+		  and session.user_id=nullif(current_setting('app.principal_id', true), '')
+	));
+drop policy if exists research_report_versions_worker on research_report_versions;
+create policy research_report_versions_worker on research_report_versions
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists research_evidence_ledger_private on research_evidence_ledger;
+create policy research_evidence_ledger_private on research_evidence_ledger
+	for select to nano_app using (exists (
+		select 1 from research_sessions session where session.id=research_evidence_ledger.session_id
+		  and session.user_id=nullif(current_setting('app.principal_id', true), '')
+	));
+drop policy if exists research_evidence_ledger_worker on research_evidence_ledger;
+create policy research_evidence_ledger_worker on research_evidence_ledger
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists research_step_capsules_private on research_step_capsules;
+create policy research_step_capsules_private on research_step_capsules
+	for select to nano_app using (exists (
+		select 1 from research_sessions session where session.id=research_step_capsules.session_id
+		  and session.user_id=nullif(current_setting('app.principal_id', true), '')
+	));
+drop policy if exists research_step_capsules_worker on research_step_capsules;
+create policy research_step_capsules_worker on research_step_capsules
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists research_rollups_private on research_rollups;
+create policy research_rollups_private on research_rollups
+	for select to nano_app using (exists (
+		select 1 from research_sessions session where session.id=research_rollups.session_id
+		  and session.user_id=nullif(current_setting('app.principal_id', true), '')
+	));
+drop policy if exists research_rollups_worker on research_rollups;
+create policy research_rollups_worker on research_rollups
 	for all to nano_worker using (true) with check (true);
 
 drop policy if exists studio_outputs_app_read on studio_outputs;

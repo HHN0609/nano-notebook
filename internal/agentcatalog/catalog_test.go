@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 8; got != want {
+	if got, want := len(definitions), 10; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -37,6 +37,14 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"research.source-discovery@1": {
 			executor: "research", model: "agent.research-default@1",
 			tools: []string{"web_search"},
+		},
+		"research.planner@1": {
+			executor: "research_planner", model: "agent.deep-research-default@1",
+			tools: []string{"read_skill"},
+		},
+		"research.executor@1": {
+			executor: "research_root", model: "agent.deep-research-default@1",
+			tools: []string{"read_url", "search_evidence", "web_search"},
 		},
 		"studio.report@1": {
 			executor: "studio_structured_output", model: "agent.studio-default@1",
@@ -78,10 +86,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			t.Fatalf("immutable identity missing for %s: %+v", key, definition)
 		}
 	}
-	if got, want := len(catalog.ModelPolicies()), 3; got != want {
+	if got, want := len(catalog.ModelPolicies()), 4; got != want {
 		t.Fatalf("model policies=%d want=%d", got, want)
 	}
-	if got, want := len(catalog.Contracts()), 9; got != want {
+	if got, want := len(catalog.Contracts()), 12; got != want {
 		t.Fatalf("contracts=%d want=%d", got, want)
 	}
 	manifest, ok := catalog.ResolveRelease(MustParseReference("nano.default@1"))
@@ -106,6 +114,18 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		if got := manifestV2.Roots[name].String(); got != wantReference {
 			t.Fatalf("v2 root %s=%q want=%q", name, got, wantReference)
 		}
+	}
+	manifestV5, ok := catalog.ResolveRelease(MustParseReference("nano.default@5"))
+	if !ok || manifestV5.Roots["research_planner"].String() != "research.planner@1" || manifestV5.Roots["research"].String() != "research.executor@1" || manifestV5.Roots["chat"].String() != "chat.leader@3" {
+		t.Fatalf("v5 manifest=%+v ok=%v", manifestV5, ok)
+	}
+	research, ok := catalog.ResolveDefinition(MustParseReference("research.executor@1"))
+	if !ok || research.Limits.ModelCalls < 100 || research.Limits.Actions < 80 || research.Limits.ActionBatch < 4 {
+		t.Fatalf("research definition=%+v ok=%v", research, ok)
+	}
+	planner, ok := catalog.ResolveDefinition(MustParseReference("research.planner@1"))
+	if !ok || len(planner.Skills) != 1 || planner.Skills[0].String() != "skill.grill-me@1" {
+		t.Fatalf("planner definition=%+v ok=%v", planner, ok)
 	}
 }
 
@@ -256,6 +276,52 @@ func TestValidateBindingsAcceptsParallelToolScheduling(t *testing.T) {
 	bindings.Tools = map[string]ToolCapability{"tool": {Scheduling: ToolExclusiveDelegation}}
 	if err := catalog.ValidateBindings(bindings); err == nil || !strings.Contains(strings.ToLower(err.Error()), "scheduling") {
 		t.Fatalf("exclusive_delegation on a regular tool binding err=%v", err)
+	}
+}
+
+func TestDefinitionSkillBindingsAreImmutableAndCapabilityNarrowed(t *testing.T) {
+	files := minimalCatalogFS()
+	files["definitions/agent.test.v1.json"] = mapFile(`{"identity":"agent.test","version":1,"executor":"test","model_policy":"model.test@1","prompts":{"main":"prompt.test@1"},"contracts":{"input":"input.test@1","result":"result.test@1"},"skills":["skill.grill-me@1"],"tools":["tool"],"children":[],"limits":{"model_calls":1,"actions":1,"action_batch":1,"context_bytes":1024,"result_bytes":1024,"attempts":1},"delegation":{"description":"call test agent"}}`)
+	catalog, err := LoadFS(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, ok := catalog.ResolveDefinition(MustParseReference("agent.test@1"))
+	if !ok || len(definition.Skills) != 1 || definition.Skills[0].String() != "skill.grill-me@1" {
+		t.Fatalf("definition=%+v ok=%v", definition, ok)
+	}
+	definition.Skills[0] = MustParseReference("mutated.skill@1")
+	again, _ := catalog.ResolveDefinition(MustParseReference("agent.test@1"))
+	if got := again.Skills[0].String(); got != "skill.grill-me@1" {
+		t.Fatalf("catalog leaked mutable Skills slice: %s", got)
+	}
+
+	bindings := Bindings{
+		Prompts: map[Reference]bool{MustParseReference("prompt.test@1"): true},
+		Skills:  map[Reference]bool{MustParseReference("skill.grill-me@1"): true},
+		Tools:   map[string]ToolCapability{"tool": {Scheduling: ToolOrderedSync}},
+		Executors: map[string]ExecutorCapability{
+			"test": {
+				PromptPurposes: map[string]bool{"main": true}, Skills: map[Reference]bool{MustParseReference("skill.grill-me@1"): true}, Tools: map[string]bool{"tool": true},
+				Contracts: map[Reference]bool{MustParseReference("input.test@1"): true, MustParseReference("result.test@1"): true},
+				MaxLimits: Limits{ModelCalls: 1, Actions: 1, ActionBatch: 1, ContextBytes: 1024, ResultBytes: 1024, Attempts: 1},
+			},
+		},
+	}
+	if err := catalog.ValidateBindings(bindings); err != nil {
+		t.Fatal(err)
+	}
+	delete(bindings.Executors["test"].Skills, MustParseReference("skill.grill-me@1"))
+	if err := catalog.ValidateBindings(bindings); err == nil || !strings.Contains(strings.ToLower(err.Error()), "skill") {
+		t.Fatalf("executor skill expansion err=%v", err)
+	}
+}
+
+func TestDefinitionRejectsDuplicateSkills(t *testing.T) {
+	files := minimalCatalogFS()
+	files["definitions/agent.test.v1.json"] = mapFile(`{"identity":"agent.test","version":1,"executor":"test","model_policy":"model.test@1","prompts":{"main":"prompt.test@1"},"contracts":{"input":"input.test@1","result":"result.test@1"},"skills":["skill.grill-me@1","skill.grill-me@1"],"tools":["tool"],"children":[],"limits":{"model_calls":1,"actions":1,"action_batch":1,"context_bytes":1024,"result_bytes":1024,"attempts":1},"delegation":{"description":"call test agent"}}`)
+	if _, err := LoadFS(files); err == nil || !strings.Contains(strings.ToLower(err.Error()), "skill") {
+		t.Fatalf("duplicate skill err=%v", err)
 	}
 }
 
