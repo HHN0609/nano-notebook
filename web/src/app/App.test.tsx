@@ -174,6 +174,51 @@ test("creates a Report from the selected ready Sources", async () => {
   expect(await within(studio).findByRole("button", { name: "Generated Report" })).toBeEnabled();
 });
 
+test("explains Source verification and lets maintainers approve a pinned report", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  const workspace = authenticatedWorkspaceHandler();
+  let reviewBody: Record<string, unknown> | undefined;
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [{
+      id: "src_review", notebook_id: "nb_test", title: "Unconfirmed report", format: "html", byte_size: 2048,
+      state: "processing", open_action: { kind: "none" }, admission: {
+        report_id: "sar_11111111111111111111111111111111", status: "review_required", score: 0.52,
+        signal_coverage: 0.7, exact_identity_match: false, policy_id: "source-admission-v1",
+        policy_sha256: "a".repeat(64), mode: "enforcement"
+      }
+    }] });
+    if (url.endsWith("/api/v1/sources/src_review/admission") && method === "GET") return json({ admission: {
+      source_id: "src_review", notebook_id: "nb_test", revision_id: "evr_review", mode: "enforcement",
+      report: {
+        id: "sar_11111111111111111111111111111111", policy_id: "source-admission-v1", policy_sha256: "a".repeat(64),
+        status: "review_required", score: 0.52, signal_coverage: 0.7, exact_identity_match: false,
+        components: { provenance: 0.3, extraction: 0.95 },
+        reasons: ["extraction_complete", "exact_identity_required", "score_below_threshold"]
+      },
+      input: { provider_id: "brave", provider_attempts: 1, searches: [{ query: "Unconfirmed report", results: [] }] },
+      provider_id: "brave", provider_attempts: 1, created_at: "2026-08-23T00:00:00Z"
+    } });
+    if (url.endsWith("/api/v1/sources/src_review/admission-review") && method === "POST") {
+      reviewBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ review: { id: "sarv_22222222222222222222222222222222", decision: "approve" } });
+    }
+    return workspace(input, init);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const sources = await screen.findByRole("region", { name: "Sources" });
+  await user.click(await within(sources).findByRole("button", { name: "Needs review · 52%" }));
+  expect(await screen.findByRole("dialog", { name: "Source verification" })).toBeVisible();
+  expect(screen.getByText("No exact source identity was found.")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Approve source" }));
+  await waitFor(() => expect(reviewBody).toEqual({
+    report_id: "sar_11111111111111111111111111111111", decision: "approve", note: ""
+  }));
+});
+
 test("opens a durable Report from Studio Recent", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   const workspace = authenticatedWorkspaceHandler();

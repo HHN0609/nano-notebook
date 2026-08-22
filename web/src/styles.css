@@ -1659,6 +1659,67 @@ span.source-list-title {
   line-height: 1.35;
 }
 
+.source-admission-badge {
+  grid-column: 2 / -1;
+  justify-self: start;
+  margin: -4px 0 2px;
+  border: 0;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #f5eee0;
+  color: #7a5921;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.source-list-item--web .source-admission-badge { grid-column-start: 3; }
+.source-admission-badge--passed { background: #e8f4ed; color: #28704d; }
+.source-admission-badge--private { background: var(--control-background); color: var(--muted-foreground); }
+.source-admission-badge--rejected { background: #fbeceb; color: var(--destructive); }
+
+.source-admission-dialog { overflow-y: auto; }
+
+.source-admission-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.source-admission-metrics div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--control-background);
+}
+
+.source-admission-metrics span,
+.source-admission-loading { color: var(--muted-foreground); font-size: 12px; }
+.source-admission-metrics strong { color: var(--primary-foreground); font-size: 20px; }
+
+.source-admission-reasons {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--secondary-foreground);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.source-admission-review-result {
+  margin: 0;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #e8f4ed;
+  color: #28704d;
+  font-size: 13px;
+}
+
+.source-admission-review-result--reject { background: #fbeceb; color: var(--destructive); }
+
 .source-list-item .nn-button {
   width: 28px;
   min-width: 28px;
