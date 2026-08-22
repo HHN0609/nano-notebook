@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isIPInNonPublicRange, isPublicAddress } from '../src/ip.js';
+import { isIPInNonPublicRange, isPublicAddress, isSyntheticProxyAddress } from '../src/ip.js';
 
 test('public IPv4 addresses pass', () => {
   for (const ip of ['8.8.8.8', '1.1.1.1', '93.184.216.34', '172.15.255.255', '172.32.0.1', '193.168.1.1']) {
@@ -44,6 +44,16 @@ test('IPv4-mapped IPv6 addresses are validated against the IPv4 blocklist', () =
   assert.equal(isIPInNonPublicRange('::ffff:192.168.0.1'), true);
   assert.equal(isIPInNonPublicRange('::ffff:10.0.0.1'), true);
   assert.equal(isPublicAddress('::ffff:8.8.8.8'), true);
+});
+
+test('synthetic DNS proxy ranges are identified narrowly', () => {
+  for (const ip of ['198.18.0.1', '198.19.255.254', 'fdfe:dcba:9876::26']) {
+    assert.equal(isSyntheticProxyAddress(ip), true, ip);
+    assert.equal(isIPInNonPublicRange(ip), true, ip);
+  }
+  for (const ip of ['127.0.0.1', '10.0.0.1', '198.20.0.1', 'fd00::1', '8.8.8.8']) {
+    assert.equal(isSyntheticProxyAddress(ip), false, ip);
+  }
 });
 
 test('invalid ip strings throw', () => {

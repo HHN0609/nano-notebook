@@ -159,6 +159,7 @@ const nonPublicNetworks6 = [
 
 const nonPublicCIDRs4 = nonPublicNetworks4.map((cidr) => new CIDR(cidr));
 const nonPublicCIDRs6 = nonPublicNetworks6.map((cidr) => new CIDR(cidr));
+const syntheticProxyCIDRs = [new CIDR('198.18.0.0/15'), new CIDR('fdfe:dcba:9876::/48')];
 
 /** IPv4-mapped IPv6 range ::ffff:0:0/96, checked against the IPv4 blocklist. */
 const ipv4MappedPrefix = parseIp('::ffff:0.0.0.0');
@@ -185,4 +186,14 @@ export function isIPInNonPublicRange(ip: string): boolean {
 
 export function isPublicAddress(ip: string): boolean {
   return !isIPInNonPublicRange(ip);
+}
+
+/**
+ * Addresses reserved by local transparent DNS proxies such as OrbStack or
+ * Clash fake-IP mode. Callers may trust them only for a hostname lookup;
+ * an IP-literal URL must still be rejected by the normal non-public guard.
+ */
+export function isSyntheticProxyAddress(ip: string): boolean {
+  const parsed = parseIp(ip);
+  return syntheticProxyCIDRs.some((cidr) => cidr.test(parsed));
 }

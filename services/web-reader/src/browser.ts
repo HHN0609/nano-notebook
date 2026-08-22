@@ -21,7 +21,7 @@ import { isIPv4, isIPv6 } from 'node:net';
 import puppeteer, { type Browser, type HTTPRequest } from 'puppeteer-core';
 
 import { ReaderError } from './errors.js';
-import { isIPInNonPublicRange } from './ip.js';
+import { isIPInNonPublicRange, isSyntheticProxyAddress } from './ip.js';
 import { validateUrl } from './fetcher.js';
 import type { Config } from './config.js';
 
@@ -118,7 +118,7 @@ export async function closeBrowser(): Promise<void> {
 export async function renderPage(rawUrl: string, config: Config): Promise<RenderedPage> {
   const target = validateUrl(rawUrl);
   if (!config.allowPrivateTargets) {
-    await assertPublicHost(target.hostname.replace(/^\[|\]$/g, ''));
+    await assertPublicHost(target.hostname.replace(/^\[|\]$/g, ''), config);
   }
 
   const browser = await ensureBrowser(config);
@@ -177,7 +177,7 @@ export async function renderPage(rawUrl: string, config: Config): Promise<Render
 }
 
 /** Pre-flight DNS validation of the initial navigation target. */
-async function assertPublicHost(host: string): Promise<void> {
+async function assertPublicHost(host: string, config: Config): Promise<void> {
   if (isIPv4(host) || isIPv6(host)) {
     if (isIPInNonPublicRange(host)) {
       throw new ReaderError('unsafe_destination', `destination ${host} is a non-public address`);
@@ -194,7 +194,8 @@ async function assertPublicHost(host: string): Promise<void> {
     throw new ReaderError('upstream_failed', `dns resolution failed for ${host}`);
   }
   for (const addr of addresses) {
-    if (isIPInNonPublicRange(addr.address)) {
+    if (isIPInNonPublicRange(addr.address) &&
+        !(config.allowSyntheticProxyTargets && isSyntheticProxyAddress(addr.address))) {
       throw new ReaderError(
         'unsafe_destination',
         `destination ${host} resolves to non-public address ${addr.address}`,
@@ -262,7 +263,10 @@ export async function checkRequestUrl(
   let ok = false;
   try {
     const addresses = await dns.lookup(host, { all: true });
-    ok = addresses.length > 0 && addresses.every((addr) => !isIPInNonPublicRange(addr.address));
+    ok = addresses.length > 0 && addresses.every((addr) =>
+      !isIPInNonPublicRange(addr.address) ||
+      (config.allowSyntheticProxyTargets && isSyntheticProxyAddress(addr.address))
+    );
   } catch {
     ok = false;
   }

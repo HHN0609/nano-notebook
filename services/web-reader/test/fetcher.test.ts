@@ -21,6 +21,7 @@ function baseConfig(overrides: Partial<Config> = {}): Config {
     maxContentChars: 250_000,
     maxRequestBodyBytes: 16 * 1024,
     allowPrivateTargets: true,
+    allowSyntheticProxyTargets: false,
     userAgent: 'test-agent',
     engine: 'lightweight',
     browserExecutable: '',

@@ -39,6 +39,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     maxContentChars: 50_000,
     maxRequestBodyBytes: 16 * 1024,
     allowPrivateTargets: true,
+    allowSyntheticProxyTargets: false,
     userAgent: 'test-agent',
     engine: 'lightweight',
     browserExecutable: '',
@@ -276,9 +277,12 @@ test('parse returns service_busy at the concurrency limit', async () => {
 test('loadConfig validates environment values', () => {
   assert.equal(loadConfig({}).addr, '127.0.0.1:8085');
   assert.equal(loadConfig({ NANO_WEB_READER_SERVICE_TOKEN: 'x' }).serviceToken, 'x');
+  assert.equal(loadConfig({ NANO_WEB_READER_ADDR: ':8085' }).addr, ':8085');
   assert.throws(() => loadConfig({ NANO_WEB_READER_ADDR: 'bad' }));
   assert.throws(() => loadConfig({ NANO_WEB_READER_MAX_CONCURRENT: 'nope' }));
   assert.equal(loadConfig({ NANO_WEB_READER_ALLOW_PRIVATE_TARGETS: 'true' }).allowPrivateTargets, true);
+  assert.equal(loadConfig({}).allowSyntheticProxyTargets, false);
+  assert.equal(loadConfig({ NANO_WEB_READER_ALLOW_SYNTHETIC_PROXY_TARGETS: 'true' }).allowSyntheticProxyTargets, true);
 
   assert.equal(loadConfig({}).engine, 'auto');
   assert.equal(loadConfig({ NANO_WEB_READER_ENGINE: 'lightweight' }).engine, 'lightweight');

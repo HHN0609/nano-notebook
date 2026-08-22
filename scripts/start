@@ -31,8 +31,22 @@ export NANO_FETCHER_DOH_URL="${NANO_FETCHER_DOH_URL:-https://cloudflare-dns.com/
 export NANO_FETCHER_DOH_BOOTSTRAP_ADDR="${NANO_FETCHER_DOH_BOOTSTRAP_ADDR:-1.1.1.1:443}"
 
 docker compose -f infra/compose/compose.yaml up -d
-docker compose -f infra/compose/compose.yaml wait minio-init >/dev/null
-docker compose -f infra/compose/compose.yaml wait kafka-init >/dev/null
+wait_completed_service() {
+  local service="$1"
+  local container_id
+  container_id="$(docker compose -f infra/compose/compose.yaml ps -aq "$service")"
+  if [ -z "$container_id" ]; then
+    echo "$service container is unavailable" >&2
+    return 1
+  fi
+  docker wait "$container_id" >/dev/null
+  if [ "$(docker inspect --format '{{.State.ExitCode}}' "$container_id")" != "0" ]; then
+    echo "$service did not complete successfully" >&2
+    return 1
+  fi
+}
+wait_completed_service minio-init
+wait_completed_service kafka-init
 for i in $(seq 1 60); do
   if docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null 2>&1; then
     break

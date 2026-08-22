@@ -17,6 +17,8 @@ export interface Config {
   maxContentChars: number;
   maxRequestBodyBytes: number;
   allowPrivateTargets: boolean;
+  /** Trust local DNS-proxy synthetic addresses for hostname lookups only. */
+  allowSyntheticProxyTargets: boolean;
   userAgent: string;
   /** Rendering engine policy: lightweight fetch, browser render, or auto upgrade. */
   engine: EngineMode;
@@ -29,7 +31,7 @@ export interface Config {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const addr = env['NANO_WEB_READER_ADDR'] ?? '127.0.0.1:8085';
-  if (!/^[^/\s]+:\d+$/.test(addr)) {
+  if (!/^[^/\s]*:\d+$/.test(addr)) {
     throw new Error(`invalid NANO_WEB_READER_ADDR: ${addr}`);
   }
 
@@ -43,6 +45,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const maxRequestBodyBytes = parsePositiveInt(env['NANO_WEB_READER_MAX_REQUEST_BODY_BYTES'], 16 * 1024, 'NANO_WEB_READER_MAX_REQUEST_BODY_BYTES');
 
   const allowPrivateTargets = (env['NANO_WEB_READER_ALLOW_PRIVATE_TARGETS'] ?? 'false').toLowerCase() === 'true';
+  const allowSyntheticProxyTargets = (env['NANO_WEB_READER_ALLOW_SYNTHETIC_PROXY_TARGETS'] ?? 'false').toLowerCase() === 'true';
 
   const userAgent = env['NANO_WEB_READER_USER_AGENT'] ?? 'Mozilla/5.0 (compatible; NanoWebReader/1; +https://github.com/nano-notebook)';
 
@@ -66,6 +69,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxContentChars,
     maxRequestBodyBytes,
     allowPrivateTargets,
+    allowSyntheticProxyTargets,
     userAgent,
     engine: engineRaw as EngineMode,
     browserExecutable,

@@ -13,7 +13,7 @@ import { isIPv4, isIPv6 } from 'node:net';
 import zlib from 'node:zlib';
 import type { Readable } from 'node:stream';
 
-import { isIPInNonPublicRange } from './ip.js';
+import { isIPInNonPublicRange, isSyntheticProxyAddress } from './ip.js';
 import { ReaderError } from './errors.js';
 import type { Config } from './config.js';
 
@@ -210,7 +210,8 @@ function validatingLookup(
       }
       if (!config.allowPrivateTargets) {
         for (const addr of addresses) {
-          if (isIPInNonPublicRange(addr.address)) {
+          if (isIPInNonPublicRange(addr.address) &&
+              !(config.allowSyntheticProxyTargets && isSyntheticProxyAddress(addr.address))) {
             callback(
               new UnsafeDestinationSignal(`destination ${hostname} resolves to non-public address ${addr.address}`),
               '',
