@@ -199,6 +199,30 @@ services:
     cpus: 2.0
     restart: unless-stopped
 
+  web-reader:
+    image: ${ECR_REGISTRY:-localhost}/nano-notebook-web-reader:${IMAGE_TAG:-latest}
+    environment:
+      NANO_WEB_READER_ADDR: ":8085"
+      NANO_WEB_READER_SERVICE_TOKEN: nano-prod-reader-token
+      NANO_WEB_READER_ENGINE: "auto"
+      NANO_WEB_READER_MAX_CONCURRENT: "4"
+      NANO_WEB_READER_BROWSER_MAX_CONCURRENT: "2"
+      NANO_WEB_READER_BROWSER_EXECUTABLE: /usr/bin/chromium
+    read_only: true
+    tmpfs:
+      # Chromium keeps its profile and cache under HOME=/tmp.
+      - /tmp:size=536870912,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Chromium spawns a browser + renderer + utility process cluster, so the
+    # sidecar needs a higher pid ceiling than the Go sidecars.
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:

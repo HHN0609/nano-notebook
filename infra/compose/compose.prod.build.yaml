@@ -49,3 +49,9 @@ services:
     build:
       context: ../..
       dockerfile: infra/document-renderer/Dockerfile
+
+  web-reader:
+    image: ""
+    build:
+      context: ../..
+      dockerfile: infra/web-reader/Dockerfile

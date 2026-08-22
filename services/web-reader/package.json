@@ -1,0 +1,29 @@
+{
+  "name": "nano-notebook-web-reader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted web page reader service: fetches a URL and returns the parsed main content as clean, LLM-ready Markdown. Parsing follows the jina-ai/reader approach (Mozilla Readability + rule-based Markdown conversion).",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^26.1.0",
+    "puppeteer-core": "^25.8.0",
+    "turndown": "^7.2.0",
+    "turndown-plugin-gfm": "^1.0.2"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^24.0.0",
+    "@types/turndown": "^5.0.5",
+    "typescript": "^5.8.3"
+  }
+}

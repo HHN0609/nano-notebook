@@ -284,6 +284,38 @@ services:
       timeout: 3s
       retries: 20
 
+  web-reader:
+    build:
+      context: ../..
+      dockerfile: infra/web-reader/Dockerfile
+    environment:
+      NANO_WEB_READER_ADDR: ":8085"
+      NANO_WEB_READER_SERVICE_TOKEN: nano-local-reader-token
+      NANO_WEB_READER_ENGINE: "auto"
+      NANO_WEB_READER_MAX_CONCURRENT: "4"
+      NANO_WEB_READER_BROWSER_MAX_CONCURRENT: "2"
+      NANO_WEB_READER_BROWSER_EXECUTABLE: /usr/bin/chromium
+    ports:
+      - "127.0.0.1:8085:8085"
+    read_only: true
+    tmpfs:
+      # Chromium keeps its profile and cache under HOME=/tmp.
+      - /tmp:size=536870912,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Chromium spawns a browser + renderer + utility process cluster, so the
+    # sidecar needs a higher pid ceiling than the Go sidecars.
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8085/health/live').then((r) => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
   mailpit:
     image: axllent/mailpit:v1.30.0
     restart: unless-stopped
