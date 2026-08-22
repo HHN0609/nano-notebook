@@ -576,6 +576,21 @@ create table if not exists source_admission_reports (
 create index if not exists source_admission_reports_source_created_idx
 	on source_admission_reports(source_id, created_at desc, id);
 
+create table if not exists source_admission_reviews (
+	id text primary key check (id ~ '^sarv_[0-9a-f]{32}$'),
+	report_id text not null unique references source_admission_reports(id) on delete cascade,
+	source_id text not null references source_sources(id) on delete cascade,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	revision_id text not null references source_evidence_revisions(id) on delete cascade,
+	reviewer_user_id text not null references identity_users(id) on delete restrict,
+	decision text not null check (decision in ('approve','reject')),
+	note text not null default '' check (char_length(note) <= 500),
+	created_at timestamptz not null default now()
+);
+
+create index if not exists source_admission_reviews_source_created_idx
+	on source_admission_reviews(source_id, created_at desc, id);
+
 create table if not exists source_evidence_coverage (
 	revision_id text primary key references source_evidence_revisions(id) on delete cascade,
 	status text not null check (status in ('complete', 'partial')),
@@ -2317,6 +2332,7 @@ alter table source_processing_jobs enable row level security;
 alter table source_purge_jobs enable row level security;
 alter table source_evidence_revisions enable row level security;
 alter table source_admission_reports enable row level security;
+alter table source_admission_reviews enable row level security;
 alter table source_evidence_coverage enable row level security;
 alter table source_evidence_coverage_gaps enable row level security;
 alter table source_evidence_units enable row level security;
@@ -2408,6 +2424,7 @@ grant select(parent_run_id,child_run_id,state,completed_at,consumed_at,error_cod
 grant update(state,error_code,completed_at,updated_at) on agent_run_delegations to nano_app;
 grant select on retrieval_source_index_builds to nano_app;
 grant select on source_admission_reports to nano_app;
+grant select, insert on source_admission_reviews to nano_app;
 revoke update, delete on platform_capability_grants, platform_replay_access_audit from nano_app;
 revoke insert on platform_capability_grants from nano_app;
 revoke select on platform_replay_access_audit from nano_app;
@@ -2456,6 +2473,7 @@ grant select, insert, update, delete on source_purge_jobs to nano_worker;
 grant select, insert, update, delete on source_evidence_revisions, source_evidence_coverage,
 	source_evidence_coverage_gaps, source_evidence_units, source_viewer_artifacts to nano_worker;
 grant select, insert on source_admission_reports to nano_worker;
+grant select on source_admission_reviews to nano_worker;
 grant select, insert, update, delete on retrieval_index_versions, retrieval_eval_runs to nano_worker;
 grant select, insert, update, delete on retrieval_source_index_builds to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
@@ -2927,6 +2945,15 @@ create policy source_evidence_revisions_app on source_evidence_revisions
 drop policy if exists source_admission_reports_app on source_admission_reports;
 create policy source_admission_reports_app on source_admission_reports
 	for select to nano_app using (nano_has_notebook_capability(notebook_id, 'source.read'));
+drop policy if exists source_admission_reviews_app_select on source_admission_reviews;
+create policy source_admission_reviews_app_select on source_admission_reviews
+	for select to nano_app using (nano_has_notebook_capability(notebook_id, 'source.read'));
+drop policy if exists source_admission_reviews_app_insert on source_admission_reviews;
+create policy source_admission_reviews_app_insert on source_admission_reviews
+	for insert to nano_app with check (
+		reviewer_user_id=nullif(current_setting('app.principal_id', true),'')
+		and nano_has_notebook_capability(notebook_id, 'source.maintain')
+	);
 drop policy if exists source_evidence_units_app on source_evidence_units;
 create policy source_evidence_units_app on source_evidence_units
 	for select to nano_app using (nano_has_notebook_capability(notebook_id, 'source.read'));
@@ -2948,6 +2975,8 @@ drop policy if exists source_evidence_revisions_worker on source_evidence_revisi
 create policy source_evidence_revisions_worker on source_evidence_revisions for all to nano_worker using (true) with check (true);
 drop policy if exists source_admission_reports_worker on source_admission_reports;
 create policy source_admission_reports_worker on source_admission_reports for all to nano_worker using (true) with check (true);
+drop policy if exists source_admission_reviews_worker on source_admission_reviews;
+create policy source_admission_reviews_worker on source_admission_reviews for select to nano_worker using (true);
 drop policy if exists source_evidence_coverage_worker on source_evidence_coverage;
 create policy source_evidence_coverage_worker on source_evidence_coverage for all to nano_worker using (true) with check (true);
 drop policy if exists source_evidence_coverage_gaps_worker on source_evidence_coverage_gaps;

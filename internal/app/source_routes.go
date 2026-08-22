@@ -16,21 +16,23 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourceadmission"
 	"github.com/jackc/pgx/v5"
 	xhtml "golang.org/x/net/html"
 )
 
 type memberSource struct {
-	ID            string           `json:"id"`
-	NotebookID    string           `json:"notebook_id"`
-	Title         string           `json:"title"`
-	Format        source.Format    `json:"format"`
-	ByteSize      int64            `json:"byte_size"`
-	State         string           `json:"state"`
-	FailureReason string           `json:"failure_reason,omitempty"`
-	OpenAction    sourceOpenAction `json:"open_action"`
-	CreatedAt     time.Time        `json:"created_at"`
-	UpdatedAt     time.Time        `json:"updated_at"`
+	ID            string                   `json:"id"`
+	NotebookID    string                   `json:"notebook_id"`
+	Title         string                   `json:"title"`
+	Format        source.Format            `json:"format"`
+	ByteSize      int64                    `json:"byte_size"`
+	State         string                   `json:"state"`
+	FailureReason string                   `json:"failure_reason,omitempty"`
+	OpenAction    sourceOpenAction         `json:"open_action"`
+	CreatedAt     time.Time                `json:"created_at"`
+	UpdatedAt     time.Time                `json:"updated_at"`
+	Admission     *source.AdmissionSummary `json:"admission,omitempty"`
 }
 
 type sourceOpenAction struct {
@@ -49,6 +51,7 @@ func sourceForMember(item source.Source) memberSource {
 	result := memberSource{
 		ID: item.ID, NotebookID: item.NotebookID, Title: item.Title, Format: item.Format,
 		ByteSize: item.ByteSize, State: state, OpenAction: sourceOpenActionFor(item, state), CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+		Admission: item.Admission,
 	}
 	if state == "failed" {
 		result.FailureReason = source.SafeFailureReason(item.FailureCode)
@@ -374,7 +377,7 @@ func (s *Server) sourceByID(w http.ResponseWriter, r *http.Request) {
 	}
 	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/sources/"), "/")
 	parts := strings.Split(remainder, "/")
-	if parts[0] == "" || len(parts) > 2 || (len(parts) == 2 && parts[1] != "retry" && parts[1] != "viewer-asset" && parts[1] != "original-asset") {
+	if parts[0] == "" || len(parts) > 2 || (len(parts) == 2 && parts[1] != "retry" && parts[1] != "viewer-asset" && parts[1] != "original-asset" && parts[1] != "admission" && parts[1] != "admission-review") {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
 		return
 	}
@@ -384,6 +387,22 @@ func (s *Server) sourceByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "original-asset" {
 		s.writeSourceOriginalAsset(w, r, user.ID, parts[0])
+		return
+	}
+	if r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "admission" {
+		var admission sourceadmission.StoredAssessment
+		err := s.db.WithRequestPrincipal(r.Context(), user.ID, func(tx pgx.Tx) error {
+			var readErr error
+			admission, readErr = sourceadmission.NewMemberStore(tx).Detail(r.Context(), parts[0])
+			return readErr
+		})
+		if err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"admission": admission})
+		} else if errors.Is(err, sourceadmission.ErrAdmissionNotFound) {
+			writeError(w, r, http.StatusNotFound, "not_found", "error.source_not_found")
+		} else {
+			writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		}
 		return
 	}
 	if r.Method == http.MethodGet && len(parts) == 1 {
@@ -412,6 +431,27 @@ func (s *Server) sourceByID(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 	switch {
+	case r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "admission-review":
+		var req struct {
+			ReportID string                         `json:"report_id"`
+			Decision sourceadmission.ReviewDecision `json:"decision"`
+			Note     string                         `json:"note"`
+		}
+		if !readJSON(w, r, &req) {
+			return
+		}
+		var review sourceadmission.Review
+		err = s.db.WithRequestPrincipal(r.Context(), user.ID, func(tx pgx.Tx) error {
+			var reviewErr error
+			review, _, reviewErr = sourceadmission.NewMemberStore(tx).Review(r.Context(), sourceadmission.ReviewCommand{
+				SourceID: parts[0], ReportID: req.ReportID, Decision: req.Decision, Note: req.Note,
+			})
+			return reviewErr
+		})
+		if err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"review": review})
+			return
+		}
 	case r.Method == http.MethodPatch && len(parts) == 1:
 		var req struct {
 			Title string `json:"title"`
@@ -458,6 +498,18 @@ func (s *Server) sourceByID(w http.ResponseWriter, r *http.Request) {
 
 	if errors.Is(err, source.ErrNotFound) {
 		writeError(w, r, http.StatusNotFound, "not_found", "error.source_not_found")
+		return
+	}
+	if errors.Is(err, sourceadmission.ErrAdmissionNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.source_not_found")
+		return
+	}
+	if errors.Is(err, sourceadmission.ErrReviewConflict) {
+		writeError(w, r, http.StatusConflict, "source_admission_review_conflict", "error.source_state_conflict")
+		return
+	}
+	if errors.Is(err, sourceadmission.ErrInvalidReview) {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.source_invalid")
 		return
 	}
 	if errors.Is(err, source.ErrStateConflict) {

@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,109 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 )
+
+func TestSourceAdmissionReviewApprovesPinnedReportAndResumesWithoutSearch(t *testing.T) {
+	api := newTestAPI(t)
+	owner, ownerCSRF := api.registerWithCSRF(t, "source-admission-review-owner@example.com")
+	viewer, viewerCSRF := api.registerWithCSRF(t, "source-admission-review-viewer@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-admission-review")
+	ownerID := sourceTestUserID(t, api, "source-admission-review-owner@example.com")
+	viewerID := sourceTestUserID(t, api, "source-admission-review-viewer@example.com")
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into notebook_memberships(notebook_id,user_id,role) values($1,$2,'viewer')
+	`, notebookID, viewerID); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("A public Source held for a member review before retrieval projection.")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_admission_review", "srcjob_admission_review", source.FormatTXT, payload)
+	identity, err := source.CanonicalURLIdentity("https://publisher.example/review")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set input_kind='url',title='Review This Source',
+			origin_url='https://publisher.example/review',final_url='https://publisher.example/review',
+			origin_url_identity=$2,final_url_identity=$2 where id=$1
+	`, "src_admission_review", identity); err != nil {
+		t.Fatal(err)
+	}
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%t err=%v", lease, ok, err)
+	}
+	provider := &stubWebSearchProvider{}
+	projection := newRecordingEvidenceProjection(t, api)
+	processor := sourceprocessing.NewProcessor(
+		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, projection,
+		sourceprocessing.Config{ExtractionConfigID: "extract-text-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
+	).WithAdmission(configuredAdmissionService(t, api, provider, sourceadmission.ModeEnforcement))
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatalf("first ProcessLease: %v", err)
+	}
+	assertSourceJobState(t, api, "src_admission_review", "srcjob_admission_review", source.StateQualifying, "succeeded", "")
+	if len(provider.requests) != 1 {
+		t.Fatalf("initial Web Search requests=%d want=1", len(provider.requests))
+	}
+	listed := api.getWithCookie(t, "/api/v1/notebooks/"+notebookID+"/sources", viewer)
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"admission":{"report_id":"sar_`) ||
+		!strings.Contains(listed.Body.String(), `"status":"review_required"`) {
+		t.Fatalf("Source list omitted compact admission summary: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+
+	detail := api.getWithCookie(t, "/api/v1/sources/src_admission_review/admission", viewer)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("viewer admission detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	var detailBody struct {
+		Admission struct {
+			Report struct {
+				ID string `json:"id"`
+			} `json:"report"`
+		} `json:"admission"`
+	}
+	decodeBody(t, detail, &detailBody)
+	reportID := detailBody.Admission.Report.ID
+	if reportID == "" {
+		t.Fatal("admission detail omitted report id")
+	}
+
+	viewerReview := api.postJSONWithCookieAndCSRF(t, "/api/v1/sources/src_admission_review/admission-review", map[string]any{
+		"report_id": reportID, "decision": "approve", "note": "I checked the publisher.",
+	}, viewer, viewerCSRF, viewerCSRF.Value, "")
+	if viewerReview.Code != http.StatusNotFound {
+		t.Fatalf("viewer review status=%d body=%s", viewerReview.Code, viewerReview.Body.String())
+	}
+	stale := api.postJSONWithCookieAndCSRF(t, "/api/v1/sources/src_admission_review/admission-review", map[string]any{
+		"report_id": "sar_00000000000000000000000000000000", "decision": "approve",
+	}, owner, ownerCSRF, ownerCSRF.Value, "")
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale review status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	approved := api.postJSONWithCookieAndCSRF(t, "/api/v1/sources/src_admission_review/admission-review", map[string]any{
+		"report_id": reportID, "decision": "approve", "note": "Publisher identity verified.",
+	}, owner, ownerCSRF, ownerCSRF.Value, "")
+	if approved.Code != http.StatusOK {
+		t.Fatalf("approve status=%d body=%s", approved.Code, approved.Body.String())
+	}
+	assertSourceJobState(t, api, "src_admission_review", "srcjob_admission_review", source.StateQualifying, "queued", "")
+
+	resumed, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("resumed Claim=%+v ok=%t err=%v", resumed, ok, err)
+	}
+	if err := processor.ProcessLease(context.Background(), resumed); err != nil {
+		t.Fatalf("resumed ProcessLease: %v", err)
+	}
+	assertSourceJobState(t, api, "src_admission_review", "srcjob_admission_review", source.StateReady, "succeeded", "")
+	if len(provider.requests) != 1 || projection.builds != 1 || projection.verifications != 1 {
+		t.Fatalf("resume repeated Search or skipped projection: searches=%d projection=%+v", len(provider.requests), projection)
+	}
+}
 
 func TestSourceAdmissionStorePublishesImmutableReportIdempotently(t *testing.T) {
 	api := newTestAPI(t)

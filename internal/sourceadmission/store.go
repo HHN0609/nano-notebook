@@ -38,6 +38,7 @@ type StoredAssessment struct {
 	RevisionID string    `json:"revision_id"`
 	Mode       Mode      `json:"mode"`
 	CreatedAt  time.Time `json:"created_at"`
+	Review     *Review   `json:"review,omitempty"`
 }
 
 type Store struct {
@@ -158,11 +159,18 @@ func (store *Store) Current(ctx context.Context, sourceID, revisionID, policySHA
 func currentInTx(ctx context.Context, tx pgx.Tx, sourceID, revisionID, policySHA256 string) (StoredAssessment, bool, error) {
 	var stored StoredAssessment
 	var assessmentJSON []byte
+	var reviewID, reviewerID, decision, note *string
+	var reviewCreatedAt *time.Time
 	err := tx.QueryRow(ctx, `
-		select notebook_id,runtime_mode,assessment_json,created_at
-		from source_admission_reports
-		where source_id=$1 and revision_id=$2 and policy_sha256=$3
-	`, sourceID, revisionID, policySHA256).Scan(&stored.NotebookID, &stored.Mode, &assessmentJSON, &stored.CreatedAt)
+		select r.notebook_id,r.runtime_mode,r.assessment_json,r.created_at,
+			review.id,review.reviewer_user_id,review.decision,review.note,review.created_at
+		from source_admission_reports r
+		left join source_admission_reviews review on review.report_id=r.id
+		where r.source_id=$1 and r.revision_id=$2 and r.policy_sha256=$3
+	`, sourceID, revisionID, policySHA256).Scan(
+		&stored.NotebookID, &stored.Mode, &assessmentJSON, &stored.CreatedAt,
+		&reviewID, &reviewerID, &decision, &note, &reviewCreatedAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return StoredAssessment{}, false, nil
 	}
@@ -174,6 +182,10 @@ func currentInTx(ctx context.Context, tx pgx.Tx, sourceID, revisionID, policySHA
 	}
 	stored.SourceID = sourceID
 	stored.RevisionID = revisionID
+	stored.Review = hydrateReview(reviewID, reviewerID, decision, note, reviewCreatedAt)
+	if stored.Review != nil {
+		stored.Review.ReportID = stored.Report.ID
+	}
 	return stored, true, nil
 }
 

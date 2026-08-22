@@ -82,7 +82,8 @@ func (service *Service) Qualify(
 
 func qualificationFromStored(stored StoredAssessment) Qualification {
 	return Qualification{
-		StoredAssessment:      stored,
-		PauseBeforeProjection: stored.Mode == ModeEnforcement && stored.Report.Status == StatusReviewRequired,
+		StoredAssessment: stored,
+		PauseBeforeProjection: stored.Mode == ModeEnforcement && stored.Report.Status == StatusReviewRequired &&
+			(stored.Review == nil || stored.Review.Decision != ReviewApproved),
 	}
 }

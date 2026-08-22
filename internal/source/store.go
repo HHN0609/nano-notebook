@@ -147,21 +147,34 @@ const (
 )
 
 type Source struct {
-	ID                string    `json:"id"`
-	NotebookID        string    `json:"notebook_id"`
-	InputKind         string    `json:"-"`
-	Title             string    `json:"title"`
-	Format            Format    `json:"format"`
-	MediaType         string    `json:"media_type"`
-	ByteSize          int64     `json:"byte_size"`
-	ContentSHA256     string    `json:"content_sha256"`
-	OriginalObjectKey string    `json:"-"`
-	OriginURL         string    `json:"-"`
-	FinalURL          string    `json:"-"`
-	State             State     `json:"state"`
-	FailureCode       string    `json:"-"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                string            `json:"id"`
+	NotebookID        string            `json:"notebook_id"`
+	InputKind         string            `json:"-"`
+	Title             string            `json:"title"`
+	Format            Format            `json:"format"`
+	MediaType         string            `json:"media_type"`
+	ByteSize          int64             `json:"byte_size"`
+	ContentSHA256     string            `json:"content_sha256"`
+	OriginalObjectKey string            `json:"-"`
+	OriginURL         string            `json:"-"`
+	FinalURL          string            `json:"-"`
+	State             State             `json:"state"`
+	FailureCode       string            `json:"-"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
+	Admission         *AdmissionSummary `json:"admission,omitempty"`
+}
+
+type AdmissionSummary struct {
+	ReportID           string   `json:"report_id"`
+	Status             string   `json:"status"`
+	Score              *float64 `json:"score,omitempty"`
+	SignalCoverage     float64  `json:"signal_coverage"`
+	ExactIdentityMatch bool     `json:"exact_identity_match"`
+	PolicyID           string   `json:"policy_id"`
+	PolicySHA256       string   `json:"policy_sha256"`
+	Mode               string   `json:"mode"`
+	ReviewDecision     string   `json:"review_decision,omitempty"`
 }
 
 func SafeFailureReason(internalCode string) string {
@@ -938,7 +951,8 @@ func (s *Store) ListForNotebook(ctx context.Context, notebookID string) ([]Sourc
 				else s.title
 			end,
 			s.format, s.media_type, s.byte_size,
-			s.content_sha256, s.original_object_key, coalesce(s.final_url,''), s.state, coalesce(j.last_error_code,''), s.created_at, s.updated_at
+			s.content_sha256, s.original_object_key, coalesce(s.final_url,''), s.state, coalesce(j.last_error_code,''), s.created_at, s.updated_at,
+			a.id,a.status,a.score,a.signal_coverage,a.exact_identity_match,a.policy_id,a.policy_sha256,a.runtime_mode,review.decision
 		from source_sources s
 		left join lateral (
 			select title from source_discovery_candidates
@@ -948,6 +962,10 @@ func (s *Store) ListForNotebook(ctx context.Context, notebookID string) ([]Sourc
 		left join lateral (
 			select last_error_code from source_processing_jobs where source_id=s.id order by created_at desc, id desc limit 1
 		) j on true
+		left join lateral (
+			select * from source_admission_reports where source_id=s.id order by created_at desc,id desc limit 1
+		) a on true
+		left join source_admission_reviews review on review.report_id=a.id
 		where s.notebook_id = $1
 		order by s.created_at, s.id`, notebookID)
 	if err != nil {
@@ -957,12 +975,25 @@ func (s *Store) ListForNotebook(ctx context.Context, notebookID string) ([]Sourc
 	sources := make([]Source, 0)
 	for rows.Next() {
 		var item Source
+		var reportID, admissionStatus, policyID, policySHA256, mode, reviewDecision *string
+		var score, signalCoverage *float64
+		var exactIdentityMatch *bool
 		if err := rows.Scan(
 			&item.ID, &item.NotebookID, &item.InputKind, &item.Title, &item.Format, &item.MediaType,
 			&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.FinalURL, &item.State, &item.FailureCode,
 			&item.CreatedAt, &item.UpdatedAt,
+			&reportID, &admissionStatus, &score, &signalCoverage, &exactIdentityMatch, &policyID, &policySHA256, &mode, &reviewDecision,
 		); err != nil {
 			return nil, err
+		}
+		if reportID != nil && admissionStatus != nil && signalCoverage != nil && exactIdentityMatch != nil && policyID != nil && policySHA256 != nil && mode != nil {
+			item.Admission = &AdmissionSummary{
+				ReportID: *reportID, Status: *admissionStatus, Score: score, SignalCoverage: *signalCoverage,
+				ExactIdentityMatch: *exactIdentityMatch, PolicyID: *policyID, PolicySHA256: *policySHA256, Mode: *mode,
+			}
+			if reviewDecision != nil {
+				item.Admission.ReviewDecision = *reviewDecision
+			}
 		}
 		sources = append(sources, item)
 	}
