@@ -202,8 +202,8 @@ func TestSourceProcessorEmitsSafeWorkloadAndStageTraceMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	envelopes := sink.snapshot()
-	if len(envelopes) != 12 {
-		t.Fatalf("Trace records=%d, want root plus five complete stages: %#v", len(envelopes), envelopes)
+	if len(envelopes) != 14 {
+		t.Fatalf("Trace records=%d, want root plus six complete stages: %#v", len(envelopes), envelopes)
 	}
 	descriptor := envelopes[0].Trace
 	if descriptor.WorkloadKind != collector.WorkloadSourceProcessing || descriptor.WorkloadID != "srcjob_processing_trace/attempt-1" ||
@@ -220,7 +220,7 @@ func TestSourceProcessorEmitsSafeWorkloadAndStageTraceMetadata(t *testing.T) {
 			t.Fatal("Source Trace descriptor changed within one invocation")
 		}
 	}
-	for _, name := range []string{"source.processing", "source.validating", "source.normalizing", "source.segmenting", "source.indexing", "source.verifying"} {
+	for _, name := range []string{"source.processing", "source.validating", "source.normalizing", "source.segmenting", "source.qualifying", "source.indexing", "source.verifying"} {
 		if names[name] != 2 {
 			t.Fatalf("Span %q record count=%d; names=%v", name, names[name], names)
 		}
@@ -664,7 +664,7 @@ func TestTextSourceProcessorResumesFromPublishedEvidenceBoundary(t *testing.T) {
 	if err := processor.ProcessLease(context.Background(), lease); err == nil {
 		t.Fatal("first processing attempt unexpectedly succeeded")
 	}
-	assertSourceJobState(t, api, "src_processing_resume", "srcjob_processing_resume", source.StateSegmenting, "running", "")
+	assertSourceJobState(t, api, "src_processing_resume", "srcjob_processing_resume", source.StateQualifying, "running", "")
 	projection.buildError = nil
 	if err := processor.ProcessLease(context.Background(), lease); err != nil {
 		t.Fatalf("resumed ProcessLease: %v", err)

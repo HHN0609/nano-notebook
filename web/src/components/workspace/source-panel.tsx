@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dia
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { acceptedSourceFormats, csrfToken, memberAPI, uploadSourceFile } from "./source-upload";
-import type { MemberSource, SourcesController } from "./sources";
+import type { MemberSource, SourceAdmissionDetail, SourceAdmissionReason, SourceAdmissionSummary, SourcesController } from "./sources";
 import { SourceDiscovery } from "./source-discovery";
 import { SourceOpenTarget } from "./source-open-target";
 import { SourceSiteIcon } from "./source-site-icon";
@@ -62,6 +62,20 @@ export type SourcePanelCopy = {
   removeConfirmLabel: string;
   cancelLabel: string;
   coverageWarningLabel: string;
+  verificationTitle: string;
+  verificationBody: string;
+  confidenceLabel: string;
+  signalCoverageLabel: string;
+  verifiedLabel: string;
+  needsReviewLabel: string;
+  limitedVerificationLabel: string;
+  privateSourceLabel: string;
+  approvedLabel: string;
+  rejectedLabel: string;
+  approveSourceLabel: string;
+  rejectSourceLabel: string;
+  reviewingLabel: string;
+  admissionReasonLabels: Record<SourceAdmissionReason, string>;
   failureReasonLabels: Record<NonNullable<MemberSource["failure_reason"]>, string>;
 };
 
@@ -87,6 +101,10 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
   const [editingSource, setEditingSource] = useState<{ id: string; title: string } | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [removingSource, setRemovingSource] = useState<MemberSource | null>(null);
+  const [admissionSource, setAdmissionSource] = useState<MemberSource | null>(null);
+  const [admissionDetail, setAdmissionDetail] = useState<SourceAdmissionDetail | null>(null);
+  const [admissionLoading, setAdmissionLoading] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const openedDiscoverySessionID = useRef<string | undefined>(undefined);
   const ignoreDiscoveryExpansion = useCallback(() => undefined, []);
 
@@ -164,6 +182,44 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
     await controller.refresh();
   }
 
+  async function openAdmission(source: MemberSource) {
+    if (!source.admission) return;
+    setAdmissionSource(source);
+    setAdmissionDetail(null);
+    setAdmissionLoading(true);
+    try {
+      const response = await memberAPI(`/api/v1/sources/${source.id}/admission`);
+      if (!response.ok) throw new Error(copy.sourceUnavailableLabel);
+      const body = (await response.json()) as { admission: SourceAdmissionDetail };
+      setAdmissionDetail(body.admission);
+    } catch {
+      toast.error(copy.sourceUnavailableLabel);
+      setAdmissionSource(null);
+    } finally {
+      setAdmissionLoading(false);
+    }
+  }
+
+  async function reviewAdmission(decision: "approve" | "reject") {
+    if (!admissionSource || !admissionDetail || reviewing) return;
+    setReviewing(true);
+    try {
+      const response = await memberAPI(`/api/v1/sources/${admissionSource.id}/admission-review`, {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrfToken() },
+        body: JSON.stringify({ report_id: admissionDetail.report.id, decision, note: "" })
+      });
+      if (!response.ok) throw new Error(copy.sourceUnavailableLabel);
+      const body = (await response.json()) as { review: NonNullable<SourceAdmissionDetail["review"]> };
+      setAdmissionDetail((current) => current ? { ...current, review: body.review } : current);
+      await controller.refresh();
+    } catch {
+      toast.error(copy.sourceUnavailableLabel);
+    } finally {
+      setReviewing(false);
+    }
+  }
+
   const statusLabels = { ready: copy.readyLabel, processing: copy.processingLabel, failed: copy.sourceFailedLabel };
   const sourceCollection = (
     <>
@@ -194,6 +250,7 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
               {canMaintain ? <IconButton icon="edit" label={`${copy.renameLabel} ${source.title}`} onClick={() => { setEditingSource(source); setEditTitle(source.title); }} /> : null}
               {canMaintain ? <IconButton icon="delete" label={`${copy.deleteLabel} ${source.title}`} onClick={() => setRemovingSource(source)} /> : null}
               {source.state === "failed" && source.failure_reason ? <p className="source-failure-reason">{copy.failureReasonLabels[source.failure_reason]}</p> : null}
+              {source.admission ? <button className={`source-admission-badge source-admission-badge--${admissionTone(source.admission)}`} onClick={() => void openAdmission(source)}>{admissionLabel(source.admission, copy)}</button> : null}
             </article>;
           })}
         </div>
@@ -287,10 +344,61 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
           </div>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={Boolean(admissionSource)} onOpenChange={(open) => {
+        if (!open) {
+          setAdmissionSource(null);
+          setAdmissionDetail(null);
+        }
+      }}>
+        <DialogContent className="source-dialog source-admission-dialog" closeLabel={copy.closeLabel}>
+          <DialogTitle>{copy.verificationTitle}</DialogTitle>
+          <DialogDescription>{copy.verificationBody}</DialogDescription>
+          {admissionLoading ? <p className="source-admission-loading">{copy.processingLabel}</p> : null}
+          {admissionDetail ? <>
+            <div className="source-admission-metrics">
+              <div><span>{copy.confidenceLabel}</span><strong>{formatPercent(admissionDetail.report.score)}</strong></div>
+              <div><span>{copy.signalCoverageLabel}</span><strong>{formatPercent(admissionDetail.report.signal_coverage)}</strong></div>
+            </div>
+            <ul className="source-admission-reasons">
+              {admissionDetail.report.reasons.map((reason) => <li key={reason}>{copy.admissionReasonLabels[reason]}</li>)}
+            </ul>
+            {admissionDetail.review ? <p className={`source-admission-review-result source-admission-review-result--${admissionDetail.review.decision}`}>
+              {admissionDetail.review.decision === "approve" ? copy.approvedLabel : copy.rejectedLabel}
+            </p> : null}
+            {canMaintain && admissionDetail.mode === "enforcement" && admissionDetail.report.status === "review_required" && !admissionDetail.review ? <div className="dialog-actions">
+              <Button variant="outline" disabled={reviewing} onClick={() => void reviewAdmission("reject")}>{copy.rejectSourceLabel}</Button>
+              <Button disabled={reviewing} onClick={() => void reviewAdmission("approve")}>{reviewing ? copy.reviewingLabel : copy.approveSourceLabel}</Button>
+            </div> : null}
+          </> : null}
+        </DialogContent>
+      </Dialog>
     </div>
     {viewingSource ? <SourceOriginalViewer key={viewingSource.id} source={viewingSource} onBack={onCloseSource} copy={copy} /> : null}
     </>
   );
+}
+
+function formatPercent(value?: number) {
+  return value === undefined ? "—" : `${Math.round(value * 100)}%`;
+}
+
+function admissionTone(admission: SourceAdmissionSummary) {
+  if (admission.review_decision === "approve") return "passed";
+  if (admission.review_decision === "reject") return "rejected";
+  if (admission.status === "passed") return "passed";
+  if (admission.status === "not_applicable") return "private";
+  return "review";
+}
+
+function admissionLabel(admission: SourceAdmissionSummary, copy: SourcePanelCopy) {
+  if (admission.review_decision === "approve") return copy.approvedLabel;
+  if (admission.review_decision === "reject") return copy.rejectedLabel;
+  if (admission.status === "not_applicable") return copy.privateSourceLabel;
+  const label = admission.status === "passed"
+    ? copy.verifiedLabel
+    : admission.mode === "enforcement" ? copy.needsReviewLabel : copy.limitedVerificationLabel;
+  return admission.score === undefined ? label : `${label} · ${formatPercent(admission.score)}`;
 }
 
 function SourceOriginalViewer({ source, onBack, copy }: { source: MemberSource; onBack: () => void; copy: SourcePanelCopy }) {

@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "policy_sha256": "2e519dead2bc12ca85a0d770f42fe5ba63c281c9b72cddaff443c3bedf722b70",
+  "cases": [
+    {
+      "id": "private-file-not-applicable",
+      "input": {
+        "profile": {
+          "input_kind": "file",
+          "title": "Private memo",
+          "content_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "stable_identifiers": []
+        },
+        "extraction": {
+          "coverage_status": "complete",
+          "total_runes": 1200,
+          "block_count": 8,
+          "gap_count": 0,
+          "invalid_character_ratio": 0,
+          "repeated_block_ratio": 0
+        },
+        "searches": [],
+        "provider_id": "not-configured",
+        "provider_attempts": 0
+      },
+      "expected": {
+        "status": "not_applicable",
+        "score": null,
+        "signal_coverage": 0.3,
+        "exact_identity_match": false
+      }
+    },
+    {
+      "id": "exact-canonical-url-passes",
+      "input": {
+        "profile": {
+          "input_kind": "url",
+          "title": "Canonical Admission Report",
+          "original_url": "https://publisher.example/report?utm_source=test",
+          "final_url": "https://publisher.example/report",
+          "content_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "artifact_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "stable_identifiers": []
+        },
+        "extraction": {
+          "coverage_status": "complete",
+          "total_runes": 1500,
+          "block_count": 10,
+          "gap_count": 0,
+          "invalid_character_ratio": 0,
+          "repeated_block_ratio": 0
+        },
+        "searches": [{
+          "query": "\"Canonical Admission Report\"",
+          "results": [{"title": "Canonical Admission Report", "url": "https://publisher.example/report", "rank": 1}]
+        }],
+        "provider_id": "brave",
+        "provider_attempts": 1
+      },
+      "expected": {
+        "status": "passed",
+        "score": 1,
+        "signal_coverage": 0.7,
+        "exact_identity_match": true
+      }
+    },
+    {
+      "id": "exact-doi-with-independent-references-passes",
+      "input": {
+        "profile": {
+          "input_kind": "url",
+          "title": "Bounded Source Verification",
+          "final_url": "https://publisher.example/papers/bounded",
+          "content_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "artifact_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "stable_identifiers": [{"kind": "doi", "value": "10.1234/nano.2026.1"}]
+        },
+        "extraction": {
+          "coverage_status": "complete",
+          "total_runes": 2200,
+          "block_count": 14,
+          "gap_count": 0,
+          "invalid_character_ratio": 0,
+          "repeated_block_ratio": 0
+        },
+        "searches": [{
+          "query": "\"10.1234/nano.2026.1\"",
+          "results": [
+            {"title": "Bounded Source Verification", "url": "https://catalog.example/item/1", "description": "DOI 10.1234/nano.2026.1", "rank": 1},
+            {"title": "Bounded Source Verification", "url": "https://index.example/record/1", "description": "10.1234/nano.2026.1", "rank": 2}
+          ]
+        }],
+        "provider_id": "brave",
+        "provider_attempts": 1
+      },
+      "expected": {
+        "status": "passed",
+        "score": 1,
+        "signal_coverage": 0.9,
+        "exact_identity_match": true
+      }
+    },
+    {
+      "id": "title-only-match-requires-review",
+      "input": {
+        "profile": {
+          "input_kind": "url",
+          "title": "A Similar Title Is Not Identity",
+          "final_url": "https://publisher.example/original",
+          "content_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+          "artifact_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "stable_identifiers": []
+        },
+        "extraction": {
+          "coverage_status": "complete",
+          "total_runes": 900,
+          "block_count": 6,
+          "gap_count": 0,
+          "invalid_character_ratio": 0,
+          "repeated_block_ratio": 0
+        },
+        "searches": [{
+          "query": "\"A Similar Title Is Not Identity\"",
+          "results": [{"title": "A Similar Title Is Not Identity", "url": "https://aggregator.example/copy", "rank": 1}]
+        }],
+        "provider_id": "brave",
+        "provider_attempts": 1
+      },
+      "expected": {
+        "status": "review_required",
+        "score": 0.711111,
+        "signal_coverage": 0.9,
+        "exact_identity_match": false
+      }
+    },
+    {
+      "id": "search-unavailable-degrades-to-review",
+      "input": {
+        "profile": {
+          "input_kind": "url",
+          "title": "Niche Working Paper",
+          "final_url": "https://research.example/paper",
+          "content_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "artifact_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "stable_identifiers": []
+        },
+        "extraction": {
+          "coverage_status": "complete",
+          "total_runes": 1100,
+          "block_count": 7,
+          "gap_count": 0,
+          "invalid_character_ratio": 0,
+          "repeated_block_ratio": 0
+        },
+        "searches": [],
+        "search_error": "external_verification_unavailable",
+        "provider_id": "brave",
+        "provider_attempts": 2
+      },
+      "expected": {
+        "status": "review_required",
+        "score": 1,
+        "signal_coverage": 0.3,
+        "exact_identity_match": false
+      }
+    },
+    {
+      "id": "poor-extraction-stays-below-threshold",
+      "input": {
+        "profile": {
+          "input_kind": "url",
+          "title": "Damaged Exact Source",
+          "final_url": "https://publisher.example/damaged",
+          "content_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "artifact_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "stable_identifiers": []
+        },
+        "extraction": {
+          "coverage_status": "partial",
+          "total_runes": 600,
+          "block_count": 4,
+          "gap_count": 4,
+          "invalid_character_ratio": 0.2,
+          "repeated_block_ratio": 1
+        },
+        "searches": [{
+          "query": "\"Damaged Exact Source\"",
+          "results": [{"title": "Damaged Exact Source", "url": "https://publisher.example/damaged", "rank": 1}]
+        }],
+        "provider_id": "brave",
+        "provider_attempts": 1
+      },
+      "expected": {
+        "status": "review_required",
+        "score": 0.7,
+        "signal_coverage": 0.7,
+        "exact_identity_match": true
+      }
+    }
+  ]
+}

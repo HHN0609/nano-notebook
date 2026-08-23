@@ -183,7 +183,10 @@ func TestEvidenceCompletionRejectsMissingVerifiedActiveProjection(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, source.StateSegmenting, source.StateIndexing); err != nil {
+	if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, source.StateSegmenting, source.StateQualifying); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, source.StateQualifying, source.StateIndexing); err != nil {
 		t.Fatal(err)
 	}
 	if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, source.StateIndexing, source.StateVerifying); err != nil {

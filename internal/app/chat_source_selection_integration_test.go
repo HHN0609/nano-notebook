@@ -156,7 +156,7 @@ func installBuildingEvidenceProjection(t *testing.T, api *testAPI, notebookID, s
 
 func advanceSourceToVerifying(t *testing.T, queue *sourcejobs.Queue, lease sourcejobs.Lease) {
 	t.Helper()
-	for _, transition := range [][2]source.State{{source.StateUploaded, source.StateValidating}, {source.StateValidating, source.StateNormalizing}, {source.StateNormalizing, source.StateSegmenting}, {source.StateSegmenting, source.StateIndexing}, {source.StateIndexing, source.StateVerifying}} {
+	for _, transition := range [][2]source.State{{source.StateUploaded, source.StateValidating}, {source.StateValidating, source.StateNormalizing}, {source.StateNormalizing, source.StateSegmenting}, {source.StateSegmenting, source.StateQualifying}, {source.StateQualifying, source.StateIndexing}, {source.StateIndexing, source.StateVerifying}} {
 		if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, transition[0], transition[1]); err != nil {
 			t.Fatal(err)
 		}

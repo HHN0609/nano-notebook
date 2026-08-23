@@ -16,6 +16,58 @@ export type MemberSource = {
   state: "processing" | "ready" | "failed";
   open_action: SourceOpenAction;
   failure_reason?: "limits_exceeded" | "source_unavailable" | "content_unreadable" | "indexing_failed" | "retrieval_unavailable" | "processing_interrupted" | "processing_failed";
+  admission?: SourceAdmissionSummary;
+};
+
+export type SourceAdmissionSummary = {
+  report_id: string;
+  status: "passed" | "review_required" | "not_applicable";
+  score?: number;
+  signal_coverage: number;
+  exact_identity_match: boolean;
+  policy_id: string;
+  policy_sha256: string;
+  mode: "shadow" | "enforcement";
+  review_decision?: "approve" | "reject";
+};
+
+export type SourceAdmissionReason =
+  | "extraction_complete"
+  | "extraction_partial"
+  | "exact_url_match"
+  | "exact_identifier_match"
+  | "external_reference_found"
+  | "external_verification_unavailable"
+  | "external_verification_not_applicable"
+  | "exact_identity_required"
+  | "signal_coverage_insufficient"
+  | "score_below_threshold";
+
+export type SourceAdmissionDetail = {
+  source_id: string;
+  notebook_id: string;
+  revision_id: string;
+  mode: "shadow" | "enforcement";
+  report: {
+    id: string;
+    policy_id: string;
+    policy_sha256: string;
+    status: SourceAdmissionSummary["status"];
+    score?: number;
+    signal_coverage: number;
+    exact_identity_match: boolean;
+    components: Record<string, number>;
+    reasons: SourceAdmissionReason[];
+  };
+  input: {
+    provider_id?: string;
+    provider_attempts: number;
+    searches?: Array<{ query: string; results: Array<{ title: string; url: string; rank: number }> }>;
+  };
+  provider_id?: string;
+  provider_attempts: number;
+  review?: { id: string; report_id: string; decision: "approve" | "reject"; note?: string; created_at: string };
+  created_at: string;
 };
 
 export type SourcesController = {
