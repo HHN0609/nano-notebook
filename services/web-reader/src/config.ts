@@ -47,7 +47,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const allowPrivateTargets = (env['NANO_WEB_READER_ALLOW_PRIVATE_TARGETS'] ?? 'false').toLowerCase() === 'true';
   const allowSyntheticProxyTargets = (env['NANO_WEB_READER_ALLOW_SYNTHETIC_PROXY_TARGETS'] ?? 'false').toLowerCase() === 'true';
 
-  const userAgent = env['NANO_WEB_READER_USER_AGENT'] ?? 'Mozilla/5.0 (compatible; NanoWebReader/1; +https://github.com/nano-notebook)';
+  // Default to a realistic Edge UA (Windows 10, Chromium 138, Edg 151) so
+  // weakly-protected sites do not reject us out of hand; strong anti-bot
+  // walls (zhihu etc.) are handled by the browser engine, not by UA alone.
+  const userAgent =
+    env['NANO_WEB_READER_USER_AGENT'] ??
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/151.0.0.0';
 
   const engineRaw = (env['NANO_WEB_READER_ENGINE'] ?? 'auto').toLowerCase();
   if (!ENGINE_MODES.includes(engineRaw as EngineMode)) {

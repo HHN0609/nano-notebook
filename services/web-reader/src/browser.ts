@@ -18,7 +18,7 @@
 import fs from 'node:fs';
 import { promises as dns } from 'node:dns';
 import { isIPv4, isIPv6 } from 'node:net';
-import puppeteer, { type Browser, type HTTPRequest } from 'puppeteer-core';
+import puppeteer, { type Browser, type HTTPRequest, type HTTPResponse } from 'puppeteer-core';
 
 import { ReaderError } from './errors.js';
 import { isIPInNonPublicRange, isSyntheticProxyAddress } from './ip.js';
@@ -80,6 +80,9 @@ async function launchBrowser(config: Config): Promise<Browser> {
       '--disable-sync',
       '--mute-audio',
       '--disable-features=Translate',
+      // Anti-bot walls (zhihu etc.) fingerprint navigator.webdriver; the
+      // blink feature flag keeps it false under CDP control.
+      '--disable-blink-features=AutomationControlled',
     ],
   });
 }
@@ -124,9 +127,28 @@ export async function renderPage(rawUrl: string, config: Config): Promise<Render
   const browser = await ensureBrowser(config);
   const page = await browser.newPage();
   try {
-    await page.setUserAgent(config.userAgent);
+    // setUserAgent without userAgentMetadata makes Chromium drop the
+    // sec-ch-ua* client-hint headers on HTTPS requests; real browsers
+    // always send them, so anti-bot walls (zhihu etc.) reject the mismatch.
+    await page.setUserAgent({
+      userAgent: config.userAgent,
+      userAgentMetadata: buildUserAgentMetadata(config.userAgent),
+    });
     await page.setViewport({ width: 1280, height: 800 });
     await installSsrfGuard(page, config);
+
+    // Anti-bot challenge walls (zhihu zse-ck etc.) answer the first
+    // navigation with 4xx plus a JS challenge that sets a cookie and
+    // reloads; the real content only arrives on a later main-frame
+    // navigation. Track the latest main-frame response and judge after
+    // the settle window instead of failing on the first 4xx.
+    let lastNavResponse: HTTPResponse | null = null;
+    page.on('response', (res) => {
+      const req = res.request();
+      if (req.isNavigationRequest() && req.frame() === page.mainFrame()) {
+        lastNavResponse = res;
+      }
+    });
 
     let response;
     try {
@@ -137,31 +159,34 @@ export async function renderPage(rawUrl: string, config: Config): Promise<Render
     } catch (err) {
       throw classifyNavigationError(err, config.browserTimeoutMs);
     }
-    if (!response) {
-      throw new ReaderError('upstream_failed', 'browser navigation produced no response');
-    }
 
-    const status = response.status();
-    if (status >= 400) {
-      throw new ReaderError('upstream_failed', `upstream returned status ${status}`);
-    }
-
-    const contentType = response.headers()['content-type'] ?? '';
-    const mediaType = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
-    if (!HTML_CONTENT_TYPES.has(mediaType)) {
-      throw new ReaderError('unsupported_type', `unsupported content type: ${contentType || '(none)'}`);
-    }
-
-    // Best-effort settle time for JS frameworks hydrating and XHR bursts;
-    // timeouts here are not fatal, the DOM snapshot is taken either way.
+    // Best-effort settle time for JS frameworks hydrating, XHR bursts and
+    // challenge-driven reloads; timeouts here are not fatal, the DOM
+    // snapshot is taken either way.
     await page
       .waitForNetworkIdle({ idleTime: 800, timeout: Math.min(config.browserTimeoutMs, 10_000) })
       .catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 300));
 
+    const finalResponse = lastNavResponse ?? response;
+    if (!finalResponse) {
+      throw new ReaderError('upstream_failed', 'browser navigation produced no response');
+    }
+
+    const status = finalResponse.status();
+    if (status >= 400) {
+      throw new ReaderError('upstream_failed', `upstream returned status ${status}`);
+    }
+
+    const contentType = finalResponse.headers()['content-type'] ?? '';
+    const mediaType = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+    if (!HTML_CONTENT_TYPES.has(mediaType)) {
+      throw new ReaderError('unsupported_type', `unsupported content type: ${contentType || '(none)'}`);
+    }
+
     const finalUrl = validateUrl(page.url());
     const html = await page.content();
-    const redirects = response.request().redirectChain().length;
+    const redirects = finalResponse.request().redirectChain().length;
 
     return {
       finalUrl: finalUrl.toString(),
@@ -273,6 +298,55 @@ export async function checkRequestUrl(
   verdicts.set(host, ok);
   return ok;
 }
+
+/**
+ * Derive client-hints metadata consistent with a UA string, so the browser
+ * keeps sending realistic `sec-ch-ua*` headers matching the overridden UA.
+ */
+export function buildUserAgentMetadata(userAgent: string): UserAgentMetadata {
+  const chromiumVersion = /Chrome\/(\d+(?:\.\d+)*)/.exec(userAgent)?.[1] ?? '138.0.0.0';
+  const chromiumMajor = chromiumVersion.split('.')[0] ?? '138';
+  const edgeMajor = /Edg\w*\/(\d+)/.exec(userAgent)?.[1];
+
+  const brands = edgeMajor
+    ? [
+        { brand: 'Microsoft Edge', version: edgeMajor },
+        { brand: 'Chromium', version: chromiumMajor },
+        { brand: 'Not=A?Brand', version: '24' },
+      ]
+    : [
+        { brand: 'Chromium', version: chromiumMajor },
+        { brand: 'Not=A?Brand', version: '24' },
+      ];
+
+  const platform = /Windows/i.test(userAgent)
+    ? 'Windows'
+    : /Macintosh|Mac OS X/i.test(userAgent)
+      ? 'macOS'
+      : /Linux|X11|Ubuntu/i.test(userAgent)
+        ? 'Linux'
+        : 'Windows';
+
+  const fullVersionList = brands.map((brand) => ({
+    brand: brand.brand,
+    version: brand.brand === 'Chromium' ? chromiumVersion : `${brand.version}.0.0.0`,
+  }));
+
+  return {
+    brands,
+    fullVersionList,
+    fullVersion: chromiumVersion,
+    platform,
+    platformVersion: platform === 'Windows' ? '13.0.0' : platform === 'macOS' ? '14.5.0' : '',
+    architecture: 'x86',
+    model: '',
+    mobile: false,
+    bitness: '64',
+    wow64: false,
+  };
+}
+
+type UserAgentMetadata = import('puppeteer-core').Protocol.Emulation.UserAgentMetadata;
 
 function classifyNavigationError(err: unknown, timeoutMs: number): ReaderError {
   const message = err instanceof Error ? err.message : String(err);
