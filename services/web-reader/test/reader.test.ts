@@ -131,3 +131,43 @@ test('rejects pages with no extractable content', () => {
     (err: unknown) => err instanceof ReaderError && err.code === 'parse_failed',
   );
 });
+
+test('removes embedded video player chrome from the article', () => {
+  // Mirrors the qq.com thumbplayer markup: a videoPlayer wrapper holding
+  // the poster image, control UI text and a float-window tooltip.
+  const html = `<!DOCTYPE html>
+<html lang="zh">
+<head><title>示例新闻</title></head>
+<body>
+  <article>
+    <h1>示例新闻标题文字长度超过阈值以保证内容提取</h1>
+    <div class="videoPlayer" id="vid1_wrap">
+      <div class="_mod_thumbplayer_container_" data-tp="abc">
+        <img class="txp_poster_img" src="http://cdn.example.com/poster.jpg">
+        <div class="txp_videos_container"><video src="blob:https://example.com/x"></video></div>
+        <div class="plugin_ctrl_txp_bottom">
+          <div aria-label="暂停/播放"><p>暂停</p></div>
+          <div><p>00:02</p><p>/</p><p>06:04</p></div>
+          <div aria-label="倍速"><p>倍速</p></div>
+        </div>
+        <div class="custom-loading hide"><img src="http://cdn.example.com/loading.gif"></div>
+      </div>
+      <div class="player-float-head"><h4 class="float-title">按住画面移动小窗</h4></div>
+    </div>
+    <p data-source="cke">正文第一段，内容足够长以通过最小内容阈值校验，并且以句号结尾。</p>
+    <p data-source="cke">正文第二段，内容足够长以通过最小内容阈值校验，并且以句号结尾。</p>
+  </article>
+</body>
+</html>`;
+
+  const result = parsePage(html, 'https://example.com/news/1', OPTIONS);
+
+  assert.ok(!result.content.includes('暂停'));
+  assert.ok(!result.content.includes('06:04'));
+  assert.ok(!result.content.includes('倍速'));
+  assert.ok(!result.content.includes('按住画面'));
+  assert.ok(!result.content.includes('poster.jpg'));
+  assert.ok(!result.content.includes('loading.gif'));
+  assert.ok(result.content.includes('正文第一段'));
+  assert.ok(result.content.includes('正文第二段'));
+});

@@ -95,3 +95,57 @@ test('tidyMarkdown trims trailing whitespace and reverts benign escapes', () => 
 
   assert.equal(output, 'line one\nline _two_ [brackets]');
 });
+
+test('flattens links with oversized urls to their label text', () => {
+  const longHref = `https://example.com/search?token=${'x'.repeat(200)}`;
+  const html = `<p>See <a href="${longHref}">the guide</a> and
+    <a href="https://example.com/x">details</a>.</p>`;
+  const markdown = htmlToMarkdown(html, { baseUrl: BASE, withLinks: true, withImages: true });
+
+  assert.ok(!markdown.includes('token='));
+  assert.match(markdown, /See the guide and/);
+  assert.match(markdown, /\[details\]\(https:\/\/example\.com\/x\)/);
+});
+
+test('regroups fragmented figure paragraphs into a compact list', () => {
+  const html = `
+    <h2>Section</h2>
+    <p>Intro paragraph with enough length to stay a normal paragraph block.</p>
+    <p>figure title</p>
+    <p>label one</p>
+    <p>value with spaces</p>
+    <p>· · ·</p>
+    <p>Closing paragraph with enough length to stay a normal paragraph block.</p>
+  `;
+  const markdown = htmlToMarkdown(html, { baseUrl: BASE, withLinks: true, withImages: true });
+
+  assert.match(markdown, /## Section/);
+  assert.match(markdown, /- figure title\n- label one\n- value with spaces/);
+  assert.ok(!markdown.includes('·'));
+  assert.match(markdown, /^Intro paragraph/m);
+  assert.match(markdown, /^Closing paragraph/m);
+});
+
+test('keeps short standalone paragraphs and soft-wrapped blocks intact', () => {
+  const output = tidyMarkdown('one short line\n\nanother short line\n\nlong paragraph that stays a paragraph because it exceeds the fragment budget');
+
+  assert.equal(
+    output,
+    'one short line\n\nanother short line\n\nlong paragraph that stays a paragraph because it exceeds the fragment budget',
+  );
+});
+
+test('short prose paragraphs ending with sentence punctuation stay paragraphs', () => {
+  const output = tidyMarkdown('第一句话说完了。\n\n第二句话也说完了。\n\n第三句话同样说完了。\n\n后续的长段落内容，远远超过碎片段落的长度预算，因此保持原样输出。');
+
+  assert.ok(!output.includes('- 第一句'));
+  assert.match(output, /^第一句话说完了。$/m);
+  assert.match(output, /^第三句话同样说完了。$/m);
+});
+
+test('regrouping never splits fenced code blocks containing blank lines', () => {
+  const input = '```js\nconst a = 1;\n\nconst b = 2;\n```\n\ntail text';
+  const output = tidyMarkdown(input);
+
+  assert.match(output, /```js\nconst a = 1;\n\nconst b = 2;\n```/);
+});
