@@ -222,6 +222,23 @@ function preClean(doc: Document): void {
     }
   }
 
+  // Embedded media players: the control UI (play buttons, timestamps,
+  // quality menus, float-window tooltips) is interaction chrome that
+  // Readability would otherwise pull into the article text. Match the
+  // "player" substring in class/id across both common casings, plus
+  // loading spinners and leftover media elements.
+  for (const el of Array.from(
+    doc.querySelectorAll(
+      '[class*="player"], [class*="Player"], [id*="player"], [id*="Player"], [class*="loading"], [class*="Loading"]',
+    ),
+  )) {
+    el.remove();
+  }
+
+  for (const el of Array.from(doc.querySelectorAll('video, audio, source, track'))) {
+    el.remove();
+  }
+
   for (const el of Array.from(doc.querySelectorAll('[hidden], [aria-hidden="true"]'))) {
     el.remove();
   }
