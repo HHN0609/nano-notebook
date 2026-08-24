@@ -7,7 +7,6 @@ func TestLoadControlPlaneConfigIncludesCollectorQueryAndReplayKey(t *testing.T) 
 	t.Setenv("NANO_CONTROL_PLANE_ADDR", ":18080")
 	t.Setenv("NANO_COLLECTOR_URL", "http://collector.internal:8082/")
 	t.Setenv("NANO_COLLECTOR_QUERY_TOKEN", "query-secret")
-	t.Setenv("NANO_COLLECTOR_SERVICE_TOKEN", "ingest-secret")
 	t.Setenv("NANO_CONTROL_PLANE_PRODUCER_ID", "control-plane-a")
 	t.Setenv("NANO_REPLAY_KEY_ID", "replay-key-7")
 	t.Setenv("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA=")
@@ -25,7 +24,7 @@ func TestLoadControlPlaneConfigIncludesCollectorQueryAndReplayKey(t *testing.T) 
 	}
 	if config.DatabaseURL != "postgres://application" || config.Addr != ":18080" ||
 		config.CollectorURL != "http://collector.internal:8082" || config.CollectorQueryToken != "query-secret" ||
-		config.CollectorServiceToken != "ingest-secret" || config.ProducerID != "control-plane-a" ||
+		config.ProducerID != "control-plane-a" ||
 		config.ReplayKeyID != "replay-key-7" || len(config.ReplayKEK) != 32 ||
 		config.SourceS3.Endpoint != "sources.internal:9000" || config.SourceS3.AccessKeyID != "source-key" ||
 		config.SourceS3.SecretAccessKey != "source-secret" || config.SourceS3.Bucket != "source-custody" ||
@@ -52,51 +51,33 @@ func TestLoadControlPlaneConfigDefaultsToQwenPlus(t *testing.T) {
 	}
 }
 
-func TestLoadControlPlaneConfigDefaultsAgentTraceTransportToKafka(t *testing.T) {
-	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "")
+func TestLoadControlPlaneConfigDefaultsKafkaTraceProducer(t *testing.T) {
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_BROKERS", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_TOPIC", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "")
-	t.Setenv("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", "")
 
 	config, err := loadControlPlaneConfig()
 	if err != nil {
 		t.Fatalf("loadControlPlaneConfig: %v", err)
 	}
-	if config.TraceTransport != "kafka" || len(config.TraceKafkaBrokers) != 1 || config.TraceKafkaBrokers[0] != "127.0.0.1:59092" ||
-		config.TraceKafkaTopic != "nano.observability.agent-trace.v1" || config.TraceKafkaClientID != "nano-control-plane-agent-trace" || config.TraceKafkaMaxRetries != 3 {
-		t.Fatalf("Agent Trace transport defaults = %#v", config)
+	if len(config.TraceKafkaBrokers) != 1 || config.TraceKafkaBrokers[0] != "127.0.0.1:59092" ||
+		config.TraceKafkaTopic != "nano.observability.agent-trace.v1" || config.TraceKafkaClientID != "nano-control-plane-agent-trace" {
+		t.Fatalf("Agent Trace Kafka defaults = %#v", config)
 	}
 }
 
-func TestLoadControlPlaneConfigSupportsExplicitHTTPAndRejectsInvalidTraceTransport(t *testing.T) {
-	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "http")
-	if config, err := loadControlPlaneConfig(); err != nil || config.TraceTransport != "http" {
-		t.Fatalf("explicit HTTP config = %#v, %v", config, err)
-	}
-	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "udp")
-	if _, err := loadControlPlaneConfig(); err == nil {
-		t.Fatal("loadControlPlaneConfig accepted unknown Agent Trace transport")
-	}
-}
-
-func TestLoadControlPlaneConfigRejectsNegativeKafkaRetryLimit(t *testing.T) {
-	t.Setenv("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", "-1")
-	if _, err := loadControlPlaneConfig(); err == nil {
-		t.Fatal("loadControlPlaneConfig accepted a negative Kafka retry limit")
-	}
-}
-
-func TestLoadControlPlaneConfigRejectsMissingSelectedTraceTransportConfig(t *testing.T) {
-	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "kafka")
+func TestLoadControlPlaneConfigRejectsMissingKafkaTraceConfig(t *testing.T) {
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_BROKERS", " ")
 	if _, err := loadControlPlaneConfig(); err == nil {
 		t.Fatal("loadControlPlaneConfig accepted Kafka without brokers")
 	}
-	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "http")
-	t.Setenv("NANO_COLLECTOR_SERVICE_TOKEN", " ")
-	if _, err := loadControlPlaneConfig(); err == nil {
-		t.Fatal("loadControlPlaneConfig accepted HTTP without service token")
+}
+
+func TestLoadControlPlaneConfigIgnoresRemovedTraceTransportAndRetrySettings(t *testing.T) {
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "udp")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", "not-a-number")
+	if _, err := loadControlPlaneConfig(); err != nil {
+		t.Fatalf("removed Trace settings still affect Control Plane config: %v", err)
 	}
 }
 

@@ -1,216 +1,124 @@
-# Sprint 5 Agent Trace Operations Runbook
+# Agent Trace Kafka and ClickHouse Operations Runbook
 
-Sprint 5 sends diagnostic Agent Trace records directly from bounded process memory to
-Collector. It does not place full Trace or Replay staging traffic on Application
-PostgreSQL. The Dashboard reads Collector projections through the Control Plane Admin
-API. Prometheus and Grafana remain future platform-metrics work and are not Trace
-authority.
+Durable Agent Trace records leave Worker and Control Plane through Kafka and are
+retained and queried in ClickHouse. Application PostgreSQL owns product state,
+lightweight Trace anchors, and durable purge intent; it is not the Trace log store.
 
-## Responsibility And Data Boundaries
+## Responsibility and data boundaries
 
 ```text
-Control Plane / Worker
-  -> Application PostgreSQL (product authority)
-       Run, Job, Lease, Checkpoint, lightweight Trace anchor,
-       durable purge intent, Replay access audit
-  -> bounded process memory (diagnostic records)
-       10,000 records / 32 MiB
-       -> gzip HTTP Batch: 128 records / 512 KiB / 250 ms
-  -> producer Replay staging bucket (ciphertext + manifest)
-       -> Collector
-            -> independent Observability PostgreSQL
-                 immutable records, tombstones, projections, Replay references
-            -> Collector Replay bucket
+Worker / Control Plane
+  -> franz-go TryProduce (bounded volatile client buffer)
+  -> nano.observability.agent-trace.v1 (key = trace_id)
+  -> Agent Trace Processor
+  -> ClickHouse raw records and query projections
 
-Browser -> Control Plane Admin API -> Collector Query API
+Application PostgreSQL
+  -> Run, Job, Checkpoint, Message, authorization, Trace anchor, purge intent
 ```
 
-- Product commit never depends on Collector, Observability PostgreSQL, or the memory
-  exporter. Transaction Trace buffers publish only after product commit and disappear
-  on rollback.
-- Hard process loss may lose the bounded unsent diagnostic tail. Collector represents
-  missing roots, parents, or terminals as incomplete; it never invents data.
-- Kafka network loss, timeout, and uncertain ACK retry the same Batch ID up to
-  `NANO_AGENT_TRACE_KAFKA_MAX_RETRIES` times after the initial attempt (default `3`).
-  Exhaustion drops the affected diagnostic Batch, increments drop diagnostics, and lets
-  later Batches continue. The HTTP fallback retains its existing while-resident retry
-  behavior for `429`, `5xx`, timeout, and uncertain ACK. Authentication, invalid protocol,
-  and permanent Collector rejection remain immediate diagnostic-Batch drops.
-- Deletion is different from diagnostics: purge intent stays durable in Application
-  PostgreSQL and a purge-only sender retries it until Collector ACKs.
-- Collector owns sequence assignment. Producer processes coordinate by stable record
-  identity and canonical hash, not through Application PostgreSQL.
-- Replay ciphertext and its producer manifest are object-store data. No Prompt,
-  Response, Tool payload, ciphertext, or staging descriptor is written to Application
-  PostgreSQL by the Sprint 5 runtime.
+- Product commits do not wait for Kafka acknowledgement. A valid `Offer` hands one
+  Record to franz-go and returns; Kafka batches and compresses messages on the wire.
+- `acks=all` means Kafka acknowledged the message. It does not mean the Processor has
+  committed it to ClickHouse or that it is searchable.
+- A hard process loss, full producer buffer, delivery timeout, or final producer error
+  before acknowledgement can lose diagnostic Trace data. Producer metrics and
+  rate-limited logs expose those outcomes.
+- Kafka owns producer buffering and retry within the delivery timeout. There is no
+  application Trace queue, delayed Batch loop, HTTP fallback, or outer retry counter.
+- Deletion has a different guarantee: purge intent remains durable in Application
+  PostgreSQL, and the purge sender waits for Kafka acknowledgement before completing
+  the command.
+- Replay ciphertext remains in object storage. Trace messages carry only validated
+  Replay attachment descriptors.
 
-The migration/rollback window is closed. Application migration physically drops
-`agentobs_outbox_records`, `agentobs_replay_staging`, the capacity ledger, and every
-full-Trace cursor/lease/retry/quarantine field. Reapplying migrations keeps them absent.
-The only durable observability transport state left in Application PostgreSQL is the
-low-volume purge-command queue.
+## Kafka and ClickHouse topology
 
-## Local Physical Isolation
+Local Compose is deliberately a one-broker KRaft development topology with topic
+replication factor 1 and `min.insync.replicas=1`. It is not highly available.
 
-Local development uses two PostgreSQL processes, not two databases in one process:
+Production Compose uses three combined broker/controllers. Application Trace, purge,
+and quarantine topics use replication factor 3 and `min.insync.replicas=2`; producers
+use all three bootstrap addresses and `acks=all`. ClickHouse is the normal raw Trace
+and query-projection store. The `postgres-trace-rollback` profile is dormant and is not
+part of the default path.
 
-| Service | Port | Volume | Owner |
-|---|---:|---|---|
-| `postgres` | 55432 | `postgres-data` | Application |
-| `observability-postgres` | 55433 | `observability-postgres-data` | Collector |
+## Required producer configuration
 
-They have independent CPU/memory/I/O/failure domains at the container level. Stopping
-`observability-postgres` must leave Application health and product transactions green.
-Production must use independently capacity-managed PostgreSQL services as well.
+Worker and Control Plane use Kafka only:
 
-Start and verify:
+- `NANO_AGENT_TRACE_KAFKA_BROKERS`
+- `NANO_AGENT_TRACE_KAFKA_TOPIC`
+- `NANO_AGENT_TRACE_KAFKA_CLIENT_ID`
 
-```sh
-scripts/start
-scripts/health
-```
+Worker purge delivery additionally uses:
 
-Default DSNs:
+- `NANO_AGENT_TRACE_KAFKA_PURGE_TOPIC`
+- `NANO_AGENT_TRACE_KAFKA_PURGE_CLIENT_ID`
+- `NANO_TRACE_PURGE_MAX_COMMANDS`
+- `NANO_TRACE_PURGE_LEASE_DURATION`
+- `NANO_TRACE_PURGE_POLL_INTERVAL`
+- `NANO_TRACE_PURGE_BASE_BACKOFF`
+- `NANO_TRACE_PURGE_MAX_BACKOFF`
 
-```text
-NANO_DATABASE_URL=postgres://nano:nano@localhost:55432/nano?sslmode=disable
-NANO_COLLECTOR_DATABASE_URL=postgres://nano_observability:nano-observability@localhost:55433/nano_observability?sslmode=disable
-```
+The product code owns the franz-go bounds: 10,000 buffered Records, 32 MiB buffered
+key/value bytes, a 512 KiB single-message bound, a 10-second delivery timeout, and a
+5 ms linger. Changing these is an architecture/operations decision, not an ad hoc
+environment override.
 
-Collector uses separate ingestion, projection, and query pools. Default maxima are 16,
-4, and 8 connections. Budget replicas and maintenance headroom against the
-Observability service only; do not increase the Application pool to address Collector
-lag.
+The removed settings `NANO_AGENT_TRACE_TRANSPORT`,
+`NANO_AGENT_TRACE_KAFKA_MAX_RETRIES`, and `NANO_TRACE_BATCH_MAX_*` have no product
+effect.
 
-## Required Configuration
+## Producer health and failure semantics
 
-- `NANO_COLLECTOR_URL`: internal TLS Collector base URL.
-- `NANO_COLLECTOR_SERVICE_TOKEN`: ingestion and purge credential used by producers.
-- `NANO_COLLECTOR_QUERY_TOKEN`: distinct Control Plane query credential.
-- `NANO_COLLECTOR_PRODUCER_ID`: Worker producer identity.
-- `NANO_CONTROL_PLANE_PRODUCER_ID`: Control Plane producer identity.
-- `NANO_COLLECTOR_PRODUCER_ID_PREFIX`: Collector allow-list prefix for process producers.
-- `NANO_TRACE_BATCH_MAX_RECORDS`: direct Batch record limit; default 128.
-- `NANO_TRACE_BATCH_MAX_ENCODED_BYTES`: direct Batch byte limit; default 512 KiB.
-- `NANO_TRACE_BATCH_MAX_DELAY`: direct Batch maximum delay; default 250 ms.
-- `NANO_TRACE_HTTP_TIMEOUT`: Collector request timeout; default 10 seconds.
-- `NANO_TRACE_PURGE_MAX_COMMANDS`: purge Batch command limit; default 16.
-- `NANO_TRACE_PURGE_LEASE_DURATION`: durable purge lease; default 30 seconds.
-- `NANO_TRACE_PURGE_POLL_INTERVAL`: purge polling interval; default 100 ms.
-- `NANO_TRACE_PURGE_BASE_BACKOFF`: purge retry base delay; default 1 second.
-- `NANO_TRACE_PURGE_MAX_BACKOFF`: purge retry ceiling; default 1 minute.
+Watch these producer metrics per process:
 
-The per-process pending bound is fixed at 10,000 records and 32 MiB in Sprint 5.
+- `nano_agent_trace_producer_offer_rejected_total{reason}`
+- `nano_agent_trace_producer_deliveries_total{result}`
+- `nano_agent_trace_producer_delivery_duration_seconds{result}`
+- `nano_agent_trace_producer_buffered_records`
+- `nano_agent_trace_producer_buffered_bytes`
+- `nano_agent_trace_producer_shutdown_failures_total`
 
-Worker staging storage:
-
-- `NANO_REPLAY_STAGING_S3_ENDPOINT`
-- `NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID`
-- `NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY`
-- `NANO_REPLAY_STAGING_S3_BUCKET`
-- `NANO_REPLAY_STAGING_S3_REGION`
-- `NANO_REPLAY_STAGING_S3_USE_TLS`
-
-Collector needs read access to staging and write/delete access to its independent Replay
-bucket through the corresponding `NANO_REPLAY_S3_*` variables. Browser and Control
-Plane receive no object-store credentials.
-
-## KMS Is Deferred
-
-The repository development `KeyProvider` and static 32-byte KEK are local/test only.
-Production Replay remains blocked until a reviewed cloud or Vault KMS provider supplies
-least-privilege wrap/unwrap identities, rotation, revocation, recovery, and audit. There
-is no approved static-KEK production fallback. Metadata-only production mode is a
-separate future decision.
-
-## Health And Failure Semantics
-
-- Control Plane readiness checks Application PostgreSQL only. Collector failure must
-  not make admission, cancellation, or product reads unhealthy.
-- Worker readiness checks Application PostgreSQL. Collector outage increases the
-  bounded in-memory queue and may eventually drop new diagnostics; Jobs and Checkpoints
-  continue.
-- Collector readiness checks Observability PostgreSQL and both object stores.
-- Dashboard list/detail/replay may be unavailable while Collector is unavailable; this
-  has no product-authority meaning.
-
-Expected incident behavior:
+Delivery results are bounded to `acknowledged`, `buffer_full`, `timed_out`, and
+`failed`. No Trace, Run, Chat, or user identity is used as a metric label.
 
 | Failure | Product effect | Trace effect | Operator action |
 |---|---|---|---|
-| Collector/network unavailable | none | memory retry, then bounded overflow | recover Collector; inspect queue/drop logs |
-| Worker hard crash | normal Job recovery | unsent tail may be incomplete | restart Worker; do not fabricate records |
-| Observability PostgreSQL down | none | Collector cannot ACK/query | recover only Observability service |
-| Application PostgreSQL down | product unavailable | producers cannot recover work | recover Application service |
-| Invalid/auth Batch | none | permanent diagnostic drop | fix token/protocol before restart |
-| Purge delivery failure | deletion access tombstoned after Collector receives it; command remains durable before then | purge retries | recover route/token; never delete command manually |
+| Producer buffer full | none | new Record is rejected asynchronously | inspect buffered gauges and broker health |
+| Broker/network outage | none | callbacks time out or fail; pre-ack tail may be lost | restore Kafka and verify acknowledgements recover |
+| Worker hard crash | normal Job recovery | unacknowledged producer tail may be incomplete | restart Worker; do not fabricate Trace records |
+| Processor/ClickHouse outage | none | Kafka lag and oldest age grow | repair Processor/ClickHouse and let it catch up |
+| Invalid/oversized envelope | instrumentation call reports an error | Record never reaches Kafka | fix producer correctness defect |
+| Purge delivery failure | product deletion command stays durable | purge is delayed | restore Kafka; never advance or delete the command manually |
 
-Memory exporter diagnostics must contain counts, Batch/record identities, and error
-class only. Never log Prompt, Response, Tool input/result, wrapped keys, nonces, tokens,
-or service credentials.
+## Backlog response
 
-## Collector Operations
+Use consumer lag and oldest-message age together. Locate the affected partition and
+the oldest retained message, stop the cause, then let the Processor catch up. Do not
+manually advance consumer offsets to make a graph green.
 
-Projection lag:
+Temporary processing failures retain the offset for retry. Permanently invalid data is
+written to durable quarantine before its offset is committed. `acks=all` does not
+replace this consumer-side retention/quarantine boundary.
 
-```sql
-select count(*) filter (where projected_sequence < committed_sequence) as lagged_traces,
-       coalesce(sum(committed_sequence - projected_sequence), 0) as unprojected_records
-from obs_traces;
-```
+## Shutdown
 
-Incomplete Traces:
+On shutdown, each product process stops taking work, marks its Kafka Trace Sink closed,
+flushes franz-go with the bounded process shutdown context, and closes the producer
+once. A flush failure increments the shutdown metric and is logged because remaining
+buffered records may be lost.
 
-```sql
-select trace_id, run_id, active, projected_sequence
-from obs_trace_summaries
-where active = true
-order by started_at_unix_nano desc
-limit 100;
-```
-
-Durable purge commands in Application PostgreSQL:
-
-```sql
-select delivery_state, count(*), max(attempt_count), min(next_attempt_at)
-from agentobs_outbox_commands
-group by delivery_state
-order by delivery_state;
-```
-
-Rebuild projection data without changing raw authority:
-
-```sh
-NANO_COLLECTOR_DATABASE_URL="$OBSERVABILITY_DATABASE_URL" \
-go run ./cmd/collector-rebuild '<trace-id>'
-
-NANO_COLLECTOR_DATABASE_URL="$OBSERVABILITY_DATABASE_URL" \
-go run ./cmd/collector-rebuild all
-```
-
-## Retirement And Restore
-
-Deploy the migration only after backups are verified: it irreversibly drops the retired
-full-Trace Outbox and PostgreSQL Replay staging metadata. Do not point the runtime back
-at those relations during a Collector outage. Restoring a pre-cutover backup requires
-the previous release's migration tooling in an isolated environment, then normal
-Collector ingestion before the current release is started.
-
-## Verification Gates
+## Verification gates
 
 ```sh
 scripts/test-go
-scripts/test-web
-scripts/test-sprint5-capacity
+go test -race ./internal/agentbatch -run TestKafkaTraceSink -count=1
+go test ./infra/compose -count=1
 ```
 
-The capacity gate proves:
-
-- 10 concurrent producers / 2,540 records stay below 10,000 records and 32 MiB;
-- commit-before-ACK retries idempotently with zero diagnostic drops while resident;
-- 100,000 Trace summaries list below 500 ms p95 at the Control Plane boundary;
-- a 256-Span detail loads below one second p95.
-
-The dedicated failure-domain check stops `observability-postgres`, verifies Application
-PostgreSQL remains ready, and runs direct admission successfully before restarting the
-Observability service.
+Acceptance also requires a static check that product code contains no
+`agentbatch.Exporter`, `NewExporter`, `ErrQueueFull`, application pending/inflight
+Trace queue stats, production HTTP Trace selection, or blocking `Produce`/
+`ProduceSync` call on the product Trace path.

@@ -54,18 +54,24 @@ type Catalog struct {
 
 	// Kafka-to-ClickHouse Trace analytics pipeline. Labels are deliberately
 	// operational and bounded; identities remain in Trace storage and logs.
-	AgentTraceProcessorMessages      *prometheus.CounterVec
-	AgentTraceProcessorBatchRecords  prometheus.Histogram
-	AgentTraceProcessorBatchBytes    prometheus.Histogram
-	AgentTraceProcessorDuration      *prometheus.HistogramVec
-	AgentTraceOffsetCommitFailures   prometheus.Counter
-	AgentTraceConsumerRebalances     *prometheus.CounterVec
-	AgentTraceConsumerLag            *prometheus.GaugeVec
-	AgentTraceOldestMessageAge       *prometheus.GaugeVec
-	AgentTraceSearchableFreshness    prometheus.Gauge
-	AgentTraceRawSummaryWatermarkGap prometheus.Gauge
-	ClickHouseRequests               *prometheus.CounterVec
-	ClickHouseRequestDuration        *prometheus.HistogramVec
+	AgentTraceProducerOfferRejected    *prometheus.CounterVec
+	AgentTraceProducerDeliveries       *prometheus.CounterVec
+	AgentTraceProducerDeliveryDuration *prometheus.HistogramVec
+	AgentTraceProducerBufferedRecords  prometheus.Gauge
+	AgentTraceProducerBufferedBytes    prometheus.Gauge
+	AgentTraceProducerShutdownFailures prometheus.Counter
+	AgentTraceProcessorMessages        *prometheus.CounterVec
+	AgentTraceProcessorBatchRecords    prometheus.Histogram
+	AgentTraceProcessorBatchBytes      prometheus.Histogram
+	AgentTraceProcessorDuration        *prometheus.HistogramVec
+	AgentTraceOffsetCommitFailures     prometheus.Counter
+	AgentTraceConsumerRebalances       *prometheus.CounterVec
+	AgentTraceConsumerLag              *prometheus.GaugeVec
+	AgentTraceOldestMessageAge         *prometheus.GaugeVec
+	AgentTraceSearchableFreshness      prometheus.Gauge
+	AgentTraceRawSummaryWatermarkGap   prometheus.Gauge
+	ClickHouseRequests                 *prometheus.CounterVec
+	ClickHouseRequestDuration          *prometheus.HistogramVec
 }
 
 // NewCatalog constructs and registers every metric against reg. It panics
@@ -137,6 +143,18 @@ func NewCatalog(reg *Registry) *Catalog {
 	c.CollectorProjectionQueueStuckOldestSeconds = mustGaugeVec(reg, "nano_collector_projection_queue_stuck_oldest_seconds",
 		"Age of the oldest Trace stuck in the Collector projection queue, by error code.", []string{"error_code"})
 
+	c.AgentTraceProducerOfferRejected = mustCounterVec(reg, "nano_agent_trace_producer_offer_rejected_total",
+		"Agent Trace offers rejected synchronously before Kafka buffering.", []string{"reason"})
+	c.AgentTraceProducerDeliveries = mustCounterVec(reg, "nano_agent_trace_producer_deliveries_total",
+		"Agent Trace Kafka delivery callbacks by bounded result.", []string{"result"})
+	c.AgentTraceProducerDeliveryDuration = mustHistogramVec(reg, "nano_agent_trace_producer_delivery_duration_seconds",
+		"Time from Agent Trace submission to Kafka delivery callback.", []string{"result"}, HTTPDurationBuckets)
+	c.AgentTraceProducerBufferedRecords = mustGauge(reg, "nano_agent_trace_producer_buffered_records",
+		"Agent Trace Records currently buffered by the Kafka producer client.")
+	c.AgentTraceProducerBufferedBytes = mustGauge(reg, "nano_agent_trace_producer_buffered_bytes",
+		"Agent Trace key and value bytes currently buffered by the Kafka producer client.")
+	c.AgentTraceProducerShutdownFailures = mustCounter(reg, "nano_agent_trace_producer_shutdown_failures_total",
+		"Agent Trace Kafka producer flush failures during shutdown.")
 	c.AgentTraceProcessorMessages = mustCounterVec(reg, "nano_agent_trace_processor_messages_total",
 		"Agent Trace Kafka messages by terminal processor result.", []string{"result"})
 	c.AgentTraceProcessorBatchRecords = mustHistogram(reg, "nano_agent_trace_processor_batch_records",

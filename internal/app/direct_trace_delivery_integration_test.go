@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -13,9 +14,9 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
 
-func TestDirectTraceAdmissionCommitsOnlyAnchorAndProductSurvivesExporterOverflow(t *testing.T) {
+func TestDirectTraceAdmissionCommitsOnlyAnchorAndProductSurvivesTraceOfferFailure(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "direct-trace-admission@example.com")
-	sink := &capturingDirectTraceSink{err: agentbatch.ErrQueueFull}
+	sink := &capturingDirectTraceSink{err: errors.New("Trace envelope rejected")}
 	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, TraceSink: sink}), api.db)
 	api.handler = api.server.Handler()
 

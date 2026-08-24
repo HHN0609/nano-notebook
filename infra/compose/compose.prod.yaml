@@ -22,8 +22,6 @@ services:
       NANO_WEB_BASE_URL: http://localhost
       NANO_COLLECTOR_URL: http://collector:8082
       NANO_COLLECTOR_QUERY_TOKEN: nano-prod-collector-query-token
-      NANO_COLLECTOR_SERVICE_TOKEN: nano-prod-collector-token
-      NANO_AGENT_TRACE_TRANSPORT: kafka
       NANO_AGENT_TRACE_KAFKA_BROKERS: kafka-1:19092,kafka-2:19092,kafka-3:19092
       NANO_AGENT_TRACE_KAFKA_TOPIC: nano.observability.agent-trace.v1
       NANO_AGENT_TRACE_KAFKA_CLIENT_ID: nano-control-plane-agent-trace
@@ -75,9 +73,6 @@ services:
       NANO_QDRANT_COLLECTION: nano-source-evidence-gemini-2-768-v1
       NANO_QDRANT_DENSE_DIMENSIONS: "768"
       NANO_QDRANT_URL: http://qdrant:6333
-      NANO_COLLECTOR_URL: http://collector:8082
-      NANO_COLLECTOR_SERVICE_TOKEN: nano-prod-collector-token
-      NANO_AGENT_TRACE_TRANSPORT: kafka
       NANO_AGENT_TRACE_KAFKA_BROKERS: kafka-1:19092,kafka-2:19092,kafka-3:19092
       NANO_AGENT_TRACE_KAFKA_TOPIC: nano.observability.agent-trace.v1
       NANO_AGENT_TRACE_KAFKA_CLIENT_ID: nano-worker-agent-trace
@@ -360,6 +355,7 @@ services:
     environment:
       NANO_KAFKA_BOOTSTRAP_SERVER: kafka-1:19092,kafka-2:19092,kafka-3:19092
       NANO_KAFKA_REPLICATION_FACTOR: "3"
+      NANO_KAFKA_MIN_INSYNC_REPLICAS: "2"
     entrypoint: ["/bin/bash", "/opt/nano/init-topics.sh"]
     volumes:
       - ../kafka/init-topics.sh:/opt/nano/init-topics.sh:ro

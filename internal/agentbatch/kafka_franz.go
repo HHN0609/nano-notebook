@@ -77,6 +77,41 @@ func (p *FranzKafkaProducer) ProduceSync(ctx context.Context, messages []KafkaMe
 	return errs
 }
 
+func (p *FranzKafkaProducer) TryProduce(ctx context.Context, message KafkaMessage, callback func(error)) {
+	if p == nil || p.client == nil {
+		callback(errors.New("nil Agent Trace franz-go producer"))
+		return
+	}
+	p.client.TryProduce(ctx, &kgo.Record{
+		Topic: message.Topic,
+		Key:   append([]byte(nil), message.Key...),
+		Value: append([]byte(nil), message.Value...),
+	}, func(_ *kgo.Record, err error) {
+		callback(err)
+	})
+}
+
+func (p *FranzKafkaProducer) Flush(ctx context.Context) error {
+	if p == nil || p.client == nil {
+		return errors.New("nil Agent Trace franz-go producer")
+	}
+	return p.client.Flush(ctx)
+}
+
+func (p *FranzKafkaProducer) BufferedRecords() int64 {
+	if p == nil || p.client == nil {
+		return 0
+	}
+	return p.client.BufferedProduceRecords()
+}
+
+func (p *FranzKafkaProducer) BufferedBytes() int64 {
+	if p == nil || p.client == nil {
+		return 0
+	}
+	return p.client.BufferedProduceBytes()
+}
+
 func (p *FranzKafkaProducer) Ping(ctx context.Context) error {
 	if p == nil || p.client == nil {
 		return errors.New("nil Agent Trace franz-go producer")

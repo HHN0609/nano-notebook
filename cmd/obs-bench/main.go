@@ -19,23 +19,22 @@ import (
 )
 
 type config struct {
-	Transport       string
-	Store           string
-	Endpoint        string
-	Token           string
-	KafkaBrokers    []string
-	KafkaTopic      string
-	KafkaClientID   string
-	KafkaMaxRetries int
-	ProducerID      string
-	DatasetID       string
-	Seed            string
-	EventEpoch      time.Time
-	Roots           uint64
-	Rate            float64
-	StartDelay      time.Duration
-	Timeout         time.Duration
-	MaximumLate     time.Duration
+	Transport     string
+	Store         string
+	Endpoint      string
+	Token         string
+	KafkaBrokers  []string
+	KafkaTopic    string
+	KafkaClientID string
+	ProducerID    string
+	DatasetID     string
+	Seed          string
+	EventEpoch    time.Time
+	Roots         uint64
+	Rate          float64
+	StartDelay    time.Duration
+	Timeout       time.Duration
+	MaximumLate   time.Duration
 }
 
 func parseConfig(args []string) (config, error) {
@@ -51,7 +50,6 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&kafkaBrokers, "kafka-brokers", "", "comma-separated Kafka bootstrap brokers")
 	flags.StringVar(&parsed.KafkaTopic, "kafka-topic", "nano.observability.agent-trace.v1", "Durable Agent Trace topic")
 	flags.StringVar(&parsed.KafkaClientID, "kafka-client-id", "nano-obs-bench-producer", "Kafka producer client identity")
-	flags.IntVar(&parsed.KafkaMaxRetries, "kafka-max-retries", agentbatch.DefaultKafkaMaxRetries, "outer Kafka Batch retries after the initial attempt")
 	flags.StringVar(&parsed.ProducerID, "producer-id", "nano-obs-bench/loadgen", "Collector producer identity")
 	flags.StringVar(&parsed.DatasetID, "dataset", "", "versioned dataset identity")
 	flags.StringVar(&parsed.Seed, "seed", "", "deterministic fixture seed")
@@ -86,7 +84,7 @@ func parseConfig(args []string) (config, error) {
 	if parsed.Transport == "http" && (parsed.Endpoint == "" || parsed.Token == "") {
 		return config{}, errors.New("Stage A HTTP benchmark configuration is incomplete")
 	}
-	if parsed.Transport == "kafka" && (len(parsed.KafkaBrokers) == 0 || parsed.KafkaTopic == "" || parsed.KafkaClientID == "" || parsed.KafkaMaxRetries < 0) {
+	if parsed.Transport == "kafka" && (len(parsed.KafkaBrokers) == 0 || parsed.KafkaTopic == "" || parsed.KafkaClientID == "") {
 		return config{}, errors.New("Kafka benchmark configuration is incomplete")
 	}
 	var err error
@@ -99,18 +97,23 @@ func parseConfig(args []string) (config, error) {
 }
 
 type runOutput struct {
-	SchemaVersion             int              `json:"schema_version"`
-	Stage                     obsbench.Stage   `json:"stage"`
-	DatasetID                 string           `json:"dataset_id"`
-	ManifestSHA256            string           `json:"manifest_sha256"`
-	OfferedRootRunsPerSecond  float64          `json:"offered_root_runs_per_second"`
-	AchievedRootRunsPerSecond float64          `json:"achieved_root_runs_per_second"`
-	RootAgentRuns             uint64           `json:"root_agent_runs"`
-	TotalAgentRuns            uint64           `json:"total_agent_runs"`
-	Records                   uint64           `json:"records"`
-	LateArrivals              uint64           `json:"late_arrivals"`
-	ElapsedMilliseconds       float64          `json:"elapsed_ms"`
-	ProducerStats             agentbatch.Stats `json:"producer_stats"`
+	SchemaVersion             int            `json:"schema_version"`
+	Stage                     obsbench.Stage `json:"stage"`
+	DatasetID                 string         `json:"dataset_id"`
+	ManifestSHA256            string         `json:"manifest_sha256"`
+	OfferedRootRunsPerSecond  float64        `json:"offered_root_runs_per_second"`
+	AchievedRootRunsPerSecond float64        `json:"achieved_root_runs_per_second"`
+	RootAgentRuns             uint64         `json:"root_agent_runs"`
+	TotalAgentRuns            uint64         `json:"total_agent_runs"`
+	Records                   uint64         `json:"records"`
+	LateArrivals              uint64         `json:"late_arrivals"`
+	ElapsedMilliseconds       float64        `json:"elapsed_ms"`
+	ProducerStats             producerStats  `json:"producer_stats"`
+}
+
+type producerStats struct {
+	BufferedRecords int64 `json:"buffered_records"`
+	BufferedBytes   int64 `json:"buffered_bytes"`
 }
 
 func main() {
@@ -141,9 +144,13 @@ func run(ctx context.Context, config config, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	var sender agentbatch.Sender
+	var sink interface {
+		Offer(context.Context, agentbatch.Envelope) error
+		ForceFlush(context.Context) error
+	}
 	stage := stageFor(config)
-	closeSender := func() {}
+	shutdownSink := func(context.Context) error { return nil }
+	readStats := func() producerStats { return producerStats{} }
 	if config.Transport == "kafka" {
 		producer, err := agentbatch.NewFranzKafkaProducer(agentbatch.FranzKafkaConfig{
 			Brokers: config.KafkaBrokers, ClientID: config.KafkaClientID,
@@ -157,25 +164,27 @@ func run(ctx context.Context, config config, output io.Writer) error {
 			producer.Close()
 			return fmt.Errorf("check Kafka benchmark readiness: %w", err)
 		}
-		closeSender = producer.Close
-		sender, err = agentbatch.NewKafkaSender(agentbatch.KafkaSenderConfig{
-			Topic: config.KafkaTopic, Producer: producer, MaxRetries: config.KafkaMaxRetries,
+		kafkaSink, sinkErr := agentbatch.NewKafkaTraceSink(agentbatch.KafkaTraceSinkConfig{
+			ProducerID: config.ProducerID, Topic: config.KafkaTopic, Producer: producer,
+			MaxMessageBytes: agentbatch.DefaultKafkaTraceMaxMessageBytes,
 		})
+		err = sinkErr
+		if err == nil {
+			sink = kafkaSink
+			shutdownSink = kafkaSink.Shutdown
+			readStats = func() producerStats {
+				return producerStats{BufferedRecords: producer.BufferedRecords(), BufferedBytes: producer.BufferedBytes()}
+			}
+		}
 	} else {
+		var sender *agentbatch.HTTPSender
 		sender, err = agentbatch.NewHTTPSender(agentbatch.HTTPSenderConfig{
 			Endpoint: config.Endpoint, ServiceToken: config.Token, HTTPClient: &http.Client{Timeout: 10 * time.Second},
 		})
+		if err == nil {
+			sink, err = agentbatch.NewSynchronousTraceSink(config.ProducerID, sender)
+		}
 	}
-	if err != nil {
-		closeSender()
-		return err
-	}
-	defer closeSender()
-	exporter, err := agentbatch.NewExporter(agentbatch.Config{
-		ProducerID: config.ProducerID, Sender: sender,
-		MaxPendingRecords: 10_000, MaxPendingBytes: 32 * 1024 * 1024,
-		MaxBatchRecords: 128, MaxBatchBytes: 512 * 1024, MaxDelay: 250 * time.Millisecond,
-	})
 	if err != nil {
 		return err
 	}
@@ -184,9 +193,10 @@ func run(ctx context.Context, config config, output io.Writer) error {
 	startAt := time.Now().UTC().Add(config.StartDelay)
 	result, runErr := obsbench.RunLevel(runCtx, obsbench.RunnerConfig{
 		Workload: workload, Seed: config.Seed, EventEpoch: config.EventEpoch,
-		Schedule: schedule, StartAt: startAt, MaximumArrivalLateness: config.MaximumLate, Sink: exporter,
+		Schedule: schedule, StartAt: startAt, MaximumArrivalLateness: config.MaximumLate, Sink: sink,
 	})
-	shutdownErr := exporter.Shutdown(runCtx)
+	stats := readStats()
+	shutdownErr := shutdownSink(runCtx)
 	if err := errors.Join(runErr, shutdownErr); err != nil {
 		return err
 	}
@@ -201,7 +211,7 @@ func run(ctx context.Context, config config, output io.Writer) error {
 		AchievedRootRunsPerSecond: float64(result.RootAgentRuns) / elapsed.Seconds(),
 		RootAgentRuns:             result.RootAgentRuns, TotalAgentRuns: result.TotalAgentRuns, Records: result.Records,
 		LateArrivals: result.LateArrivals, ElapsedMilliseconds: float64(elapsed) / float64(time.Millisecond),
-		ProducerStats: exporter.Stats(),
+		ProducerStats: stats,
 	}
 	encoder := json.NewEncoder(output)
 	encoder.SetEscapeHTML(false)

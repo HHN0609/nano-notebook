@@ -29,27 +29,24 @@ import (
 )
 
 type controlPlaneConfig struct {
-	DatabaseURL           string
-	Addr                  string
-	CollectorURL          string
-	CollectorQueryToken   string
-	CollectorServiceToken string
-	ProducerID            string
-	TraceTransport        string
-	TraceKafkaBrokers     []string
-	TraceKafkaTopic       string
-	TraceKafkaClientID    string
-	TraceKafkaMaxRetries  int
-	ReplayKeyID           string
-	ReplayKEK             []byte
-	CookieSecure          bool
-	Version               string
-	DefaultModel          string
-	ResearchModel         string
-	AgentConfigurationID  string
-	AgentRelease          agentcatalog.Reference
-	SourceS3              objectstore.S3Config
-	FetcherURL            string
+	DatabaseURL          string
+	Addr                 string
+	CollectorURL         string
+	CollectorQueryToken  string
+	ProducerID           string
+	TraceKafkaBrokers    []string
+	TraceKafkaTopic      string
+	TraceKafkaClientID   string
+	ReplayKeyID          string
+	ReplayKEK            []byte
+	CookieSecure         bool
+	Version              string
+	DefaultModel         string
+	ResearchModel        string
+	AgentConfigurationID string
+	AgentRelease         agentcatalog.Reference
+	SourceS3             objectstore.S3Config
+	FetcherURL           string
 }
 
 func main() {
@@ -142,32 +139,17 @@ func main() {
 		slog.Error("Collector Query client configuration invalid", "error", err)
 		os.Exit(1)
 	}
-	traceSender, err := agentbatch.NewManagedSender(ctx, agentbatch.ManagedSenderConfig{
-		Transport: agentbatch.TraceTransport(config.TraceTransport),
-		HTTP: agentbatch.HTTPSenderConfig{
-			Endpoint:     config.CollectorURL + "/internal/agent-observability/v2/batches",
-			ServiceToken: config.CollectorServiceToken,
-			HTTPClient:   &http.Client{Timeout: 10 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)},
-		},
-		Kafka: agentbatch.ManagedKafkaConfig{
-			Brokers: config.TraceKafkaBrokers, Topic: config.TraceKafkaTopic, ClientID: config.TraceKafkaClientID,
-			MaxBufferedRecords: 10_000, MaxBufferedBytes: 32 * 1024 * 1024,
-			DeliveryTimeout: 10 * time.Second, Linger: 5 * time.Millisecond, ReadinessTimeout: 10 * time.Second,
-			MaxRetries: config.TraceKafkaMaxRetries,
-		},
+	traceSink, err := agentbatch.NewManagedKafkaTraceSink(ctx, agentbatch.ManagedKafkaTraceSinkConfig{
+		ProducerID: config.ProducerID, Brokers: config.TraceKafkaBrokers,
+		Topic: config.TraceKafkaTopic, ClientID: config.TraceKafkaClientID,
+		MaxBufferedRecords: agentbatch.DefaultKafkaTraceMaxBufferedRecords,
+		MaxBufferedBytes:   agentbatch.DefaultKafkaTraceMaxBufferedBytes,
+		DeliveryTimeout:    agentbatch.DefaultKafkaTraceDeliveryTimeout,
+		Linger:             agentbatch.DefaultKafkaTraceLinger, ReadinessTimeout: agentbatch.DefaultKafkaTraceReadinessTimeout,
+		MaxMessageBytes: agentbatch.DefaultKafkaTraceMaxMessageBytes, Observer: metricsCatalog,
 	})
 	if err != nil {
-		slog.Error("Agent Trace Sender unavailable", "transport", config.TraceTransport, "error", err)
-		os.Exit(1)
-	}
-	traceExporter, err := agentbatch.NewExporter(agentbatch.Config{
-		ProducerID: config.ProducerID, Sender: traceSender,
-		MaxPendingRecords: 10_000, MaxPendingBytes: 32 * 1024 * 1024,
-		MaxBatchRecords: 128, MaxBatchBytes: 512 * 1024, MaxDelay: 250 * time.Millisecond,
-	})
-	if err != nil {
-		traceSender.Close()
-		slog.Error("Agent Trace memory exporter configuration invalid", "error", err)
+		slog.Error("Agent Trace Kafka Sink unavailable", "error", err)
 		os.Exit(1)
 	}
 	keyProvider, err := replay.NewDevelopmentKeyProvider(config.ReplayKeyID, config.ReplayKEK)
@@ -184,7 +166,7 @@ func main() {
 		CookieSecure: config.CookieSecure, Version: config.Version, DefaultModel: config.DefaultModel,
 		AgentRun: runConfig, AgentConfiguration: agentConfiguration,
 		AgentCatalog: definitionCatalog, AgentRelease: config.AgentRelease,
-		AdminTraces: queryClient, AdminTraceAnalytics: queryClient, ReplaySealer: replaySealer, TraceSink: traceExporter,
+		AdminTraces: queryClient, AdminTraceAnalytics: queryClient, ReplaySealer: replaySealer, TraceSink: traceSink,
 		SourceUploads: sourceStore,
 		SourceFetcher: remoteFetcher, SourceSnapshots: sourceStore,
 		Metrics: metricsCatalog,
@@ -227,18 +209,13 @@ func main() {
 	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("control-plane metrics listener shutdown incomplete", "error", err)
 	}
-	if err := traceExporter.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("Agent Trace memory flush incomplete; bounded unsent records were dropped on process exit", "error", err)
+	if err := traceSink.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("Agent Trace Kafka flush incomplete; buffered records may be lost on process exit", "error", err)
 	}
-	traceSender.Close()
 	slog.Info("control-plane stopped")
 }
 
 func loadControlPlaneConfig() (controlPlaneConfig, error) {
-	traceKafkaMaxRetries, err := strconv.Atoi(env("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", strconv.Itoa(agentbatch.DefaultKafkaMaxRetries)))
-	if err != nil {
-		return controlPlaneConfig{}, fmt.Errorf("parse NANO_AGENT_TRACE_KAFKA_MAX_RETRIES: %w", err)
-	}
 	replayKEK, err := base64.StdEncoding.DecodeString(env("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA="))
 	if err != nil {
 		return controlPlaneConfig{}, fmt.Errorf("parse NANO_REPLAY_KEK_BASE64: %w", err)
@@ -252,18 +229,15 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 		return controlPlaneConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}
 	config := controlPlaneConfig{
-		DatabaseURL:           env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
-		Addr:                  env("NANO_CONTROL_PLANE_ADDR", ":8080"),
-		CollectorURL:          strings.TrimRight(env("NANO_COLLECTOR_URL", "http://127.0.0.1:8082"), "/"),
-		CollectorQueryToken:   env("NANO_COLLECTOR_QUERY_TOKEN", "nano-local-collector-query-token"),
-		CollectorServiceToken: env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
-		ProducerID:            env("NANO_CONTROL_PLANE_PRODUCER_ID", "nano-control-plane"),
-		TraceTransport:        strings.ToLower(strings.TrimSpace(env("NANO_AGENT_TRACE_TRANSPORT", "kafka"))),
-		TraceKafkaBrokers:     splitTraceKafkaBrokers(env("NANO_AGENT_TRACE_KAFKA_BROKERS", "127.0.0.1:59092")),
-		TraceKafkaTopic:       env("NANO_AGENT_TRACE_KAFKA_TOPIC", "nano.observability.agent-trace.v1"),
-		TraceKafkaClientID:    env("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "nano-control-plane-agent-trace"),
-		TraceKafkaMaxRetries:  traceKafkaMaxRetries,
-		ReplayKeyID:           env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
+		DatabaseURL:         env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
+		Addr:                env("NANO_CONTROL_PLANE_ADDR", ":8080"),
+		CollectorURL:        strings.TrimRight(env("NANO_COLLECTOR_URL", "http://127.0.0.1:8082"), "/"),
+		CollectorQueryToken: env("NANO_COLLECTOR_QUERY_TOKEN", "nano-local-collector-query-token"),
+		ProducerID:          env("NANO_CONTROL_PLANE_PRODUCER_ID", "nano-control-plane"),
+		TraceKafkaBrokers:   splitTraceKafkaBrokers(env("NANO_AGENT_TRACE_KAFKA_BROKERS", "127.0.0.1:59092")),
+		TraceKafkaTopic:     env("NANO_AGENT_TRACE_KAFKA_TOPIC", "nano.observability.agent-trace.v1"),
+		TraceKafkaClientID:  env("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "nano-control-plane-agent-trace"),
+		ReplayKeyID:         env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 		CookieSecure: os.Getenv("NANO_COOKIE_SECURE") == "true", Version: env("NANO_VERSION", "dev"),
 		DefaultModel:         env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
 		ResearchModel:        env("NANO_RESEARCH_MODEL", env("NANO_CHAT_MODEL", "aliyun/qwen-plus")),
@@ -285,15 +259,8 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 		strings.TrimSpace(config.ReplayKeyID) == "" || strings.TrimSpace(config.FetcherURL) == "" || len(config.ReplayKEK) != 32 {
 		return controlPlaneConfig{}, errors.New("Control Plane configuration is incomplete")
 	}
-	if config.TraceTransport != string(agentbatch.TraceTransportKafka) && config.TraceTransport != string(agentbatch.TraceTransportHTTP) {
-		return controlPlaneConfig{}, errors.New("Control Plane Agent Trace transport is invalid")
-	}
-	if config.TraceTransport == string(agentbatch.TraceTransportKafka) &&
-		(len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "" || config.TraceKafkaMaxRetries < 0) {
+	if len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "" {
 		return controlPlaneConfig{}, errors.New("Control Plane Agent Trace Kafka configuration is incomplete")
-	}
-	if config.TraceTransport == string(agentbatch.TraceTransportHTTP) && strings.TrimSpace(config.CollectorServiceToken) == "" {
-		return controlPlaneConfig{}, errors.New("Control Plane Agent Trace HTTP configuration is incomplete")
 	}
 	return config, nil
 }

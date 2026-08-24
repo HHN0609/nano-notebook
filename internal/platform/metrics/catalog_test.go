@@ -99,6 +99,48 @@ func TestTraceAnalyticsPipelineMetricsUseOnlyBoundedOperationalLabels(t *testing
 	}
 }
 
+func TestKafkaTraceProducerMetricsUseOnlyBoundedOperationalLabels(t *testing.T) {
+	reg := NewRegistry()
+	catalog := NewCatalog(reg)
+	catalog.AgentTraceProducerOfferRejected.WithLabelValues("invalid").Inc()
+	catalog.AgentTraceProducerDeliveries.WithLabelValues("acknowledged").Inc()
+	catalog.AgentTraceProducerDeliveryDuration.WithLabelValues("acknowledged").Observe(0.01)
+	catalog.AgentTraceProducerBufferedRecords.Set(1)
+	catalog.AgentTraceProducerBufferedBytes.Set(1024)
+	catalog.AgentTraceProducerShutdownFailures.Inc()
+	want := map[string][]string{
+		"nano_agent_trace_producer_offer_rejected_total":      {"reason"},
+		"nano_agent_trace_producer_deliveries_total":          {"result"},
+		"nano_agent_trace_producer_delivery_duration_seconds": {"result"},
+		"nano_agent_trace_producer_buffered_records":          nil,
+		"nano_agent_trace_producer_buffered_bytes":            nil,
+		"nano_agent_trace_producer_shutdown_failures_total":   nil,
+	}
+	families, err := reg.Prometheus().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := make(map[string][]string)
+	for _, family := range families {
+		if len(family.Metric) == 0 {
+			continue
+		}
+		actual[family.GetName()] = []string{}
+		for _, pair := range family.Metric[0].Label {
+			actual[family.GetName()] = append(actual[family.GetName()], pair.GetName())
+		}
+	}
+	for name, labels := range want {
+		got, ok := actual[name]
+		if !ok {
+			t.Fatalf("metric %q is not registered", name)
+		}
+		if len(got) != len(labels) {
+			t.Fatalf("metric %q labels=%v want=%v", name, got, labels)
+		}
+	}
+}
+
 // TestCatalogCardinalityBudget materializes one series per combination in
 // each metric's declared label domain (allowlists.go) and asserts the
 // total exposed series stays under the 15,000-per-instance budget from PRD

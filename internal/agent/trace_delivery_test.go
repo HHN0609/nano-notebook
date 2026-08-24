@@ -83,7 +83,7 @@ func TestTraceTransactionPublishFailureCannotUndoCommittedProductResult(t *testi
 	if publish.Attempted != 1 || publish.Accepted != 0 || publish.Failed != 1 {
 		t.Fatalf("publish result = %#v", publish)
 	}
-	if len(publish.Errors) != 1 || !errors.Is(publish.Errors[0], agentbatch.ErrQueueFull) {
+	if len(publish.Errors) != 1 || !errors.Is(publish.Errors[0], errTraceOfferRejected) {
 		t.Fatalf("publish errors = %#v", publish.Errors)
 	}
 }
@@ -130,10 +130,12 @@ type recordingTraceSink struct {
 	failIdentity string
 }
 
+var errTraceOfferRejected = errors.New("Trace envelope rejected")
+
 func (s *recordingTraceSink) Offer(_ context.Context, envelope agentbatch.Envelope) error {
 	s.envelopes = append(s.envelopes, envelope)
 	if envelope.Record.IdentityKey == s.failIdentity {
-		return agentbatch.ErrQueueFull
+		return errTraceOfferRejected
 	}
 	return nil
 }

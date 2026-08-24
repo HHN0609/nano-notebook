@@ -3,7 +3,6 @@ package app_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,12 +11,9 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
-	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/jackc/pgx/v5"
@@ -25,98 +21,6 @@ import (
 )
 
 const sprint5CapacitySummaryCount = 100_000
-
-func TestSprint5BoundedMemoryTenConcurrentTraceProducers(t *testing.T) {
-	if os.Getenv("NANO_RUN_SPRINT5_CAPACITY") != "1" {
-		t.Skip("set NANO_RUN_SPRINT5_CAPACITY=1 to run the production-shaped capacity gate")
-	}
-	store := collector.NewMemoryStore()
-	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "capacity-producer", Store: store})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sender := &capacityDirectSender{ingestor: ingestor}
-	exporter, err := agentbatch.NewExporter(agentbatch.Config{
-		ProducerID: "capacity-producer", Sender: sender,
-		MaxPendingRecords: 10_000, MaxPendingBytes: 32 * 1024 * 1024,
-		MaxBatchRecords: 128, MaxBatchBytes: 512 * 1024, MaxDelay: 250 * time.Millisecond,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	errorsByProducer := make(chan error, 10)
-	for producer := 0; producer < 10; producer++ {
-		go func(producer int) {
-			traceID := agentobs.TraceID(fmt.Sprintf("trace-direct-cap-%02d", producer))
-			rootID := agentobs.SpanID(fmt.Sprintf("root-direct-cap-%02d", producer))
-			descriptor := collector.TraceDescriptor{
-				TraceID: traceID, RunID: fmt.Sprintf("run-direct-cap-%02d", producer),
-				ChatID: fmt.Sprintf("chat-direct-cap-%02d", producer), NotebookID: "notebook-direct-cap",
-				RootSpanID: rootID, AgentName: "nano-research-agent", SchemaVersion: 1, SemanticConventionVersion: 1,
-			}
-			for recordIndex := 0; recordIndex < 254; recordIndex++ {
-				kind, name, identity := agentobs.RecordEvent, "nano.capacity.event", fmt.Sprintf("run/%s/event/%03d", descriptor.RunID, recordIndex)
-				if recordIndex == 0 {
-					kind, name, identity = agentobs.RecordSpanStarted, "agent.execution", "run/"+descriptor.RunID+"/root/start"
-				}
-				record := agentobs.Record{
-					SchemaVersion: 1, SemanticConventionVersion: 1, PayloadVersion: 1,
-					IdentityKey: identity, Kind: kind, TraceID: traceID, SpanID: rootID, Name: name,
-					OccurredAt: time.Unix(1_700_500_000+int64(recordIndex), 0).UTC(),
-					Attributes: []agentobs.Attribute{agentobs.String("capacity.payload", strings.Repeat("x", 3400))},
-				}
-				if err := exporter.Offer(ctx, agentbatch.Envelope{Trace: descriptor, Record: record}); err != nil {
-					errorsByProducer <- err
-					return
-				}
-			}
-			errorsByProducer <- nil
-		}(producer)
-	}
-	for range 10 {
-		if err := <-errorsByProducer; err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := exporter.ForceFlush(ctx); err != nil {
-		t.Fatal(err)
-	}
-	stats := exporter.Stats()
-	if stats.PendingRecords != 0 || stats.DroppedRecords != 0 || !sender.lostACK {
-		t.Fatalf("direct capacity Stats=%#v lost_ack=%t", stats, sender.lostACK)
-	}
-	for producer := 0; producer < 10; producer++ {
-		traceID := agentobs.TraceID(fmt.Sprintf("trace-direct-cap-%02d", producer))
-		if got := len(store.Records(traceID)); got != 254 {
-			t.Fatalf("Trace %s records=%d, want 254", traceID, got)
-		}
-	}
-	if err := exporter.Shutdown(ctx); err != nil {
-		t.Fatal(err)
-	}
-}
-
-type capacityDirectSender struct {
-	mu       sync.Mutex
-	ingestor *collector.Ingestor
-	lostACK  bool
-}
-
-func (s *capacityDirectSender) Send(ctx context.Context, batch collector.Batch) (collector.BatchResult, error) {
-	result, err := s.ingestor.Ingest(ctx, batch)
-	if err != nil {
-		return collector.BatchResult{}, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.lostACK {
-		s.lostACK = true
-		return collector.BatchResult{}, errors.New("capacity ACK lost after Collector commit")
-	}
-	return result, nil
-}
 
 func TestSprint5QueryCapacityAtControlPlaneBoundary(t *testing.T) {
 	if os.Getenv("NANO_RUN_SPRINT5_CAPACITY") != "1" {

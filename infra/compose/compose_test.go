@@ -103,6 +103,12 @@ func TestKafkaTopicContract(t *testing.T) {
 	if !strings.Contains(script, "604800000") {
 		t.Error("topic initializer does not pin the seven-day Kafka replay window")
 	}
+	if !strings.Contains(script, "min.insync.replicas") || !strings.Contains(script, "NANO_KAFKA_MIN_INSYNC_REPLICAS") {
+		t.Error("topic initializer does not pin the application topic ISR requirement")
+	}
+	if !strings.Contains(script, "kafka-configs.sh") || !strings.Contains(script, "--alter") {
+		t.Error("topic initializer does not update min ISR on existing application topics")
+	}
 }
 
 func TestClickHouseComposeContract(t *testing.T) {
@@ -191,8 +197,10 @@ func TestProductionTraceTopologyUsesKafkaAndClickHouse(t *testing.T) {
 	}
 	for _, name := range []string{"control-plane", "worker"} {
 		service := file.Services[name]
-		if service.Environment["NANO_AGENT_TRACE_TRANSPORT"] != "kafka" ||
-			service.Environment["NANO_AGENT_TRACE_KAFKA_BROKERS"] != "kafka-1:19092,kafka-2:19092,kafka-3:19092" {
+		if _, found := service.Environment["NANO_AGENT_TRACE_TRANSPORT"]; found {
+			t.Fatalf("%s still exposes Trace transport selection", name)
+		}
+		if service.Environment["NANO_AGENT_TRACE_KAFKA_BROKERS"] != "kafka-1:19092,kafka-2:19092,kafka-3:19092" {
 			t.Fatalf("%s is not a Kafka Trace producer: %#v", name, service.Environment)
 		}
 	}
@@ -206,6 +214,9 @@ func TestProductionTraceTopologyUsesKafkaAndClickHouse(t *testing.T) {
 	init := file.Services["kafka-init"]
 	if init.Environment["NANO_KAFKA_REPLICATION_FACTOR"] != "3" {
 		t.Fatalf("production topic replication factor = %q", init.Environment["NANO_KAFKA_REPLICATION_FACTOR"])
+	}
+	if init.Environment["NANO_KAFKA_MIN_INSYNC_REPLICAS"] != "2" {
+		t.Fatalf("production topic min ISR = %q", init.Environment["NANO_KAFKA_MIN_INSYNC_REPLICAS"])
 	}
 	processor, ok := file.Services["agent-trace-processor-clickhouse"]
 	if !ok || processor.Environment["NANO_AGENT_TRACE_PROCESSOR_STORE"] != "clickhouse" ||
@@ -234,10 +245,13 @@ func TestStartAndGoGateUseDefaultClickHouseTraceTopology(t *testing.T) {
 		t.Fatal(err)
 	}
 	startScript := string(start)
-	for _, required := range []string{"NANO_AGENT_TRACE_TRANSPORT", "NANO_COLLECTOR_URL", "agent-trace-processor-clickhouse", "collector"} {
+	for _, required := range []string{"NANO_AGENT_TRACE_KAFKA_BROKERS", "NANO_COLLECTOR_URL", "agent-trace-processor-clickhouse", "collector"} {
 		if !strings.Contains(startScript, required) {
 			t.Errorf("scripts/start is missing %s", required)
 		}
+	}
+	if strings.Contains(startScript, "NANO_AGENT_TRACE_TRANSPORT") {
+		t.Error("scripts/start still exposes removed Trace transport selection")
 	}
 	if strings.Contains(startScript, "scripts/prepare-observability-db") || strings.Contains(startScript, "go run ./cmd/collector") {
 		t.Error("scripts/start still starts the PostgreSQL-era Collector path")

@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-24
 
-**Status:** Approved in conversation; awaiting written-spec review
+**Status:** Approved
 
 **Supersedes:** the producer queue, transport-selection, retry, and rollback sections of `2026-08-18-kafka-clickhouse-default-trace-cutover-design.md`
 

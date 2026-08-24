@@ -2,6 +2,8 @@ package collector
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
@@ -104,6 +106,45 @@ type SequencedRecord struct {
 	Sequence        int             `json:"-"`
 	Record          agentobs.Record `json:"-"`
 	CanonicalSHA256 string          `json:"-"`
+}
+
+// ValidateDirectTraceChunk validates a producer-built chunk whose final
+// sequence numbers are assigned by the retained store.
+func ValidateDirectTraceChunk(chunk TraceChunk) error {
+	if _, err := CanonicalTraceDescriptor(chunk.Trace); err != nil {
+		return err
+	}
+	if chunk.SequenceAuthority != SequenceAuthorityCollector || chunk.FirstSequence != 0 || len(chunk.Records) == 0 {
+		return errors.New("Collector direct Trace Chunk is empty or has producer-owned sequencing")
+	}
+	for _, envelope := range chunk.Records {
+		if err := envelope.Record.Validate(); err != nil {
+			return err
+		}
+		if envelope.Record.TraceID != chunk.Trace.TraceID || envelope.Record.SchemaVersion != chunk.Trace.SchemaVersion ||
+			envelope.Record.SemanticConventionVersion != chunk.Trace.SemanticConventionVersion {
+			return errors.New("Collector direct Trace Record changed its envelope")
+		}
+		hash, err := envelope.Record.CanonicalHash()
+		if err != nil || envelope.CanonicalSHA256 != hex.EncodeToString(hash[:]) {
+			return errors.New("Collector direct Trace Record canonical hash is invalid")
+		}
+	}
+	// Direct producers identify Replay attachments by immutable Record identity;
+	// the retained store assigns final sequence numbers. Validate against a
+	// temporary sequence projection without mutating the wire descriptor.
+	validationChunk := chunk
+	validationChunk.Attachments = append([]AttachmentDescriptor(nil), chunk.Attachments...)
+	sequences := make(map[string]int, len(chunk.Records))
+	for index, envelope := range chunk.Records {
+		sequences[envelope.Record.IdentityKey] = index + 1
+	}
+	for index := range validationChunk.Attachments {
+		if validationChunk.Attachments[index].RecordSequence == 0 {
+			validationChunk.Attachments[index].RecordSequence = sequences[validationChunk.Attachments[index].RecordIdentityKey]
+		}
+	}
+	return validateAttachmentDescriptors(validationChunk)
 }
 
 type BatchResult struct {

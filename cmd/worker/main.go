@@ -56,19 +56,12 @@ type workerConfig struct {
 	LeaderModel                    string
 	ResearchModel                  string
 	Addr                           string
-	CollectorEndpoint              string
-	CollectorServiceToken          string
 	ProducerID                     string
-	TraceTransport                 string
 	TraceKafkaBrokers              []string
 	TraceKafkaTopic                string
 	TraceKafkaClientID             string
-	TraceKafkaMaxRetries           int
 	TraceKafkaPurgeTopic           string
 	TraceKafkaPurgeClientID        string
-	BatchMaxRecords                int
-	BatchMaxEncodedBytes           int
-	BatchMaxDelay                  time.Duration
 	HTTPTimeout                    time.Duration
 	PurgeMaxCommands               int
 	PurgeLeaseDuration             time.Duration
@@ -123,10 +116,6 @@ type workerConfig struct {
 	MailLeaseDuration              time.Duration
 	MailPollInterval               time.Duration
 	MailSMTPTimeout                time.Duration
-}
-
-type traceFlusher interface {
-	ForceFlush(context.Context) error
 }
 
 type purgeOutboxSender interface {
@@ -375,31 +364,17 @@ func main() {
 		slog.Error("Replay Stager invalid", "error", err)
 		os.Exit(1)
 	}
-	traceSender, err := agentbatch.NewManagedSender(ctx, agentbatch.ManagedSenderConfig{
-		Transport: agentbatch.TraceTransport(config.TraceTransport),
-		HTTP: agentbatch.HTTPSenderConfig{
-			Endpoint: config.CollectorEndpoint, ServiceToken: config.CollectorServiceToken,
-			HTTPClient: &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
-		},
-		Kafka: agentbatch.ManagedKafkaConfig{
-			Brokers: config.TraceKafkaBrokers, Topic: config.TraceKafkaTopic, ClientID: config.TraceKafkaClientID,
-			MaxBufferedRecords: 10_000, MaxBufferedBytes: 32 * 1024 * 1024,
-			DeliveryTimeout: 10 * time.Second, Linger: 5 * time.Millisecond, ReadinessTimeout: 10 * time.Second,
-			MaxRetries: config.TraceKafkaMaxRetries,
-		},
+	traceSink, err := agentbatch.NewManagedKafkaTraceSink(ctx, agentbatch.ManagedKafkaTraceSinkConfig{
+		ProducerID: config.ProducerID, Brokers: config.TraceKafkaBrokers,
+		Topic: config.TraceKafkaTopic, ClientID: config.TraceKafkaClientID,
+		MaxBufferedRecords: agentbatch.DefaultKafkaTraceMaxBufferedRecords,
+		MaxBufferedBytes:   agentbatch.DefaultKafkaTraceMaxBufferedBytes,
+		DeliveryTimeout:    agentbatch.DefaultKafkaTraceDeliveryTimeout,
+		Linger:             agentbatch.DefaultKafkaTraceLinger, ReadinessTimeout: agentbatch.DefaultKafkaTraceReadinessTimeout,
+		MaxMessageBytes: agentbatch.DefaultKafkaTraceMaxMessageBytes, Observer: metricsCatalog,
 	})
 	if err != nil {
-		slog.Error("Agent Trace Sender unavailable", "transport", config.TraceTransport, "error", err)
-		os.Exit(1)
-	}
-	traceExporter, err := agentbatch.NewExporter(agentbatch.Config{
-		ProducerID: config.ProducerID, Sender: traceSender,
-		MaxPendingRecords: 10_000, MaxPendingBytes: 32 * 1024 * 1024,
-		MaxBatchRecords: config.BatchMaxRecords, MaxBatchBytes: config.BatchMaxEncodedBytes, MaxDelay: config.BatchMaxDelay,
-	})
-	if err != nil {
-		traceSender.Close()
-		slog.Error("Agent Trace memory exporter invalid", "error", err)
+		slog.Error("Agent Trace Kafka Sink unavailable", "error", err)
 		os.Exit(1)
 	}
 	purgePostgres, err := agentoutbox.NewPurgeStore(db.Pool(), agentoutbox.PurgeStoreConfig{
@@ -417,35 +392,26 @@ func main() {
 	reportPurgeError := func(err error) {
 		slog.Error("Agent Trace purge delivery failed; durable command retained", "error", err)
 	}
-	if config.TraceTransport == string(agentbatch.TraceTransportKafka) {
-		purgeKafkaProducer, err = agentbatch.NewFranzKafkaProducer(agentbatch.FranzKafkaConfig{
-			Brokers: config.TraceKafkaBrokers, ClientID: config.TraceKafkaPurgeClientID,
-			MaxBufferedRecords: 1_000, MaxBufferedBytes: 8 * 1024 * 1024,
-			DeliveryTimeout: 10 * time.Second, Linger: 5 * time.Millisecond,
-		})
-		if err == nil {
-			readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			err = purgeKafkaProducer.Ping(readyCtx)
-			cancel()
-		}
-		if err == nil {
-			purgeSender, err = agentoutbox.NewKafkaPurgeSender(purgePostgres, agentoutbox.KafkaPurgeSenderConfig{
-				Topic: config.TraceKafkaPurgeTopic, Producer: purgeKafkaProducer, ReportError: reportPurgeError,
-			})
-		}
-	} else {
-		purgeSender, err = agentoutbox.NewPurgeSender(purgePostgres, agentoutbox.SenderConfig{
-			PurgeEndpoint: strings.TrimSuffix(config.CollectorEndpoint, "/v2/batches") + "/v1/purges",
-			ServiceToken:  config.CollectorServiceToken,
-			HTTPClient:    &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
-			ReportError:   reportPurgeError,
+	purgeKafkaProducer, err = agentbatch.NewFranzKafkaProducer(agentbatch.FranzKafkaConfig{
+		Brokers: config.TraceKafkaBrokers, ClientID: config.TraceKafkaPurgeClientID,
+		MaxBufferedRecords: 1_000, MaxBufferedBytes: 8 * 1024 * 1024,
+		DeliveryTimeout: 10 * time.Second, Linger: 5 * time.Millisecond,
+	})
+	if err == nil {
+		readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err = purgeKafkaProducer.Ping(readyCtx)
+		cancel()
+	}
+	if err == nil {
+		purgeSender, err = agentoutbox.NewKafkaPurgeSender(purgePostgres, agentoutbox.KafkaPurgeSenderConfig{
+			Topic: config.TraceKafkaPurgeTopic, Producer: purgeKafkaProducer, ReportError: reportPurgeError,
 		})
 	}
 	if err != nil {
 		if purgeKafkaProducer != nil {
 			purgeKafkaProducer.Close()
 		}
-		slog.Error("Agent Trace purge Sender invalid", "transport", config.TraceTransport, "error", err)
+		slog.Error("Agent Trace purge Kafka Sender invalid", "error", err)
 		os.Exit(1)
 	}
 	var searchProvider websearch.Provider = notConfiguredWebSearchProvider{}
@@ -473,7 +439,7 @@ func main() {
 	}
 	grounder := agent.NewGroundingService(db.Pool())
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
-		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge),
+		agent.WithTraceSink(traceSink), agent.WithBestEffortTraceExporter(traceBridge),
 		agent.WithReplayStager(replayStager), agent.WithGroundingService(grounder), agent.WithTaskMetrics(taskMetrics))
 	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient).WithMetrics(taskMetrics)
 	calculateTool := agent.NewCalculateAction()
@@ -511,7 +477,7 @@ func main() {
 			Action: workspaceTool, Scheduling: scheduling, CrashReplaySafe: true,
 		})
 	}
-	configuredDelegationTools, err := agent.NewConfiguredDelegationToolRegistrations(definitionCatalog, db.Pool(), agent.ResearchAvailabilityFrom(searchProvider), traceExporter)
+	configuredDelegationTools, err := agent.NewConfiguredDelegationToolRegistrations(definitionCatalog, db.Pool(), agent.ResearchAvailabilityFrom(searchProvider), traceSink)
 	if err != nil {
 		slog.Error("configured Delegation Tools invalid", "error", err)
 		os.Exit(1)
@@ -569,7 +535,7 @@ func main() {
 	})
 	roleRuntime := agent.NewLeaderExecutor(
 		db.Pool(), controller, agent.NewModelResearchPlanner(modelClient), searchProvider,
-		agent.WithLeaderTraceSink(traceExporter),
+		agent.WithLeaderTraceSink(traceSink),
 		agent.WithLeaderReplayStager(replayStager), agent.WithResearchCandidateValidator(candidateValidator),
 		agent.WithResearchMCPToolPlane(mcpToolHost, researchChild),
 		agent.WithResearchResultContract(researchResultContract),
@@ -607,7 +573,7 @@ func main() {
 	)
 	mailDone := make(chan error, 1)
 	go func() { mailDone <- mailSender.Run(ctx, config.MailPollInterval) }()
-	jobQueue := jobs.NewQueueWithTraceSink(db.Pool(), traceExporter).WithMetrics(taskMetrics)
+	jobQueue := jobs.NewQueueWithTraceSink(db.Pool(), traceSink).WithMetrics(taskMetrics)
 	workerService := agentworker.NewServiceWithConcurrency(db.Pool(), jobQueue, executionHost, 5*time.Second, 210*time.Second, config.AgentInteractiveConcurrency).WithMetrics(metricsCatalog)
 	workerDone := make(chan error, 1)
 	go func() {
@@ -635,7 +601,7 @@ func main() {
 	sourceProcessor := sourceprocessing.NewProcessorWithExtractorTraceAndRenderer(
 		db.Pool(), sourceQueue, evidence.NewPublisher(db.Pool(), sourceObjects), sourceObjects,
 		sourceprojection.New(db.Pool(), qdrant, modelClient),
-		sourceExtractor, documentRenderer, traceExporter,
+		sourceExtractor, documentRenderer, traceSink,
 		sourceprocessing.Config{
 			ExtractionConfigID: config.SourceExtractionConfigID,
 			ExtractorAdapterID: "native-with-isolated-renderer",
@@ -774,10 +740,9 @@ func main() {
 	if purgeKafkaProducer != nil {
 		purgeKafkaProducer.Close()
 	}
-	if err := shutdownTraceExporter(shutdownCtx, traceExporter); err != nil {
-		slog.Warn("Agent Trace memory flush incomplete; bounded unsent records were dropped on process exit", "error", err)
+	if err := traceSink.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("Agent Trace Kafka flush incomplete; buffered records may be lost on process exit", "error", err)
 	}
-	traceSender.Close()
 	slog.Info("worker stopped")
 }
 
@@ -815,32 +780,10 @@ func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority
 	return version, created, nil
 }
 
-func shutdownTraceExporter(ctx context.Context, exporter interface {
-	traceFlusher
-	Shutdown(context.Context) error
-}) error {
-	if err := exporter.ForceFlush(ctx); err != nil {
-		return err
-	}
-	return exporter.Shutdown(ctx)
-}
-
 func loadWorkerConfig() (workerConfig, error) {
 	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@12"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
-	}
-	maxRecords, err := workerEnvInt("NANO_TRACE_BATCH_MAX_RECORDS", 128)
-	if err != nil {
-		return workerConfig{}, err
-	}
-	traceKafkaMaxRetries, err := workerEnvInt("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", agentbatch.DefaultKafkaMaxRetries)
-	if err != nil {
-		return workerConfig{}, err
-	}
-	maxEncodedBytes, err := workerEnvInt("NANO_TRACE_BATCH_MAX_ENCODED_BYTES", 512*1024)
-	if err != nil {
-		return workerConfig{}, err
 	}
 	purgeMaxCommands, err := workerEnvInt("NANO_TRACE_PURGE_MAX_COMMANDS", 16)
 	if err != nil {
@@ -851,10 +794,6 @@ func loadWorkerConfig() (workerConfig, error) {
 		return workerConfig{}, err
 	}
 	purgePollInterval, err := workerEnvDuration("NANO_TRACE_PURGE_POLL_INTERVAL", 100*time.Millisecond)
-	if err != nil {
-		return workerConfig{}, err
-	}
-	maxDelay, err := workerEnvDuration("NANO_TRACE_BATCH_MAX_DELAY", 250*time.Millisecond)
 	if err != nil {
 		return workerConfig{}, err
 	}
@@ -978,7 +917,6 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_REPLAY_KEK_BASE64: %w", err)
 	}
-	collectorURL := strings.TrimRight(env("NANO_COLLECTOR_URL", "http://127.0.0.1:8082"), "/")
 	config := workerConfig{
 		DatabaseURL:             env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
 		AgentConfigurationID:    env("NANO_AGENT_CONFIGURATION_ID", "nano-interactive-v1"),
@@ -986,18 +924,13 @@ func loadWorkerConfig() (workerConfig, error) {
 		LeaderModel:             env("NANO_CHAT_MODEL", "aliyun/qwen-plus"),
 		ResearchModel:           env("NANO_RESEARCH_MODEL", env("NANO_CHAT_MODEL", "aliyun/qwen-plus")),
 		Addr:                    env("NANO_WORKER_ADDR", ":8081"),
-		CollectorEndpoint:       collectorURL + "/internal/agent-observability/v2/batches",
-		CollectorServiceToken:   env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
 		ProducerID:              env("NANO_COLLECTOR_PRODUCER_ID", "nano-worker"),
-		TraceTransport:          strings.ToLower(strings.TrimSpace(env("NANO_AGENT_TRACE_TRANSPORT", "kafka"))),
 		TraceKafkaBrokers:       splitTraceKafkaBrokers(env("NANO_AGENT_TRACE_KAFKA_BROKERS", "127.0.0.1:59092")),
 		TraceKafkaTopic:         env("NANO_AGENT_TRACE_KAFKA_TOPIC", "nano.observability.agent-trace.v1"),
 		TraceKafkaClientID:      env("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "nano-worker-agent-trace"),
-		TraceKafkaMaxRetries:    traceKafkaMaxRetries,
 		TraceKafkaPurgeTopic:    env("NANO_AGENT_TRACE_KAFKA_PURGE_TOPIC", "nano.observability.agent-trace-purge.v1"),
 		TraceKafkaPurgeClientID: env("NANO_AGENT_TRACE_KAFKA_PURGE_CLIENT_ID", "nano-worker-agent-trace-purge"),
-		BatchMaxRecords:         maxRecords, BatchMaxEncodedBytes: maxEncodedBytes, BatchMaxDelay: maxDelay,
-		HTTPTimeout: httpTimeout, PurgeMaxCommands: purgeMaxCommands,
+		HTTPTimeout:             httpTimeout, PurgeMaxCommands: purgeMaxCommands,
 		PurgeLeaseDuration: purgeLeaseDuration, PurgePollInterval: purgePollInterval,
 		PurgeBaseBackoff: purgeBaseBackoff, PurgeMaxBackoff: purgeMaxBackoff,
 		ReplayStagingS3: objectstore.S3Config{
@@ -1059,8 +992,7 @@ func loadWorkerConfig() (workerConfig, error) {
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.AgentConfigurationID) == "" ||
 		config.AgentRelease.Identity == "" ||
 		strings.TrimSpace(config.LeaderModel) == "" || strings.TrimSpace(config.ResearchModel) == "" || strings.TrimSpace(config.Addr) == "" ||
-		strings.TrimSpace(config.ProducerID) == "" || config.BatchMaxRecords < 1 ||
-		config.BatchMaxEncodedBytes < 1 || config.BatchMaxDelay < 0 || config.HTTPTimeout <= 0 ||
+		strings.TrimSpace(config.ProducerID) == "" || config.HTTPTimeout <= 0 ||
 		config.PurgeMaxCommands < 1 || config.PurgeLeaseDuration <= 0 || config.PurgePollInterval <= 0 ||
 		config.PurgeBaseBackoff <= 0 || config.PurgeMaxBackoff < config.PurgeBaseBackoff || strings.TrimSpace(config.ReplayStagingS3.Endpoint) == "" ||
 		strings.TrimSpace(config.ReplayStagingS3.AccessKeyID) == "" || strings.TrimSpace(config.ReplayStagingS3.SecretAccessKey) == "" ||
@@ -1091,22 +1023,14 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.MailLeaseDuration <= 0 || config.MailPollInterval <= 0 || config.MailSMTPTimeout <= 0 {
 		return workerConfig{}, errors.New("worker configuration is incomplete or inconsistent")
 	}
-	if config.TraceTransport != string(agentbatch.TraceTransportKafka) && config.TraceTransport != string(agentbatch.TraceTransportHTTP) {
-		return workerConfig{}, errors.New("worker Agent Trace transport is invalid")
-	}
 	// The web-reader sidecar is an optional capability: an empty URL disables
 	// the HTML quality-gate fallback entirely.
 	if strings.TrimSpace(config.WebReaderURL) != "" && config.WebReaderTimeout <= 0 {
 		return workerConfig{}, errors.New("worker Web Reader configuration is invalid")
 	}
-	if config.TraceTransport == string(agentbatch.TraceTransportKafka) &&
-		(len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "" ||
-			config.TraceKafkaMaxRetries < 0 || strings.TrimSpace(config.TraceKafkaPurgeTopic) == "" || strings.TrimSpace(config.TraceKafkaPurgeClientID) == "" || config.TraceKafkaPurgeTopic == config.TraceKafkaTopic) {
+	if len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "" ||
+		strings.TrimSpace(config.TraceKafkaPurgeTopic) == "" || strings.TrimSpace(config.TraceKafkaPurgeClientID) == "" || config.TraceKafkaPurgeTopic == config.TraceKafkaTopic {
 		return workerConfig{}, errors.New("worker Agent Trace Kafka configuration is incomplete")
-	}
-	if config.TraceTransport == string(agentbatch.TraceTransportHTTP) &&
-		(strings.TrimSpace(collectorURL) == "" || strings.TrimSpace(config.CollectorServiceToken) == "") {
-		return workerConfig{}, errors.New("worker Agent Trace HTTP configuration is incomplete")
 	}
 	return config, nil
 }

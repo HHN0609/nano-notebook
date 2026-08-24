@@ -45,12 +45,10 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	}
 }
 
-func TestLoadWorkerConfigDefaultsAgentTraceTransportToKafka(t *testing.T) {
-	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "")
+func TestLoadWorkerConfigDefaultsKafkaTraceProducer(t *testing.T) {
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_BROKERS", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_TOPIC", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "")
-	t.Setenv("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_PURGE_TOPIC", "")
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_PURGE_CLIENT_ID", "")
 
@@ -58,36 +56,28 @@ func TestLoadWorkerConfigDefaultsAgentTraceTransportToKafka(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadWorkerConfig: %v", err)
 	}
-	if config.TraceTransport != "kafka" || len(config.TraceKafkaBrokers) != 1 || config.TraceKafkaBrokers[0] != "127.0.0.1:59092" ||
-		config.TraceKafkaTopic != "nano.observability.agent-trace.v1" || config.TraceKafkaClientID != "nano-worker-agent-trace" || config.TraceKafkaMaxRetries != 3 ||
+	if len(config.TraceKafkaBrokers) != 1 || config.TraceKafkaBrokers[0] != "127.0.0.1:59092" ||
+		config.TraceKafkaTopic != "nano.observability.agent-trace.v1" || config.TraceKafkaClientID != "nano-worker-agent-trace" ||
 		config.TraceKafkaPurgeTopic != "nano.observability.agent-trace-purge.v1" || config.TraceKafkaPurgeClientID != "nano-worker-agent-trace-purge" {
-		t.Fatalf("Agent Trace transport defaults = %#v", config)
+		t.Fatalf("Agent Trace Kafka defaults = %#v", config)
 	}
 }
 
-func TestLoadWorkerConfigSupportsExplicitHTTPAndRejectsInvalidTraceTransport(t *testing.T) {
-	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "http")
-	if config, err := loadWorkerConfig(); err != nil || config.TraceTransport != "http" {
-		t.Fatalf("explicit HTTP config = %#v, %v", config, err)
-	}
-	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "udp")
-	if _, err := loadWorkerConfig(); err == nil {
-		t.Fatal("loadWorkerConfig accepted unknown Agent Trace transport")
-	}
-}
-
-func TestLoadWorkerConfigRejectsMissingKafkaTraceTransportConfig(t *testing.T) {
-	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "kafka")
+func TestLoadWorkerConfigRejectsMissingKafkaTraceConfig(t *testing.T) {
 	t.Setenv("NANO_AGENT_TRACE_KAFKA_TOPIC", " ")
 	if _, err := loadWorkerConfig(); err == nil {
 		t.Fatal("loadWorkerConfig accepted Kafka without a topic")
 	}
 }
 
-func TestLoadWorkerConfigRejectsNegativeKafkaRetryLimit(t *testing.T) {
-	t.Setenv("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", "-1")
-	if _, err := loadWorkerConfig(); err == nil {
-		t.Fatal("loadWorkerConfig accepted a negative Kafka retry limit")
+func TestLoadWorkerConfigIgnoresRemovedTraceQueueTransportAndRetrySettings(t *testing.T) {
+	t.Setenv("NANO_AGENT_TRACE_TRANSPORT", "udp")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_MAX_RETRIES", "not-a-number")
+	t.Setenv("NANO_TRACE_BATCH_MAX_RECORDS", "not-a-number")
+	t.Setenv("NANO_TRACE_BATCH_MAX_ENCODED_BYTES", "not-a-number")
+	t.Setenv("NANO_TRACE_BATCH_MAX_DELAY", "not-a-duration")
+	if _, err := loadWorkerConfig(); err != nil {
+		t.Fatalf("removed Trace settings still affect Worker config: %v", err)
 	}
 }
 
@@ -190,15 +180,15 @@ func (a *workerRetrievalAuthority) RequireActive(context.Context) error {
 	return a.requiredErr
 }
 
-func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
+func TestLoadWorkerConfigIncludesKafkaTraceAndPurgeSettings(t *testing.T) {
 	t.Setenv("NANO_DATABASE_URL", "postgres://application")
 	t.Setenv("NANO_WORKER_ADDR", ":18081")
-	t.Setenv("NANO_COLLECTOR_URL", "http://collector.internal:8082/")
-	t.Setenv("NANO_COLLECTOR_SERVICE_TOKEN", "sender-secret")
 	t.Setenv("NANO_COLLECTOR_PRODUCER_ID", "worker-a")
-	t.Setenv("NANO_TRACE_BATCH_MAX_RECORDS", "64")
-	t.Setenv("NANO_TRACE_BATCH_MAX_ENCODED_BYTES", "262144")
-	t.Setenv("NANO_TRACE_BATCH_MAX_DELAY", "333ms")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_BROKERS", "kafka-a:9092,kafka-b:9092")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_TOPIC", "trace-topic")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_CLIENT_ID", "trace-client")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_PURGE_TOPIC", "purge-topic")
+	t.Setenv("NANO_AGENT_TRACE_KAFKA_PURGE_CLIENT_ID", "purge-client")
 	t.Setenv("NANO_TRACE_HTTP_TIMEOUT", "7s")
 	t.Setenv("NANO_TRACE_PURGE_MAX_COMMANDS", "8")
 	t.Setenv("NANO_TRACE_PURGE_LEASE_DURATION", "20s")
@@ -266,13 +256,12 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	if config.DatabaseURL != "postgres://application" || config.Addr != ":18081" {
 		t.Fatalf("Application config = %#v", config)
 	}
-	if config.CollectorEndpoint != "http://collector.internal:8082/internal/agent-observability/v2/batches" || config.CollectorServiceToken != "sender-secret" || config.ProducerID != "worker-a" {
-		t.Fatalf("Collector config = %#v", config)
+	if config.ProducerID != "worker-a" || len(config.TraceKafkaBrokers) != 2 || config.TraceKafkaTopic != "trace-topic" ||
+		config.TraceKafkaClientID != "trace-client" || config.TraceKafkaPurgeTopic != "purge-topic" ||
+		config.TraceKafkaPurgeClientID != "purge-client" || config.PurgeMaxCommands != 8 {
+		t.Fatalf("Trace producer config = %#v", config)
 	}
-	if config.BatchMaxRecords != 64 || config.BatchMaxEncodedBytes != 262144 || config.PurgeMaxCommands != 8 {
-		t.Fatalf("batch bounds = %#v", config)
-	}
-	if config.PurgeLeaseDuration != 20*time.Second || config.PurgePollInterval != 125*time.Millisecond || config.BatchMaxDelay != 333*time.Millisecond || config.HTTPTimeout != 7*time.Second {
+	if config.PurgeLeaseDuration != 20*time.Second || config.PurgePollInterval != 125*time.Millisecond || config.HTTPTimeout != 7*time.Second {
 		t.Fatalf("Sender timing = %#v", config)
 	}
 	if config.ReplayStagingS3.Endpoint != "staging.internal:9000" || config.ReplayStagingS3.AccessKeyID != "worker-staging-key" ||
@@ -327,38 +316,6 @@ func TestLoadWorkerConfigRejectsWorkloadCapacityAboveTenInteractiveJobs(t *testi
 	if _, err := loadWorkerConfig(); err == nil {
 		t.Fatal("loadWorkerConfig accepted more than ten interactive jobs")
 	}
-}
-
-func TestLoadWorkerConfigRejectsInvalidSenderBounds(t *testing.T) {
-	t.Setenv("NANO_TRACE_BATCH_MAX_RECORDS", "0")
-	if _, err := loadWorkerConfig(); err == nil {
-		t.Fatal("loadWorkerConfig accepted zero max records")
-	}
-}
-
-func TestShutdownTraceExporterFlushesThenStopsMemoryExporter(t *testing.T) {
-	wantErr := errors.New("collector unavailable")
-	flusher := &workerFlusher{err: wantErr}
-	err := shutdownTraceExporter(context.Background(), flusher)
-	if !errors.Is(err, wantErr) || flusher.flushCalls != 1 || flusher.shutdownCalls != 0 {
-		t.Fatalf("shutdownTraceExporter err=%v flush=%d shutdown=%d", err, flusher.flushCalls, flusher.shutdownCalls)
-	}
-}
-
-type workerFlusher struct {
-	flushCalls    int
-	shutdownCalls int
-	err           error
-}
-
-func (f *workerFlusher) ForceFlush(context.Context) error {
-	f.flushCalls++
-	return f.err
-}
-
-func (f *workerFlusher) Shutdown(context.Context) error {
-	f.shutdownCalls++
-	return nil
 }
 
 func TestRetryUntilReadySucceedsAfterTransientFailures(t *testing.T) {
