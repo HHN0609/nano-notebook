@@ -26,12 +26,6 @@ services:
       context: ../..
       dockerfile: infra/worker/Dockerfile
 
-  fetcher:
-    image: ""
-    build:
-      context: ../..
-      dockerfile: infra/fetcher/Dockerfile
-
   collector:
     image: ""
     build:

@@ -51,14 +51,6 @@ jobs:
           docker push $ECR_REGISTRY/nano-notebook-worker:latest
 
           docker build \
-            -f infra/fetcher/Dockerfile \
-            -t $ECR_REGISTRY/nano-notebook-fetcher:$IMAGE_TAG \
-            -t $ECR_REGISTRY/nano-notebook-fetcher:latest \
-            .
-          docker push $ECR_REGISTRY/nano-notebook-fetcher:$IMAGE_TAG
-          docker push $ECR_REGISTRY/nano-notebook-fetcher:latest
-
-          docker build \
             -f infra/collector/Dockerfile \
             -t $ECR_REGISTRY/nano-notebook-collector:$IMAGE_TAG \
             -t $ECR_REGISTRY/nano-notebook-collector:latest \
@@ -73,6 +65,14 @@ jobs:
             .
           docker push $ECR_REGISTRY/nano-notebook-document-renderer:$IMAGE_TAG
           docker push $ECR_REGISTRY/nano-notebook-document-renderer:latest
+
+          docker build \
+            -f infra/web-reader/Dockerfile \
+            -t $ECR_REGISTRY/nano-notebook-web-reader:$IMAGE_TAG \
+            -t $ECR_REGISTRY/nano-notebook-web-reader:latest \
+            .
+          docker push $ECR_REGISTRY/nano-notebook-web-reader:$IMAGE_TAG
+          docker push $ECR_REGISTRY/nano-notebook-web-reader:latest
 
           docker build \
             -f infra/nginx/Dockerfile \

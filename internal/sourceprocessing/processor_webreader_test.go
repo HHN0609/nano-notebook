@@ -74,6 +74,25 @@ func TestNativeExtractorHTMLKeepsPrimaryExtractionWhenQualityGatePasses(t *testi
 	}
 }
 
+func TestNativeExtractorDoesNotRefetchReaderBackedMarkdownSources(t *testing.T) {
+	reader := &fakeWebReader{page: webreader.Page{Content: readerMarkdown}}
+	extractor := sourceprocessing.NewNativeExtractorWithWebReader(nil, reader, sourceprocessing.NativeExtractorConfig{})
+	payload := []byte("# Stored Reader page\n\nThis immutable Markdown is already the canonical URL Source input.")
+
+	artifact, err := extractor.Extract(context.Background(), source.Source{
+		ID: "src_reader_markdown", Format: source.FormatMarkdown, FinalURL: "https://example.com/post",
+	}, payload, "extract-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reader.calls != 0 {
+		t.Fatalf("web reader calls=%d, want no second URL fetch", reader.calls)
+	}
+	if artifact.Format != "markdown" || artifact.ExtractionConfigID != "extract-v1" {
+		t.Fatalf("artifact format/config=%q/%q", artifact.Format, artifact.ExtractionConfigID)
+	}
+}
+
 func TestNativeExtractorHTMLFallbackFailuresSurfaceQualityGateCause(t *testing.T) {
 	base := sourceprocessing.NewNativeExtractorWithWebReader(nil, nil, sourceprocessing.NativeExtractorConfig{})
 	_, legacyErr := base.Extract(context.Background(), htmlSource("https://example.com/app"), []byte(jsShellHTML), "extract-v1")

@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
+	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -152,7 +152,7 @@ func sourceDiscoveryImports(w http.ResponseWriter, r *http.Request, s *Server, u
 		writeError(w, r, http.StatusBadRequest, "idempotency_required", "error.idempotency_required")
 		return
 	}
-	if s.cfg.SourceFetcher == nil || s.cfg.SourceSnapshots == nil {
+	if s.cfg.SourceReader == nil || s.cfg.SourceSnapshots == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "source_fetch_unavailable", "error.source_fetch_unavailable")
 		return
 	}
@@ -358,11 +358,11 @@ func sourceDiscoveryRetry(w http.ResponseWriter, r *http.Request, s *Server, use
 
 func discoveryImportErrorCode(err error) string {
 	switch {
-	case errors.Is(err, fetcher.ErrUnsafeDestination):
+	case errors.Is(err, webreader.ErrUnsafeDestination):
 		return "unsafe_destination"
-	case errors.Is(err, fetcher.ErrResponseTooLarge), errors.Is(err, source.ErrQuotaReached):
+	case errors.Is(err, webreader.ErrResponseTooLarge), errors.Is(err, source.ErrQuotaReached):
 		return "limits_exceeded"
-	case errors.Is(err, fetcher.ErrUnsupportedType):
+	case errors.Is(err, webreader.ErrUnsupportedType):
 		return "unsupported_source"
 	case errors.Is(err, errSourceObjectWrite):
 		return "source_store_unavailable"

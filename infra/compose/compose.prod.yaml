@@ -17,7 +17,8 @@ services:
       NANO_CONTROL_PLANE_ADDR: ":8080"
       NANO_DATABASE_URL: postgres://nano:nano@postgres:5432/nano?sslmode=disable
       NANO_WORKER_URL: http://worker:8081
-      NANO_FETCHER_URL: http://fetcher:8083
+      NANO_WEB_READER_URL: http://web-reader:8085
+      NANO_WEB_READER_SERVICE_TOKEN: nano-prod-reader-token
       NANO_DOCUMENT_RENDERER_URL: http://document-renderer:8084
       NANO_WEB_BASE_URL: http://localhost
       NANO_COLLECTOR_URL: http://collector:8082
@@ -44,6 +45,8 @@ services:
         condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
+      web-reader:
+        condition: service_started
     restart: unless-stopped
 
   worker:
@@ -55,7 +58,6 @@ services:
       NANO_WORKER_ADDR: ":8081"
       NANO_DATABASE_URL: postgres://nano:nano@postgres:5432/nano?sslmode=disable
       NANO_CONTROL_PLANE_URL: http://control-plane:8080
-      NANO_FETCHER_URL: http://fetcher:8083
       NANO_DOCUMENT_RENDERER_URL: http://document-renderer:8084
       NANO_WEB_READER_URL: http://web-reader:8085
       NANO_WEB_READER_SERVICE_TOKEN: nano-prod-reader-token
@@ -95,21 +97,8 @@ services:
         condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
-    restart: unless-stopped
-
-  fetcher:
-    image: ${ECR_REGISTRY:-localhost}/nano-notebook-fetcher:${IMAGE_TAG:-latest}
-    env_file:
-      - path: .env
-        required: true
-    environment:
-      NANO_FETCHER_ADDR: ":8083"
-      NANO_FETCHER_DATABASE_URL: postgres://nano:nano@postgres:5432/nano?sslmode=disable
-      NANO_FETCHER_SERVICE_TOKEN: nano-prod-fetcher-token
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
-    depends_on:
-      postgres:
-        condition: service_healthy
+      web-reader:
+        condition: service_started
     restart: unless-stopped
 
   collector:

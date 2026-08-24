@@ -34,7 +34,7 @@ _Avoid_: Search response, shared Source list, RAG context
 
 **Web Search Provider**:
 The server-side adapter boundary that accepts a bounded query and locale hints and returns Provider-neutral discovery candidates. Brave is the first adapter; its raw envelope and credential never cross the boundary.
-_Avoid_: Evidence Search Action, Fetcher Adapter, browser search
+_Avoid_: Evidence Search Action, Source content reader, browser search
 
 **Chat Run**:
 The Member-visible durable lifecycle of one requested Chat answer. It owns product status and the input/output Message relationship; one input Message may have later Chat Runs after explicit user retries.
@@ -350,9 +350,9 @@ _Avoid_: Client filter, vector-database tenant
 
 ## External Input
 
-**Fetcher Adapter**:
-A least-privileged outbound network boundary that snapshots one approved public Source URL under strict protocol, destination, redirect, size, and time policy without access to product databases or durable credentials.
-_Avoid_: HTTP client inside the Control Plane, web-search tool
+**Web Reader Adapter**:
+A least-privileged outbound network boundary that reads one approved public HTML URL under strict protocol, destination, redirect, size, time, and concurrency policy and returns bounded cleaned Markdown without access to product databases or durable credentials.
+_Avoid_: Raw HTML archive, generic crawler, web-search tool
 
 ## Data Lifecycle
 

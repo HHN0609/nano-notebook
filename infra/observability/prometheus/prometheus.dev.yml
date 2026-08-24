@@ -1,5 +1,5 @@
 # Dev Prometheus config (docs/sprint/SPRINT-12-PRD.md criterion 7).
-# control-plane, worker, collector, and fetcher all run as host processes in
+# control-plane, worker, and collector run as host processes in
 # dev (scripts/start runs them with `go run`), not containers, so they are
 # scraped via host.docker.internal; document-renderer is the one app service
 # that IS a container in infra/compose/compose.yaml and is scraped by
@@ -32,10 +32,6 @@ scrape_configs:
   - job_name: agent-trace-processor-postgres
     static_configs:
       - targets: ["agent-trace-processor-postgres:9096"]
-
-  - job_name: fetcher
-    static_configs:
-      - targets: ["host.docker.internal:9094"]
 
   - job_name: document-renderer
     static_configs:

@@ -18,13 +18,16 @@ import (
 )
 
 var (
-	ErrRequestInvalid  = errors.New("web reader Request is invalid")
-	ErrResponseInvalid = errors.New("web reader Response is invalid")
+	ErrRequestInvalid    = errors.New("web reader Request is invalid")
+	ErrResponseInvalid   = errors.New("web reader Response is invalid")
+	ErrUnsafeDestination = errors.New("web reader destination is unsafe")
+	ErrResponseTooLarge  = errors.New("web reader response is too large")
+	ErrUnsupportedType   = errors.New("web reader content type is unsupported")
 )
 
 const (
-	FormatMarkdown = "markdown"
-	maxFormatChars = 250_000
+	FormatMarkdown  = "markdown"
+	MaxContentChars = 250_000
 )
 
 type Request struct {
@@ -42,7 +45,7 @@ func (r Request) Validate() error {
 	if r.Format != FormatMarkdown {
 		return ErrRequestInvalid
 	}
-	if r.MaxChars < 1 || r.MaxChars > maxFormatChars {
+	if r.MaxChars < 1 || r.MaxChars > MaxContentChars {
 		return ErrRequestInvalid
 	}
 	return nil
@@ -152,7 +155,7 @@ func (a *HTTPAdapter) Parse(ctx context.Context, request Request) (Page, error) 
 	if response.StatusCode != http.StatusOK {
 		var failure errorEnvelope
 		if json.Unmarshal(payload, &failure) == nil && failure.Error.Code != "" {
-			return Page{}, fmt.Errorf("web reader returned %s: %s", failure.Error.Code, failure.Error.Message)
+			return Page{}, typedSidecarError(failure.Error.Code, failure.Error.Message)
 		}
 		return Page{}, fmt.Errorf("web reader returned status %d", response.StatusCode)
 	}
@@ -174,4 +177,21 @@ func (a *HTTPAdapter) Parse(ctx context.Context, request Request) (Page, error) 
 		Title: decoded.Title, Content: decoded.Content, FinalURL: decoded.FinalURL,
 		Engine: decoded.Engine, WordCount: decoded.WordCount, Truncated: decoded.Truncated,
 	}, nil
+}
+
+func typedSidecarError(code, message string) error {
+	var kind error
+	switch code {
+	case "invalid_request":
+		kind = ErrRequestInvalid
+	case "unsafe_destination":
+		kind = ErrUnsafeDestination
+	case "response_too_large":
+		kind = ErrResponseTooLarge
+	case "unsupported_type":
+		kind = ErrUnsupportedType
+	default:
+		return fmt.Errorf("web reader returned %s: %s", code, message)
+	}
+	return fmt.Errorf("%w: %s", kind, message)
 }

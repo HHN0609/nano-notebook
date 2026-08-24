@@ -37,8 +37,8 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	if config.RetrievalBootstrapMode != "development" || config.RetrievalBootstrapConfigPath != "evals/rag/pinned-config-v1.json" {
 		t.Fatalf("Retrieval bootstrap defaults=%q/%q", config.RetrievalBootstrapMode, config.RetrievalBootstrapConfigPath)
 	}
-	if config.FetcherURL != "http://127.0.0.1:8083" {
-		t.Fatalf("Fetcher URL default=%q", config.FetcherURL)
+	if config.WebReaderURL != "http://127.0.0.1:8085" {
+		t.Fatalf("Web Reader URL default=%q", config.WebReaderURL)
 	}
 	if config.AgentRelease.String() != "nano.default@12" {
 		t.Fatalf("Agent release default=%q", config.AgentRelease)

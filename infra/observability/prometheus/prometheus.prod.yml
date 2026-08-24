@@ -1,5 +1,5 @@
 # Prod Prometheus config (docs/sprint/SPRINT-12-PRD.md criterion 7).
-# All five app services are containerized in infra/compose/compose.prod.yaml
+# Metrics-enabled app services are containerized in infra/compose/compose.prod.yaml
 # and are scraped by their Compose service name.
 global:
   scrape_interval: 15s
@@ -25,10 +25,6 @@ scrape_configs:
   - job_name: agent-trace-processor-clickhouse
     static_configs:
       - targets: ["agent-trace-processor-clickhouse:9096"]
-
-  - job_name: fetcher
-    static_configs:
-      - targets: ["fetcher:9094"]
 
   - job_name: document-renderer
     static_configs:

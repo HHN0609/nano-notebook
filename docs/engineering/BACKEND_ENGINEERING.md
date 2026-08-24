@@ -216,9 +216,9 @@ identity-bearing. A question that needs a Member, Notebook, or Run
 identifier is a Trace question; take it to the Collector query API, never to
 a metric label.
 
-Every service exposes `/metrics` and `/debug/pprof/*` from a private admin
-listener on its own port (control-plane 9091, worker 9092, collector 9093,
-fetcher 9094, document-renderer 9095), never on the public API mux and never
+Metrics-enabled Go services expose `/metrics` and `/debug/pprof/*` from a
+private admin listener on their own port (control-plane 9091, worker 9092,
+collector 9093, document-renderer 9095), never on the public API mux and never
 published to a host port in Compose — the port is reachable only inside the
 Docker network (or `host.docker.internal` for the host-process dev
 services), which is the actual security boundary, not the bind address.

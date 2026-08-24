@@ -18,7 +18,6 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/chat"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
-	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/identity"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/notebook"
@@ -27,6 +26,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/studio"
+	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -56,7 +56,7 @@ type Config struct {
 	ReplaySealer        *replay.Sealer
 	TraceSink           agent.TraceSink
 	SourceUploads       SourceUploadStore
-	SourceFetcher       fetcher.SnapshotFetcher
+	SourceReader        webreader.Adapter
 	SourceSnapshots     SourceSnapshotStore
 	Metrics             *metrics.Catalog
 }

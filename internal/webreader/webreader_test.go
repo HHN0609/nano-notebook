@@ -89,17 +89,28 @@ func TestHTTPAdapterSendsBearerTokenAndRequestContract(t *testing.T) {
 }
 
 func TestHTTPAdapterSurfacesSidecarErrorEnvelope(t *testing.T) {
-	adapter := newAdapter(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write([]byte(`{"error":{"code":"upstream_failed","message":"upstream timed out"}}`))
-	}), "")
-
-	_, err := adapter.Parse(context.Background(), webreader.Request{
-		URL: "https://example.com/post", Format: webreader.FormatMarkdown, MaxChars: 250_000,
-	})
-	if err == nil || !strings.Contains(err.Error(), "upstream_failed") {
-		t.Fatalf("err=%v", err)
+	for _, test := range []struct {
+		code   string
+		status int
+		want   error
+	}{
+		{code: "unsafe_destination", status: http.StatusUnprocessableEntity, want: webreader.ErrUnsafeDestination},
+		{code: "response_too_large", status: http.StatusRequestEntityTooLarge, want: webreader.ErrResponseTooLarge},
+		{code: "unsupported_type", status: http.StatusUnsupportedMediaType, want: webreader.ErrUnsupportedType},
+	} {
+		t.Run(test.code, func(t *testing.T) {
+			adapter := newAdapter(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(`{"error":{"code":"` + test.code + `","message":"reader rejected input"}}`))
+			}), "")
+			_, err := adapter.Parse(context.Background(), webreader.Request{
+				URL: "https://example.com/post", Format: webreader.FormatMarkdown, MaxChars: webreader.MaxContentChars,
+			})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("err=%v want=%v", err, test.want)
+			}
+		})
 	}
 }
 

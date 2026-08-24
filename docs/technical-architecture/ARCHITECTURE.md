@@ -6,7 +6,7 @@ Nano Notebook is a small, single-region SaaS research workspace implemented with
 
 The current milestone is a complete local product. Production launch is a later delivery stage with AWS as the intended direction, S3 as the production Blob Store, and static Web Client delivery through S3 and CloudFront. Exact AWS compute, networking, backup, OIDC, email, and secret-management services are not prerequisites for local completion.
 
-The current local product does not include an Agent Sandbox, arbitrary code execution, browser or computer use, general external tools, cloud-drive synchronization, Notes, generated media, or editable Outputs. Sprint 11 adds bounded shared Report, Flashcards, Mind Map, and Data Table Outputs over the configured Agent runtime. It also includes bounded Web Source Discovery through an approved provider and the restricted public-URL Fetcher; neither capability is browser automation or general Agent egress.
+The current local product does not include an Agent Sandbox, arbitrary code execution, browser or computer use, general external tools, cloud-drive synchronization, Notes, generated media, or editable Outputs. Sprint 11 adds bounded shared Report, Flashcards, Mind Map, and Data Table Outputs over the configured Agent runtime. It also includes bounded Web Source Discovery through an approved provider and a restricted web-reader; neither capability is general browser automation or general Agent egress.
 
 ## 2. System Shape
 
@@ -21,7 +21,7 @@ flowchart LR
     SourceW[Source Workers]
     AgentW[Agent Workers]
     EvalW[Eval Workers]
-    Fetcher[Restricted Fetcher Adapter]
+    Reader[Restricted Web Reader]
     Extractor[Restricted Extractor Adapters]
     Bifrost[Bifrost Model Gateway]
     Providers[OpenAI / Gemini / Qwen]
@@ -35,7 +35,9 @@ flowchart LR
     Jobs --> SourceW
     Jobs --> AgentW
     Jobs --> EvalW
-    SourceW --> Fetcher
+    CP --> Reader
+    SourceW --> Reader
+    AgentW --> Reader
     SourceW --> Extractor
     SourceW --> Blob
     SourceW --> Q
@@ -60,7 +62,7 @@ The Go application is a modular monolith with independently deployable Worker pr
 | Store | Responsibility | Explicitly not responsible for |
 | --- | --- | --- |
 | PostgreSQL | Users, Sessions, Notebook membership, Source metadata, Chat, Agent Run, Job, Citation, version and publication state | Large Source bodies, vector similarity, operational telemetry |
-| MinIO/S3 | Original Source blobs, normalized artifacts, large derived artifacts and selected Trace payloads | Authorization, workflow state, queryable business truth |
+| MinIO/S3 | Source input blobs, normalized artifacts, large derived artifacts and selected Trace payloads | Authorization, workflow state, queryable business truth |
 | Qdrant | Rebuildable dense and sparse retrieval projections | Authoritative text, permissions, Source or Citation lifecycle |
 | Bifrost | Provider protocol translation and bounded call-level routing/fallback | Agent workflow state, provider selection policy ownership, durable product state |
 | OpenTelemetry backend | Sampleable operational traces, metrics, and logs | Durable Agent Trace or product audit truth |
@@ -73,7 +75,7 @@ Every non-PostgreSQL record must be reachable from authoritative metadata and ei
 | --- | --- | --- |
 | Identity | User identity, Local Credentials, opaque Sessions, later OIDC mapping | PostgreSQL |
 | Notebook | Notebooks, ownership, Membership, invitations, role-derived Capabilities | Identity |
-| Source | Source lifecycle, raw Blob references, Evidence Revisions, Evidence Units, and Evidence Coverage | Notebook, Jobs, Models |
+| Source | Source lifecycle, immutable input Blob references, Evidence Revisions, Evidence Units, and Evidence Coverage | Notebook, Jobs, Models |
 | Chat | Private Chats, source-selection preference, User and published Assistant Messages | Identity, Notebook, Source |
 | Agent | Agent Runs, fixed stages, accepted read-only actions, publication, Durable Agent Trace responsibility | Chat, Source, Retrieval, Jobs, Models |
 | Retrieval | Retrieval Index Versions, chunk projections, scoped hybrid retrieval and result validation | Source, Notebook, Qdrant |
@@ -99,7 +101,7 @@ Sprint 6 is an Owner-only delivery slice matching the current membership schema 
 
 ### 6.1 Upload And Import
 
-The Control Plane creates short-lived upload intents. A multi-file browser interaction obtains and finalizes an independent intent for each admitted file, so every file becomes its own Source and a rejection or processing failure never rolls back unrelated accepted Sources. Notebook capacity is rechecked during each finalize transaction. Browser uploads go directly to MinIO/S3, and the Source Module finalizes only validated objects. A content hash rejects a byte-identical upload only within the same Notebook and returns that Notebook's existing Source; hashes never expose or reuse Source identity across Notebook boundaries. Public URLs are fetched by a restricted Fetcher Adapter with HTTP(S)-only policy, public-destination validation for IPv4 and IPv6, redirect revalidation, size and decompression limits, timeouts, and no product database or durable credential access. Each accepted URL fetch creates a new immutable Source snapshot even when its content matches an earlier snapshot.
+The Control Plane creates short-lived upload intents. A multi-file browser interaction obtains and finalizes an independent intent for each admitted file, so every file becomes its own Source and a rejection or processing failure never rolls back unrelated accepted Sources. Notebook capacity is rechecked during each finalize transaction. Browser uploads go directly to MinIO/S3, and the Source Module finalizes only validated objects. A content hash rejects a byte-identical upload only within the same Notebook and returns that Notebook's existing Source; hashes never expose or reuse Source identity across Notebook boundaries. Public HTML URLs are read by the restricted web-reader with HTTP(S)-only policy, public-destination and redirect validation, byte, decompression, time, concurrency, and output limits, and no product database or durable credential access. The Control Plane stores the cleaned Markdown returned by the Reader as the immutable URL Source input and independently records its SHA-256; raw HTML is not retained or indexed. Direct document and media URLs are rejected and remain available through file upload.
 
 Document and media parsing runs behind least-privileged, format-specific Extractor Adapters. The first release owns a lightweight, Citation-oriented extraction pipeline rather than deploying or depending on a general-purpose document parsing platform. An Adapter may use a Go library, a restricted external program, or an external OCR, vision, or transcription model, but it must return Nano's Normalized Source Artifact contract instead of exposing a provider-native document-conversion format. The authoritative Source Worker owns Job state, validates the output, and publishes artifacts; Extractors cannot publish product state or access PostgreSQL and Qdrant.
 
@@ -148,7 +150,7 @@ typed Agent query
 
 The Chat-facing Leader reaches this pipeline only through the typed `search_evidence` Evidence Search Action. A Model Decision may propose multiple purposeful queries, inspect accepted candidate results, and refine later queries within the existing Run Budget. Each accepted Action Result contains Provider-neutral authoritative Evidence references and bounded previews rather than Qdrant records; Checkpoints prevent recovery from repeating accepted searches. Query purpose, inspected candidates, ranking and selection outcomes, and Retrieval Degradation feed restricted Durable Agent Trace records and audited Replay rather than Member-facing Chat data; model chain of thought is never requested or captured.
 
-Source Discovery is a separate provider-neutral application capability. Brave returns bounded human-facing candidates, never Evidence. An explicit discovery request may create a Research child Run that owns its own Job and Checkpoints, produces one private Discovery Session, and cannot publish Chat content or import a Source. The parent Leader waits without a lease and resumes from the durable child outcome. Only a later user-selected URL import through the restricted Fetcher can enter the ordinary immutable Source and RAG pipeline.
+Source Discovery is a separate provider-neutral application capability. Brave returns bounded human-facing candidates, never Evidence. An explicit discovery request may create a Research child Run that owns its own Job and Checkpoints, produces one private Discovery Session, and cannot publish Chat content or import a Source. The parent Leader waits without a lease and resumes from the durable child outcome. Only a later user-selected URL import through the restricted web-reader can enter the ordinary immutable Source and RAG pipeline.
 
 Dense-only retrieval is an intermediate implementation milestone, not the completed product path. Embedding and reranker models, analyzers, chunking, candidate limits, fusion weights, and stopping thresholds are selected through offline evaluation rather than fixed by overall architecture. Learned sparse models remain deferred unless evaluation demonstrates a stable BM25 recall gap that justifies another model dependency.
 
@@ -335,7 +337,7 @@ Verification is layered around real ownership boundaries:
 - local end-to-end tests exercise the four product acceptance journeys in a browser;
 - fault injection covers Worker termination, expired leases, duplicate attempts, Provider timeout, Qdrant unavailability, Source deletion, Membership removal, and Publication Barrier races;
 - authorization tests attempt cross-Notebook, cross-role, and cross-creator access at both Go policy and RLS layers;
-- Fetcher tests cover private and reserved address ranges, DNS rebinding defenses, redirects, decompression limits, and unsupported protocols.
+- web-reader tests cover private and reserved address ranges, redirect destination revalidation, decompression limits, unsupported protocols and types, browser SSRF interception, parsing quality, and response-contract bounds.
 
 Mock-only green tests are insufficient for local product completion.
 

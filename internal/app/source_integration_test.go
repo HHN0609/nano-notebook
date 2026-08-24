@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
-	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
+	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -446,15 +446,14 @@ func TestCreateURLSourceIsIdempotentAndRepeatedURLReusesNotebookSource(t *testin
 	api := newTestAPI(t)
 	owner, csrf := api.registerWithCSRF(t, "source-url-api@example.com")
 	notebookID := createSourceTestNotebook(t, api, owner, "source-url-api")
-	payload := []byte("<html><head><title>Example reference</title></head><body><main>same immutable page</main></body></html>")
-	digest := sha256.Sum256(payload)
-	remote := &recordingSourceFetcher{snapshot: fetcher.Snapshot{
-		FinalURL: "https://example.com/final", MediaType: "text/html",
-		Payload: payload, ContentSHA256: hex.EncodeToString(digest[:]),
+	markdown := "# Example reference\n\nSame cleaned page with [one citation](https://example.com/citation)."
+	remote := &recordingSourceReader{page: webreader.Page{
+		Title: "Example reference", FinalURL: "https://example.com/final", Content: markdown,
+		Engine: "lightweight", WordCount: 8,
 	}}
 	objects := objectstore.NewMemoryStore()
 	api.server = app.NewServer(newConfiguredServerConfig(app.Config{
-		CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objects,
+		CookieSecure: false, SourceReader: remote, SourceSnapshots: objects,
 	}), api.db)
 	api.handler = api.server.Handler()
 
@@ -477,8 +476,28 @@ func TestCreateURLSourceIsIdempotentAndRepeatedURLReusesNotebookSource(t *testin
 		} `json:"source"`
 	}
 	decodeBody(t, first, &firstBody)
-	if firstBody.Source.ID == "" || firstBody.Source.Title != "Example reference" || firstBody.Source.Format != "html" || firstBody.Source.State != "processing" {
+	if firstBody.Source.ID == "" || firstBody.Source.Title != "Example reference" || firstBody.Source.Format != "markdown" || firstBody.Source.State != "processing" {
 		t.Fatalf("first URL Source = %+v", firstBody.Source)
+	}
+	var storedFormat, storedMediaType, storedHash, storedObjectKey, storedFinalURL string
+	var storedBytes int64
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select format,media_type,byte_size,content_sha256,original_object_key,final_url
+		from source_sources where id=$1
+	`, firstBody.Source.ID).Scan(&storedFormat, &storedMediaType, &storedBytes, &storedHash, &storedObjectKey, &storedFinalURL); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(markdown))
+	if storedFormat != "markdown" || storedMediaType != "text/markdown" || storedBytes != int64(len(markdown)) ||
+		storedHash != hex.EncodeToString(digest[:]) || storedFinalURL != "https://example.com/final" {
+		t.Fatalf("stored Reader Source format=%q media=%q bytes=%d hash=%q final=%q", storedFormat, storedMediaType, storedBytes, storedHash, storedFinalURL)
+	}
+	storedPayload, err := objects.Get(context.Background(), storedObjectKey, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(storedPayload) != markdown {
+		t.Fatalf("stored URL payload=%q, want cleaned Reader Markdown", storedPayload)
 	}
 	replayed := create("url-snapshot-1")
 	if replayed.Code != http.StatusOK {
@@ -508,47 +527,99 @@ func TestCreateURLSourceIsIdempotentAndRepeatedURLReusesNotebookSource(t *testin
 	}
 }
 
-func TestCreateYouTubeURLSourcePersistsCaptionSnapshotFormat(t *testing.T) {
+func TestCreateURLSourceThroughWebReaderHTTPContract(t *testing.T) {
 	api := newTestAPI(t)
-	owner, csrf := api.registerWithCSRF(t, "source-youtube-api@example.com")
-	notebookID := createSourceTestNotebook(t, api, owner, "source-youtube-api")
-	payload := []byte(`{"schema_version":"nano.youtube-captions.v1","video_id":"dQw4w9WgXcQ","language":"en","segments":[{"start_ms":0,"end_ms":1000,"text":"Caption."}]}`)
-	digest := sha256.Sum256(payload)
-	remote := &recordingSourceFetcher{snapshot: fetcher.Snapshot{
-		FinalURL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", MediaType: "application/vnd.nano.youtube-captions+json",
-		Payload: payload, ContentSHA256: hex.EncodeToString(digest[:]),
-	}}
-	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objectstore.NewMemoryStore()}), api.db)
+	owner, csrf := api.registerWithCSRF(t, "source-reader-http@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-reader-http")
+	markdown := "# Reader contract\n\nOnly this cleaned Markdown should become Source input."
+	readerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/parse" || r.Header.Get("Authorization") != "Bearer source-reader-token" {
+			t.Errorf("Reader request method=%s path=%s authorization=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+		}
+		var requestBody struct {
+			URL      string `json:"url"`
+			Format   string `json:"format"`
+			MaxChars int    `json:"max_chars"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Error(err)
+		}
+		if requestBody.URL != "https://example.com/original" || requestBody.Format != "markdown" || requestBody.MaxChars != webreader.MaxContentChars {
+			t.Errorf("Reader request=%+v", requestBody)
+		}
+		writeTestJSON(t, w, map[string]any{
+			"schema_version": "1", "url": requestBody.URL, "final_url": "https://example.com/canonical",
+			"title": "Reader contract", "description": "", "site_name": "example.com", "published_time": "", "lang": "en",
+			"extraction": "readability", "engine": "lightweight", "upgraded": false, "format": "markdown", "content": markdown,
+			"char_count": len(markdown), "word_count": 10, "truncated": false,
+			"fetch": map[string]any{"status": 200, "content_type": "text/html", "charset": "utf-8", "bytes": 4096, "redirects": 1},
+		})
+	}))
+	t.Cleanup(readerServer.Close)
+	reader, err := webreader.NewHTTPAdapter(webreader.HTTPConfig{
+		Endpoint: readerServer.URL, ServiceToken: "source-reader-token", HTTPClient: readerServer.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := objectstore.NewMemoryStore()
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{
+		CookieSecure: false, SourceReader: reader, SourceSnapshots: objects,
+	}), api.db)
+	api.handler = api.server.Handler()
+
+	response := api.postJSONWithCookieAndCSRF(t,
+		"/api/v1/notebooks/"+notebookID+"/sources/urls",
+		map[string]any{"url": "https://example.com/original"}, owner, csrf, csrf.Value, "reader-http-1",
+	)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("Reader-backed URL Source status=%d body=%s", response.Code, response.Body.String())
+	}
+	var storedPayload []byte
+	items, err := objects.List(context.Background(), "sources/", "", 10)
+	if err == nil && len(items) == 1 {
+		storedPayload, err = objects.Get(context.Background(), items[0].Key, 1<<20)
+	}
+	if err != nil || string(storedPayload) != markdown {
+		t.Fatalf("stored Reader payload=%q items=%+v err=%v", storedPayload, items, err)
+	}
+}
+
+func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Error(err)
+	}
+}
+
+type recordingSourceReader struct {
+	page    webreader.Page
+	err     error
+	calls   int
+	request webreader.Request
+}
+
+func (r *recordingSourceReader) Parse(_ context.Context, request webreader.Request) (webreader.Page, error) {
+	r.calls++
+	r.request = request
+	return r.page, r.err
+}
+
+func TestCreateURLSourceRejectsReaderUnsupportedTypes(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "source-pdf-url-api@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-pdf-url-api")
+	remote := &recordingSourceReader{err: webreader.ErrUnsupportedType}
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceReader: remote, SourceSnapshots: objectstore.NewMemoryStore()}), api.db)
 	api.handler = api.server.Handler()
 	response := api.postJSONWithCookieAndCSRF(t,
 		"/api/v1/notebooks/"+notebookID+"/sources/urls",
-		map[string]any{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}, owner, csrf, csrf.Value, "youtube-snapshot-1",
+		map[string]any{"url": "https://example.com/report.pdf"}, owner, csrf, csrf.Value, "pdf-url-1",
 	)
-	if response.Code != http.StatusCreated {
-		t.Fatalf("YouTube URL Source status=%d body=%s", response.Code, response.Body.String())
+	if response.Code != http.StatusUnsupportedMediaType || remote.calls != 1 || !strings.Contains(response.Body.String(), "unsupported_source") {
+		t.Fatalf("PDF URL Source status=%d calls=%d body=%s", response.Code, remote.calls, response.Body.String())
 	}
-	var body struct {
-		Source struct {
-			Title  string `json:"title"`
-			Format string `json:"format"`
-			State  string `json:"state"`
-		} `json:"source"`
-	}
-	decodeBody(t, response, &body)
-	if body.Source.Title != "https://www.youtube.com/watch?v=dQw4w9WgXcQ" || body.Source.Format != "youtube" || body.Source.State != "processing" {
-		t.Fatalf("YouTube Source=%+v", body.Source)
-	}
-}
-
-type recordingSourceFetcher struct {
-	snapshot fetcher.Snapshot
-	err      error
-	calls    int
-}
-
-func (f *recordingSourceFetcher) Fetch(_ context.Context, _ string) (fetcher.Snapshot, error) {
-	f.calls++
-	return f.snapshot, f.err
 }
 
 func sourceAPIRequest(t *testing.T, api *testAPI, method, path string, payload map[string]any, session, csrf *http.Cookie) *httptest.ResponseRecorder {

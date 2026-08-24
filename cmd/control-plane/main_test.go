@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadControlPlaneConfigIncludesCollectorQueryAndReplayKey(t *testing.T) {
 	t.Setenv("NANO_DATABASE_URL", "postgres://application")
@@ -16,7 +19,9 @@ func TestLoadControlPlaneConfigIncludesCollectorQueryAndReplayKey(t *testing.T) 
 	t.Setenv("NANO_SOURCE_S3_BUCKET", "source-custody")
 	t.Setenv("NANO_SOURCE_S3_REGION", "cn-test-1")
 	t.Setenv("NANO_SOURCE_S3_USE_TLS", "true")
-	t.Setenv("NANO_FETCHER_URL", "http://fetcher.internal:8083/")
+	t.Setenv("NANO_WEB_READER_URL", "http://reader.internal:8085/")
+	t.Setenv("NANO_WEB_READER_SERVICE_TOKEN", "reader-secret")
+	t.Setenv("NANO_WEB_READER_TIMEOUT", "45s")
 
 	config, err := loadControlPlaneConfig()
 	if err != nil {
@@ -31,8 +36,8 @@ func TestLoadControlPlaneConfigIncludesCollectorQueryAndReplayKey(t *testing.T) 
 		config.SourceS3.Region != "cn-test-1" || !config.SourceS3.UseTLS {
 		t.Fatalf("Control Plane config = %#v", config)
 	}
-	if config.FetcherURL != "http://fetcher.internal:8083" {
-		t.Fatalf("Fetcher URL = %q", config.FetcherURL)
+	if config.WebReaderURL != "http://reader.internal:8085" || config.WebReaderServiceToken != "reader-secret" || config.WebReaderTimeout != 45*time.Second {
+		t.Fatalf("Web Reader config = %q/%q/%s", config.WebReaderURL, config.WebReaderServiceToken, config.WebReaderTimeout)
 	}
 }
 

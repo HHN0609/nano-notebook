@@ -23,7 +23,6 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
-	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/mailoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -102,7 +101,6 @@ type workerConfig struct {
 	SourceProcessingMaxRunes       int
 	SourceAdmissionMode            sourceadmission.Mode
 	SourceAdmissionQueryTimeout    time.Duration
-	FetcherURL                     string
 	BraveSearchAPIKey              string
 	SourceDiscoveryLease           time.Duration
 	SourceDiscoveryPoll            time.Duration
@@ -425,17 +423,13 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	var webReaderAdapter webreader.Adapter
-	if strings.TrimSpace(config.WebReaderURL) != "" {
-		webReaderHTTPAdapter, err := webreader.NewHTTPAdapter(webreader.HTTPConfig{
-			Endpoint: config.WebReaderURL, ServiceToken: config.WebReaderServiceToken,
-			HTTPClient: &http.Client{Timeout: config.WebReaderTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
-		})
-		if err != nil {
-			slog.Error("web reader Adapter invalid", "error", err)
-			os.Exit(1)
-		}
-		webReaderAdapter = webReaderHTTPAdapter
+	webReaderAdapter, err := webreader.NewHTTPAdapter(webreader.HTTPConfig{
+		Endpoint: config.WebReaderURL, ServiceToken: config.WebReaderServiceToken,
+		HTTPClient: &http.Client{Timeout: config.WebReaderTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+	})
+	if err != nil {
+		slog.Error("web reader Adapter invalid", "error", err)
+		os.Exit(1)
 	}
 	grounder := agent.NewGroundingService(db.Pool())
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
@@ -516,20 +510,11 @@ func main() {
 		slog.Error("Studio Executor invalid", "error", err)
 		os.Exit(1)
 	}
-	remoteFetcher, err := fetcher.NewRemoteClient(
-		config.FetcherURL,
-		&http.Client{Timeout: 30 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)},
-		config.SourceProcessingMaxBytes,
-	)
-	if err != nil {
-		slog.Error("Source Discovery Fetcher client invalid", "error", err)
-		os.Exit(1)
-	}
 	sourceExtractor := sourceprocessing.NewNativeExtractorWithWebReader(modelClient, webReaderAdapter, sourceprocessing.NativeExtractorConfig{
 		VisionModel: config.SourceVisionModel, TranscriptionModel: config.SourceTranscriptionModel,
 		VisionPromptVersion: config.SourceVisionPromptVersion, MaxVisionPages: config.SourceMaxVisionPages,
 	})
-	candidateValidator := sourcediscovery.NewImportabilityValidator(remoteFetcher, sourceExtractor, sourcediscovery.ImportabilityValidatorConfig{
+	candidateValidator := sourcediscovery.NewImportabilityValidator(webReaderAdapter, sourcediscovery.ImportabilityValidatorConfig{
 		ExtractionConfigID: config.SourceExtractionConfigID,
 		MaxBytes:           config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
 	})
@@ -979,7 +964,6 @@ func loadWorkerConfig() (workerConfig, error) {
 		SourceProcessingMaxBytes:     int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
 		SourceAdmissionMode:         sourceadmission.Mode(strings.ToLower(strings.TrimSpace(env("NANO_SOURCE_ADMISSION_MODE", "shadow")))),
 		SourceAdmissionQueryTimeout: sourceAdmissionQueryTimeout,
-		FetcherURL:                  strings.TrimRight(env("NANO_FETCHER_URL", "http://127.0.0.1:8083"), "/"),
 		BraveSearchAPIKey:           strings.TrimSpace(os.Getenv("NANO_BRAVE_SEARCH_API_KEY")),
 		SourceDiscoveryLease:        sourceDiscoveryLease, SourceDiscoveryPoll: sourceDiscoveryPoll,
 		AgentInteractiveConcurrency: agentInteractiveConcurrency, SourceProcessingConcurrency: sourceProcessingConcurrency,
@@ -1015,18 +999,14 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.DocumentRenderMaxOutputBytes < 1 || config.DocumentRenderMaxOutputBytes > 2<<30 ||
 		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
 		(config.SourceAdmissionMode != sourceadmission.ModeShadow && config.SourceAdmissionMode != sourceadmission.ModeEnforcement) ||
-		config.SourceAdmissionQueryTimeout <= 0 || config.SourceAdmissionQueryTimeout > config.HTTPTimeout || strings.TrimSpace(config.FetcherURL) == "" ||
+		config.SourceAdmissionQueryTimeout <= 0 || config.SourceAdmissionQueryTimeout > config.HTTPTimeout ||
+		strings.TrimSpace(config.WebReaderURL) == "" || strings.TrimSpace(config.WebReaderServiceToken) == "" || config.WebReaderTimeout <= 0 ||
 		config.SourceDiscoveryLease <= 0 || config.SourceDiscoveryPoll <= 0 ||
 		workload.ValidateInteractiveCapacity(config.AgentInteractiveConcurrency, config.SourceProcessingConcurrency) != nil ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 ||
 		strings.TrimSpace(config.MailSMTPAddr) == "" || strings.TrimSpace(config.MailFrom) == "" || strings.TrimSpace(config.WebBaseURL) == "" ||
 		config.MailLeaseDuration <= 0 || config.MailPollInterval <= 0 || config.MailSMTPTimeout <= 0 {
 		return workerConfig{}, errors.New("worker configuration is incomplete or inconsistent")
-	}
-	// The web-reader sidecar is an optional capability: an empty URL disables
-	// the HTML quality-gate fallback entirely.
-	if strings.TrimSpace(config.WebReaderURL) != "" && config.WebReaderTimeout <= 0 {
-		return workerConfig{}, errors.New("worker Web Reader configuration is invalid")
 	}
 	if len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "" ||
 		strings.TrimSpace(config.TraceKafkaPurgeTopic) == "" || strings.TrimSpace(config.TraceKafkaPurgeClientID) == "" || config.TraceKafkaPurgeTopic == config.TraceKafkaTopic {

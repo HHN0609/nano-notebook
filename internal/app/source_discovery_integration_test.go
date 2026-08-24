@@ -3,8 +3,6 @@ package app_test
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,9 +13,9 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
-	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
+	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 	"github.com/jackc/pgx/v5"
 )
@@ -113,14 +111,12 @@ func TestSourceDiscoveryImportsPersistedSelectionThroughURLSourcePipeline(t *tes
 	`); err != nil {
 		t.Fatal(err)
 	}
-	payload := []byte("<main>immutable imported article</main>")
-	digest := sha256.Sum256(payload)
-	remote := &recordingSourceFetcher{snapshot: fetcher.Snapshot{
-		FinalURL: "https://import.example/article", MediaType: "text/html", Payload: payload,
-		ContentSHA256: hex.EncodeToString(digest[:]),
+	remote := &recordingSourceReader{page: webreader.Page{
+		Title: "Reader Article", FinalURL: "https://import.example/article",
+		Content: "# Imported article\n\nCleaned Reader Markdown.", Engine: "lightweight", WordCount: 5,
 	}}
 	api.server = app.NewServer(newConfiguredServerConfig(app.Config{
-		CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objectstore.NewMemoryStore(),
+		CookieSecure: false, SourceReader: remote, SourceSnapshots: objectstore.NewMemoryStore(),
 	}), api.db)
 	api.handler = api.server.Handler()
 
@@ -211,7 +207,7 @@ func TestSourceDiscoveryDropsCandidateWhenImportAdmissionFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	api.server = app.NewServer(newConfiguredServerConfig(app.Config{
-		CookieSecure: false, SourceFetcher: &recordingSourceFetcher{err: fetcher.ErrUnsafeDestination},
+		CookieSecure: false, SourceReader: &recordingSourceReader{err: webreader.ErrUnsafeDestination},
 		SourceSnapshots: objectstore.NewMemoryStore(),
 	}), api.db)
 	api.handler = api.server.Handler()
@@ -263,14 +259,13 @@ func TestSourceDiscoveryImportDeduplicatesNormalizedRedirectTargetAcrossSessions
 			t.Fatal(err)
 		}
 	}
-	payload := []byte("<main><h1>Article</h1><p>This immutable article has enough meaningful primary content for deterministic source processing and retrieval.</p></main>")
-	digest := sha256.Sum256(payload)
-	remote := &recordingSourceFetcher{snapshot: fetcher.Snapshot{
-		FinalURL: "https://Final.Example/article?utm_source=brave&b=2&a=1#section", MediaType: "text/html", Payload: payload,
-		ContentSHA256: hex.EncodeToString(digest[:]),
+	remote := &recordingSourceReader{page: webreader.Page{
+		Title: "Article", FinalURL: "https://Final.Example/article?utm_source=brave&b=2&a=1",
+		Content: "# Article\n\nThis cleaned article has enough meaningful primary content for source processing and retrieval.",
+		Engine:  "lightweight", WordCount: 14,
 	}}
 	objects := objectstore.NewMemoryStore()
-	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objects}), api.db)
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{CookieSecure: false, SourceReader: remote, SourceSnapshots: objects}), api.db)
 	api.handler = api.server.Handler()
 
 	var sourceIDs []string

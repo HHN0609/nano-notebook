@@ -11,14 +11,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
-	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceadmission"
+	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 	"github.com/jackc/pgx/v5"
-	xhtml "golang.org/x/net/html"
 )
 
 type memberSource struct {
@@ -149,7 +147,7 @@ func (s *Server) createURLSource(w http.ResponseWriter, r *http.Request, userID,
 		writeError(w, r, http.StatusBadRequest, "idempotency_required", "error.idempotency_required")
 		return
 	}
-	if s.cfg.SourceFetcher == nil || s.cfg.SourceSnapshots == nil {
+	if s.cfg.SourceReader == nil || s.cfg.SourceSnapshots == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "source_fetch_unavailable", "error.source_fetch_unavailable")
 		return
 	}
@@ -178,13 +176,13 @@ func (s *Server) createURLSource(w http.ResponseWriter, r *http.Request, userID,
 		return
 	}
 	switch {
-	case errors.Is(err, fetcher.ErrUnsafeDestination):
+	case errors.Is(err, webreader.ErrUnsafeDestination):
 		writeError(w, r, http.StatusUnprocessableEntity, "unsafe_destination", "error.source_url_unsafe")
 		return
-	case errors.Is(err, fetcher.ErrResponseTooLarge):
+	case errors.Is(err, webreader.ErrResponseTooLarge):
 		writeError(w, r, http.StatusRequestEntityTooLarge, "source_too_large", "error.source_too_large")
 		return
-	case errors.Is(err, fetcher.ErrUnsupportedType):
+	case errors.Is(err, webreader.ErrUnsupportedType):
 		writeError(w, r, http.StatusUnsupportedMediaType, "unsupported_source", "error.source_unsupported")
 		return
 	case errors.Is(err, errSourceInvalidSnapshot):
@@ -245,24 +243,23 @@ func (s *Server) importURLSource(ctx context.Context, userID, notebookID, key, r
 		return existing, true, err
 	}
 
-	snapshot, err := s.cfg.SourceFetcher.Fetch(ctx, requestURL)
+	page, err := s.cfg.SourceReader.Parse(ctx, webreader.Request{
+		URL: requestURL, Format: webreader.FormatMarkdown, MaxChars: webreader.MaxContentChars,
+	})
 	if err != nil {
 		s.failURLAdmission(ctx, userID, admission.ID, "fetch_failed")
 		return source.Source{}, false, err
 	}
-	digest := sha256.Sum256(snapshot.Payload)
-	if len(snapshot.Payload) == 0 || int64(len(snapshot.Payload)) > 100*1024*1024 ||
-		!strings.EqualFold(snapshot.ContentSHA256, hex.EncodeToString(digest[:])) {
+	payload := []byte(page.Content)
+	finalURL, finalURLErr := canonicalSourceURL(page.FinalURL)
+	if len(payload) == 0 || len(payload) > webreader.MaxContentChars*4 || page.Truncated || finalURLErr != nil {
 		s.failURLAdmission(ctx, userID, admission.ID, "invalid_snapshot")
 		return source.Source{}, false, errSourceInvalidSnapshot
 	}
-	format, ok := source.FormatForMediaType(snapshot.MediaType)
-	if !ok {
-		s.failURLAdmission(ctx, userID, admission.ID, "unsupported_type")
-		return source.Source{}, false, fetcher.ErrUnsupportedType
-	}
-	objectKey := "sources/" + admission.SourceID + "/original/" + strings.ToLower(snapshot.ContentSHA256)
-	if err := s.cfg.SourceSnapshots.Put(ctx, objectKey, snapshot.Payload); err != nil {
+	digest := sha256.Sum256(payload)
+	contentSHA256 := hex.EncodeToString(digest[:])
+	objectKey := "sources/" + admission.SourceID + "/original/" + contentSHA256
+	if err := s.cfg.SourceSnapshots.Put(ctx, objectKey, payload); err != nil {
 		s.failURLAdmission(ctx, userID, admission.ID, "object_write_failed")
 		return source.Source{}, false, errSourceObjectWrite
 	}
@@ -271,11 +268,11 @@ func (s *Server) importURLSource(ctx context.Context, userID, notebookID, key, r
 		return source.Source{}, false, err
 	}
 	title := boundedSourceTitle(preferredTitle)
-	if title == "" && format == source.FormatHTML {
-		title = boundedSourceTitle(htmlSnapshotTitle(snapshot.Payload))
+	if title == "" {
+		title = boundedSourceTitle(page.Title)
 	}
 	if title == "" {
-		title = boundedSourceTitle(snapshot.FinalURL)
+		title = boundedSourceTitle(finalURL)
 	}
 	if title == "" {
 		title = "Web source"
@@ -285,10 +282,10 @@ func (s *Server) importURLSource(ctx context.Context, userID, notebookID, key, r
 	err = s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
 		var finalizeErr error
 		created, finalizedReused, finalizeErr = source.NewStore(tx).FinalizeURLAdmission(ctx, source.FinalizeURLAdmissionCommand{
-			AdmissionID: admission.ID, ProcessingJobID: jobID, Title: title, Format: format,
-			MediaType: snapshot.MediaType, ByteSize: int64(len(snapshot.Payload)),
-			ContentSHA256: strings.ToLower(snapshot.ContentSHA256), OriginalObjectKey: objectKey,
-			FinalURL: snapshot.FinalURL, CompletedAt: time.Now().UTC().Truncate(time.Microsecond),
+			AdmissionID: admission.ID, ProcessingJobID: jobID, Title: title, Format: source.FormatMarkdown,
+			MediaType: "text/markdown", ByteSize: int64(len(payload)),
+			ContentSHA256: contentSHA256, OriginalObjectKey: objectKey,
+			FinalURL: finalURL, CompletedAt: time.Now().UTC().Truncate(time.Microsecond),
 		})
 		return finalizeErr
 	})
@@ -308,40 +305,6 @@ func boundedSourceTitle(value string) string {
 		runes = runes[:255]
 	}
 	return string(runes)
-}
-
-func htmlSnapshotTitle(payload []byte) string {
-	if len(payload) == 0 || !utf8.Valid(payload) {
-		return ""
-	}
-	document, err := xhtml.Parse(strings.NewReader(string(payload)))
-	if err != nil {
-		return ""
-	}
-	var find func(*xhtml.Node) string
-	find = func(node *xhtml.Node) string {
-		if node.Type == xhtml.ElementNode && strings.EqualFold(node.Data, "title") {
-			var text strings.Builder
-			var collect func(*xhtml.Node)
-			collect = func(current *xhtml.Node) {
-				if current.Type == xhtml.TextNode {
-					text.WriteString(current.Data)
-				}
-				for child := current.FirstChild; child != nil; child = child.NextSibling {
-					collect(child)
-				}
-			}
-			collect(node)
-			return text.String()
-		}
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			if title := find(child); title != "" {
-				return title
-			}
-		}
-		return ""
-	}
-	return find(document)
 }
 
 func canonicalSourceURL(rawURL string) (string, error) {

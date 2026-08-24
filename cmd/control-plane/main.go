@@ -19,34 +19,36 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
-	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
 	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
+	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type controlPlaneConfig struct {
-	DatabaseURL          string
-	Addr                 string
-	CollectorURL         string
-	CollectorQueryToken  string
-	ProducerID           string
-	TraceKafkaBrokers    []string
-	TraceKafkaTopic      string
-	TraceKafkaClientID   string
-	ReplayKeyID          string
-	ReplayKEK            []byte
-	CookieSecure         bool
-	Version              string
-	DefaultModel         string
-	ResearchModel        string
-	AgentConfigurationID string
-	AgentRelease         agentcatalog.Reference
-	SourceS3             objectstore.S3Config
-	FetcherURL           string
+	DatabaseURL           string
+	Addr                  string
+	CollectorURL          string
+	CollectorQueryToken   string
+	ProducerID            string
+	TraceKafkaBrokers     []string
+	TraceKafkaTopic       string
+	TraceKafkaClientID    string
+	ReplayKeyID           string
+	ReplayKEK             []byte
+	CookieSecure          bool
+	Version               string
+	DefaultModel          string
+	ResearchModel         string
+	AgentConfigurationID  string
+	AgentRelease          agentcatalog.Reference
+	SourceS3              objectstore.S3Config
+	WebReaderURL          string
+	WebReaderServiceToken string
+	WebReaderTimeout      time.Duration
 }
 
 func main() {
@@ -96,11 +98,12 @@ func main() {
 		slog.Error("Source object Store unavailable", "error", err)
 		os.Exit(1)
 	}
-	remoteFetcher, err := fetcher.NewRemoteClient(
-		config.FetcherURL, &http.Client{Timeout: 25 * time.Second}, 100*1024*1024,
-	)
+	sourceReader, err := webreader.NewHTTPAdapter(webreader.HTTPConfig{
+		Endpoint: config.WebReaderURL, ServiceToken: config.WebReaderServiceToken,
+		HTTPClient: &http.Client{Timeout: config.WebReaderTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+	})
 	if err != nil {
-		slog.Error("Source Fetcher client configuration invalid", "error", err)
+		slog.Error("Source web-reader client configuration invalid", "error", err)
 		os.Exit(1)
 	}
 	shutdownTelemetry, err := telemetry.Start(ctx, "nano-control-plane")
@@ -168,7 +171,7 @@ func main() {
 		AgentCatalog: definitionCatalog, AgentRelease: config.AgentRelease,
 		AdminTraces: queryClient, AdminTraceAnalytics: queryClient, ReplaySealer: replaySealer, TraceSink: traceSink,
 		SourceUploads: sourceStore,
-		SourceFetcher: remoteFetcher, SourceSnapshots: sourceStore,
+		SourceReader:  sourceReader, SourceSnapshots: sourceStore,
 		Metrics: metricsCatalog,
 	}, db)
 	runListener := realtime.NewRunListener(db.Pool(), server.NotifyRun)
@@ -228,6 +231,10 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 	if err != nil {
 		return controlPlaneConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}
+	webReaderTimeout, err := time.ParseDuration(env("NANO_WEB_READER_TIMEOUT", "90s"))
+	if err != nil {
+		return controlPlaneConfig{}, fmt.Errorf("parse NANO_WEB_READER_TIMEOUT: %w", err)
+	}
 	config := controlPlaneConfig{
 		DatabaseURL:         env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
 		Addr:                env("NANO_CONTROL_PLANE_ADDR", ":8080"),
@@ -251,12 +258,15 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 			Region:          env("NANO_SOURCE_S3_REGION", "us-east-1"),
 			UseTLS:          sourceUseTLS,
 		},
-		FetcherURL: strings.TrimRight(env("NANO_FETCHER_URL", "http://127.0.0.1:8083"), "/"),
+		WebReaderURL:          strings.TrimRight(env("NANO_WEB_READER_URL", "http://127.0.0.1:8085"), "/"),
+		WebReaderServiceToken: env("NANO_WEB_READER_SERVICE_TOKEN", "nano-local-reader-token"),
+		WebReaderTimeout:      webReaderTimeout,
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
 		config.AgentRelease.Identity == "" || strings.TrimSpace(config.CollectorURL) == "" || strings.TrimSpace(config.CollectorQueryToken) == "" ||
 		strings.TrimSpace(config.ProducerID) == "" ||
-		strings.TrimSpace(config.ReplayKeyID) == "" || strings.TrimSpace(config.FetcherURL) == "" || len(config.ReplayKEK) != 32 {
+		strings.TrimSpace(config.ReplayKeyID) == "" || strings.TrimSpace(config.WebReaderURL) == "" ||
+		strings.TrimSpace(config.WebReaderServiceToken) == "" || config.WebReaderTimeout <= 0 || len(config.ReplayKEK) != 32 {
 		return controlPlaneConfig{}, errors.New("Control Plane configuration is incomplete")
 	}
 	if len(config.TraceKafkaBrokers) == 0 || strings.TrimSpace(config.TraceKafkaTopic) == "" || strings.TrimSpace(config.TraceKafkaClientID) == "" {
