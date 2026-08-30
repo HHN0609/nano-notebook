@@ -72,28 +72,54 @@ func (s RetrievalSuite) SHA256() (string, error) {
 }
 
 type RetrievalSearchOverride struct {
-	DenseCandidates  int `json:"dense_candidates"`
-	SparseCandidates int `json:"sparse_candidates"`
-	RRFK             int `json:"rrf_k"`
-	RerankCandidates int `json:"rerank_candidates"`
+	DenseCandidates  int  `json:"dense_candidates"`
+	SparseCandidates int  `json:"sparse_candidates"`
+	RRFK             int  `json:"rrf_k"`
+	RerankCandidates int  `json:"rerank_candidates"`
+	FusedCandidates  int  `json:"fused_candidates,omitempty"`
+	SkipRerank       bool `json:"skip_rerank,omitempty"`
 }
 
 type RetrievalGrid struct {
-	DenseCandidates  []int `json:"dense_candidates"`
-	SparseCandidates []int `json:"sparse_candidates"`
-	RRFK             []int `json:"rrf_k"`
-	RerankCandidates []int `json:"rerank_candidates"`
+	Mode             string `json:"mode,omitempty"`
+	DenseCandidates  []int  `json:"dense_candidates"`
+	SparseCandidates []int  `json:"sparse_candidates"`
+	RRFK             []int  `json:"rrf_k"`
+	RerankCandidates []int  `json:"rerank_candidates"`
+	FusedCandidates  int    `json:"fused_candidates,omitempty"`
 }
 
 func (g RetrievalGrid) Validate() error {
-	if !validSweepValues(g.DenseCandidates) || !validSweepValues(g.SparseCandidates) ||
-		!validSweepValues(g.RRFK) || !validSweepValues(g.RerankCandidates) {
+	if !validSweepValues(g.DenseCandidates) || !validSweepValues(g.SparseCandidates) || !validSweepValues(g.RRFK) {
+		return ErrRetrievalGridInvalid
+	}
+	if g.Mode == "rrf_only" {
+		if g.FusedCandidates <= 0 || len(g.RerankCandidates) != 0 {
+			return ErrRetrievalGridInvalid
+		}
+		return nil
+	}
+	if g.Mode != "" || !validSweepValues(g.RerankCandidates) || g.FusedCandidates != 0 {
 		return ErrRetrievalGridInvalid
 	}
 	return nil
 }
 
 func (g RetrievalGrid) Combinations() []RetrievalSearchOverride {
+	if g.Mode == "rrf_only" {
+		result := make([]RetrievalSearchOverride, 0, len(g.DenseCandidates)*len(g.SparseCandidates)*len(g.RRFK))
+		for _, dense := range g.DenseCandidates {
+			for _, sparse := range g.SparseCandidates {
+				for _, rrfK := range g.RRFK {
+					result = append(result, RetrievalSearchOverride{
+						DenseCandidates: dense, SparseCandidates: sparse, RRFK: rrfK,
+						FusedCandidates: g.FusedCandidates, SkipRerank: true,
+					})
+				}
+			}
+		}
+		return result
+	}
 	result := make([]RetrievalSearchOverride, 0, len(g.DenseCandidates)*len(g.SparseCandidates)*len(g.RRFK)*len(g.RerankCandidates))
 	for _, dense := range g.DenseCandidates {
 		for _, sparse := range g.SparseCandidates {

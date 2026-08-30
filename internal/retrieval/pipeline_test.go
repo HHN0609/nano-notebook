@@ -55,6 +55,51 @@ func TestHybridPipelineReloadsAuthorityBeforeBoundedReranking(t *testing.T) {
 	}
 }
 
+func TestHybridPipelineExplicitRRFOnlySkipsConfiguredReranker(t *testing.T) {
+	rerankCalls := 0
+	pipeline := retrieval.Pipeline{
+		Dense: func(context.Context, retrieval.SearchRequest) ([]retrieval.Candidate, error) {
+			return []retrieval.Candidate{{ID: "dense", Score: .9}, {ID: "shared", Score: .8}}, nil
+		},
+		Sparse: func(context.Context, retrieval.SearchRequest) ([]retrieval.Candidate, error) {
+			return []retrieval.Candidate{{ID: "shared", Score: 10}, {ID: "sparse", Score: 9}}, nil
+		},
+		Reload: func(_ context.Context, _ retrieval.Scope, ids []string) ([]retrieval.EvidenceCandidate, error) {
+			result := make([]retrieval.EvidenceCandidate, 0, len(ids))
+			for _, id := range ids {
+				result = append(result, retrieval.EvidenceCandidate{ID: id, Preview: id})
+			}
+			return result, nil
+		},
+		Rerank: func(context.Context, string, []retrieval.EvidenceCandidate) (retrieval.RerankResult, error) {
+			rerankCalls++
+			return retrieval.RerankResult{}, errors.New("must not be called")
+		},
+	}
+	result, err := pipeline.Search(context.Background(), retrieval.SearchRequest{
+		Query: "evidence", Scope: retrieval.Scope{NotebookID: "nb", SourceIDs: []string{"src"}},
+		DenseLimit: 2, SparseLimit: 2, RerankLimit: 3, MinimumSurvivors: 1, RRFK: 60,
+		SkipRerank: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rerankCalls != 0 || result.Degraded || result.Diagnostics.Rerank.Completed ||
+		!result.Diagnostics.RRF.Completed || result.Diagnostics.RRF.DurationNanoseconds <= 0 ||
+		!reflect.DeepEqual(result.Diagnostics.RRF.CandidateIDs, []string{"shared", "dense", "sparse"}) ||
+		!reflect.DeepEqual(testEvidenceCandidateIDs(result.Candidates), []string{"shared", "dense", "sparse"}) {
+		t.Fatalf("result=%+v rerankCalls=%d", result, rerankCalls)
+	}
+}
+
+func testEvidenceCandidateIDs(candidates []retrieval.EvidenceCandidate) []string {
+	ids := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		ids = append(ids, candidate.ID)
+	}
+	return ids
+}
+
 func TestHybridPipelineAppliesExplicitDegradationMatrix(t *testing.T) {
 	unavailable := errors.New("channel unavailable")
 	base := retrieval.Pipeline{

@@ -48,6 +48,26 @@ func TestRetrievalGridGeneratesTheConfirmed81Combinations(t *testing.T) {
 	}
 }
 
+func TestRetrievalGridGenerates48RRFOnlyCombinationsWithFixedOutputLimit(t *testing.T) {
+	grid := rageval.RetrievalGrid{
+		Mode: "rrf_only", DenseCandidates: []int{5, 10, 20, 40},
+		SparseCandidates: []int{5, 10, 20, 40}, RRFK: []int{30, 60, 100},
+		FusedCandidates: 20,
+	}
+	if err := grid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	combinations := grid.Combinations()
+	if len(combinations) != 48 {
+		t.Fatalf("combinations = %d, want 48", len(combinations))
+	}
+	for _, override := range combinations {
+		if !override.SkipRerank || override.FusedCandidates != 20 || override.RerankCandidates != 0 {
+			t.Fatalf("RRF-only override = %+v", override)
+		}
+	}
+}
+
 func TestRetrievalGridRejectsEmptyOrInvalidValues(t *testing.T) {
 	grid := retrievalGrid()
 	grid.DenseCandidates = nil

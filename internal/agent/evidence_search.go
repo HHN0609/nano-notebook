@@ -40,6 +40,7 @@ type RetrievalSearchOverrides struct {
 	SparseCandidates int
 	RRFK             int
 	RerankCandidates int
+	SkipRerank       bool
 }
 
 // WithMetrics attaches the Sprint 12 task-lifecycle metrics recorder and
@@ -72,8 +73,8 @@ func (s *EvidenceSearchService) SearchEvidence(ctx context.Context, attempt Atte
 // SearchEvidenceWithOverrides runs the same production retrieval pipeline as
 // SearchEvidence, but lets a sweep executor replace the query-time Index Config
 // values. This is a deliberate divergence from the normal Agent path: RerankLimit
-// is not capped at maxSearchEvidenceCandidates, so the sweep can measure the
-// configured rerank candidate count instead of the Agent result budget.
+// is not capped at maxSearchEvidenceCandidates, and an RRF-only sweep can
+// explicitly skip the configured reranker.
 func (s *EvidenceSearchService) SearchEvidenceWithOverrides(ctx context.Context, attempt Attempt, query string, overrides RetrievalSearchOverrides) (retrieval.SearchResult, error) {
 	return s.searchEvidence(ctx, attempt, query, overrides, false)
 }
@@ -151,7 +152,7 @@ func (s *EvidenceSearchService) searchEvidenceScope(ctx context.Context, scope p
 		},
 	}
 	searchStartedAt := time.Now()
-	request := retrievalSearchRequest(query, retrieval.Scope{NotebookID: scope.NotebookID, SourceIDs: sourceIDs, RevisionIDs: revisionIDs}, denseLimit, sparseLimit, rerankLimit, rrfK, scope.Version.Config.RerankRelevanceThreshold)
+	request := retrievalSearchRequest(query, retrieval.Scope{NotebookID: scope.NotebookID, SourceIDs: sourceIDs, RevisionIDs: revisionIDs}, denseLimit, sparseLimit, rerankLimit, rrfK, scope.Version.Config.RerankRelevanceThreshold, overrides.SkipRerank)
 	result, searchErr := pipeline.Search(ctx, request)
 	s.recordSearchMetrics(result, searchErr, searchStartedAt)
 	return result, searchErr
@@ -164,11 +165,11 @@ func overrideOrDefault(override, fallback int) int {
 	return fallback
 }
 
-func retrievalSearchRequest(query string, scope retrieval.Scope, denseLimit, sparseLimit, rerankLimit, rrfK int, rerankRelevanceThreshold float64) retrieval.SearchRequest {
+func retrievalSearchRequest(query string, scope retrieval.Scope, denseLimit, sparseLimit, rerankLimit, rrfK int, rerankRelevanceThreshold float64, skipRerank bool) retrieval.SearchRequest {
 	return retrieval.SearchRequest{
 		Query: query, Scope: scope, DenseLimit: denseLimit, SparseLimit: sparseLimit,
 		RerankLimit: rerankLimit, MinimumSurvivors: 1, RRFK: rrfK,
-		RerankRelevanceThreshold: rerankRelevanceThreshold,
+		RerankRelevanceThreshold: rerankRelevanceThreshold, SkipRerank: skipRerank,
 	}
 }
 

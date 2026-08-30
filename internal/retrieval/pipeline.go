@@ -28,6 +28,7 @@ type SearchRequest struct {
 	RerankLimit              int
 	MinimumSurvivors         int
 	RRFK                     int
+	SkipRerank               bool
 	RerankRelevanceThreshold float64
 }
 
@@ -59,6 +60,7 @@ type SearchDiagnostics struct {
 	Dense             SearchStageDiagnostics
 	BM25              SearchStageDiagnostics
 	Fused             SearchStageDiagnostics
+	RRF               SearchStageDiagnostics
 	EvidenceLoad      SearchStageDiagnostics
 	Rerank            SearchStageDiagnostics
 	Degradations      []string
@@ -88,6 +90,7 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 	}
 
 	result := SearchResult{}
+	rrfStarted := time.Now()
 	var dense, sparse []Candidate
 	var denseErr, sparseErr error
 	var wg sync.WaitGroup
@@ -149,6 +152,7 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 		ids = append(ids, candidate.ID)
 	}
 	result.Diagnostics.Fused = candidateStage(true, time.Since(fusedStarted), ids)
+	result.Diagnostics.RRF = candidateStage(true, time.Since(rrfStarted), ids)
 
 	if len(ids) == 0 {
 		if result.Degraded {
@@ -181,7 +185,7 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 		return result, nil
 	}
 	result.Candidates = authoritative
-	if p.Rerank == nil {
+	if request.SkipRerank || p.Rerank == nil {
 		return result, nil
 	}
 	rerankStarted := time.Now()

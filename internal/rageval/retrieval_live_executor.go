@@ -123,10 +123,18 @@ func (e *RetrievalLiveExecutor) Search(ctx context.Context, evalCase RetrievalCa
 			return retrieval.SearchResult{}, err
 		}
 	}
-	return e.service.SearchEvidenceWithOverrides(ctx, attempt, evalCase.Question, agent.RetrievalSearchOverrides{
+	return e.service.SearchEvidenceWithOverrides(ctx, attempt, evalCase.Question, retrievalAgentOverrides(override))
+}
+
+func retrievalAgentOverrides(override RetrievalSearchOverride) agent.RetrievalSearchOverrides {
+	outputLimit := override.RerankCandidates
+	if override.SkipRerank {
+		outputLimit = override.FusedCandidates
+	}
+	return agent.RetrievalSearchOverrides{
 		DenseCandidates: override.DenseCandidates, SparseCandidates: override.SparseCandidates,
-		RRFK: override.RRFK, RerankCandidates: override.RerankCandidates,
-	})
+		RRFK: override.RRFK, RerankCandidates: outputLimit, SkipRerank: override.SkipRerank,
+	}
 }
 
 func (e *RetrievalLiveExecutor) refreshLease(ctx context.Context, attempt agent.Attempt) error {
