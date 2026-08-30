@@ -34,7 +34,7 @@ func TestRunSweepWritesCSVAndJSONReports(t *testing.T) {
 	}, &output, &sweepExecutorStub{}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), prefix+".json") || !strings.Contains(output.String(), prefix+".csv") {
+	if !strings.Contains(output.String(), prefix+".json") || !strings.Contains(output.String(), prefix+".csv") || !strings.Contains(output.String(), prefix+".md") {
 		t.Fatalf("output = %q", output.String())
 	}
 	var report rageval.RetrievalReport
@@ -48,6 +48,13 @@ func TestRunSweepWritesCSVAndJSONReports(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(csvPayload), "dense_candidates,sparse_candidates,rrf_k,rerank_candidates") {
 		t.Fatalf("csv = %q", csvPayload)
+	}
+	markdownPayload, err := os.ReadFile(prefix + ".md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(markdownPayload), "# Retrieval sweep") || !strings.Contains(string(markdownPayload), "Recall@20") {
+		t.Fatalf("markdown = %q", markdownPayload)
 	}
 }
 

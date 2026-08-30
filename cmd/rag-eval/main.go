@@ -543,7 +543,7 @@ func parseSweepArgs(args []string) (sweepConfig, error) {
 	flags.StringVar(&config.suitePath, "suite", "evals/rag/retrieval-sweep-v1.json", "path to the retrieval sweep Suite")
 	flags.StringVar(&config.gridPath, "grid", "", "path to the retrieval sweep grid JSON")
 	flags.StringVar(&config.manifestPath, "manifest", "", "path to the retrieval sweep live Source manifest")
-	flags.StringVar(&config.outPrefix, "out-prefix", "", "output prefix for CSV and JSON reports")
+	flags.StringVar(&config.outPrefix, "out-prefix", "", "output prefix for JSON, CSV, and Markdown reports")
 	flags.StringVar(&config.databaseURL, "database-url", "", "PostgreSQL URL used by the live retrieval sweep")
 	flags.StringVar(&config.bifrostURL, "bifrost-url", "http://127.0.0.1:56666", "Bifrost model gateway URL")
 	flags.StringVar(&config.qdrantURL, "qdrant-url", "http://127.0.0.1:56333", "Qdrant URL")
@@ -581,18 +581,23 @@ func writeSweepReport(config sweepConfig, output io.Writer, executor rageval.Ret
 	if err != nil {
 		return err
 	}
+	markdownPayload := report.Markdown()
 	if err := os.MkdirAll(filepath.Dir(config.outPrefix), 0o755); err != nil {
 		return err
 	}
 	jsonPath := config.outPrefix + ".json"
 	csvPath := config.outPrefix + ".csv"
+	markdownPath := config.outPrefix + ".md"
 	if err := os.WriteFile(jsonPath, jsonPayload, 0o644); err != nil {
 		return err
 	}
 	if err := os.WriteFile(csvPath, csvPayload, 0o644); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(output, "wrote %s\nwrote %s\n", jsonPath, csvPath); err != nil {
+	if err := os.WriteFile(markdownPath, markdownPayload, 0o644); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(output, "wrote %s\nwrote %s\nwrote %s\n", jsonPath, csvPath, markdownPath); err != nil {
 		return err
 	}
 	return nil
