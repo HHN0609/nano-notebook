@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Sample retrieval-layer eval cases from public datasets.
 
-Each language's general-search dataset (MS MARCO / DuReader) is paired with a
-vertical-domain dataset (FiQA / CmedqaRetrieval) so a threshold calibrated
-against this suite is not overfit to one query style. Every sampled query also
+The suite covers general search, finance, medicine, scientific fact retrieval,
+nutrition, and argument retrieval without adding multi-hop cases. Every sampled query also
 gets `--distractor-count` random, unrelated passages from its own corpus,
 tagged `is_distractor`, so `rag-eval build-suite` can admit them as ordinary
 Sources without ever treating them as an expected answer. Their only purpose
@@ -15,6 +14,7 @@ text is not committed to the repository.
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import random
@@ -38,6 +38,9 @@ FIQA_LICENSE = (
     "cc-by-sa-4.0; ir_datasets beir/fiqa mirrors the FiQA-2018 task data for "
     "academic use"
 )
+SCIFACT_LICENSE = "claims CC BY 4.0; abstracts ODC-By 1.0; see allenai/scifact LICENSE.md"
+NFCORPUS_LICENSE = "see the upstream NFCorpus dataset terms linked by BEIR/ir_datasets"
+ARGUANA_LICENSE = "see the upstream ArguAna dataset terms linked by BEIR/ir_datasets"
 CMEDQA_LICENSE = (
     "mirrors C-MTEB/CmedqaRetrieval and C-MTEB/CmedqaRetrieval-qrels on "
     "HuggingFace for academic use"
@@ -178,6 +181,57 @@ def sample_fiqa(count: int, distractor_count: int, seed: int) -> list[dict]:
     return sampled + distractors
 
 
+def sample_ir_dataset(
+    dataset, count: int, distractor_count: int, seed: int, dataset_id: str, ref_prefix: str
+) -> list[dict]:
+    docs = {}
+    for doc in dataset.docs_iter():
+        title = str(getattr(doc, "title", "") or "").strip()
+        body = str(getattr(doc, "text", "") or "").strip()
+        text = f"{title}\n\n{body}" if title and body else title or body
+        if text:
+            docs[str(doc.doc_id)] = text
+    qrels: dict[str, list[str]] = {}
+    for qrel in dataset.qrels_iter():
+        relevance = getattr(qrel, "relevance", getattr(qrel, "score", 1))
+        if relevance > 0:
+            qrels.setdefault(str(qrel.query_id), []).append(str(qrel.doc_id))
+    candidates = []
+    for query in dataset.queries_iter():
+        query_id = str(query.query_id)
+        relevant = qrels.get(query_id, [])
+        if not relevant:
+            continue
+        doc_id = relevant[0]
+        text = docs.get(doc_id)
+        if not text:
+            continue
+        candidates.append(
+            {
+                "dataset_id": dataset_id,
+                "query_id": query_id,
+                "query": query.text,
+                "doc_id": doc_id,
+                "doc_text": text,
+                "source_ref": f"{ref_prefix}:passage:{doc_id}",
+                "is_distractor": False,
+            }
+        )
+    sampled = deterministic_sample(deduplicate_by_source_text(candidates), count, seed)
+    used = {row["doc_id"] for row in sampled}
+    return sampled + sample_unique_distractors(
+        docs, used, dataset_id, ref_prefix, distractor_count, seed + 5000
+    )
+
+
+def sample_beir(dataset_name: str, count: int, distractor_count: int, seed: int, dataset_id: str, ref_prefix: str) -> list[dict]:
+    try:
+        import ir_datasets
+    except ImportError:
+        sys.exit("ir_datasets is required: python3 -m pip install ir_datasets")
+    return sample_ir_dataset(ir_datasets.load(dataset_name), count, distractor_count, seed, dataset_id, ref_prefix)
+
+
 def sample_cmedqa(count: int, distractor_count: int, seed: int) -> list[dict]:
     corpus_path = download_cached(CMEDQA_CORPUS_URL, "cmedqa-retrieval-corpus.parquet")
     queries_path = download_cached(CMEDQA_QUERIES_URL, "cmedqa-retrieval-queries.parquet")
@@ -238,6 +292,37 @@ def sample_distractors(
     ]
 
 
+def sample_unique_distractors(
+    docs: dict[str, str], exclude_ids: set[str], dataset_id: str, ref_prefix: str, count: int, seed: int
+) -> list[dict]:
+    excluded_hashes = {
+        hashlib.sha256(docs[doc_id].encode()).digest()
+        for doc_id in exclude_ids
+        if doc_id in docs
+    }
+    unique_docs = {}
+    seen = set(excluded_hashes)
+    for doc_id in sorted(docs):
+        digest = hashlib.sha256(docs[doc_id].encode()).digest()
+        if doc_id in exclude_ids or digest in seen:
+            continue
+        seen.add(digest)
+        unique_docs[doc_id] = docs[doc_id]
+    return sample_distractors(unique_docs, set(), dataset_id, ref_prefix, count, seed)
+
+
+def deduplicate_by_source_text(rows: list[dict]) -> list[dict]:
+    result = []
+    seen = set()
+    for row in rows:
+        digest = hashlib.sha256(row["doc_text"].encode()).digest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        result.append(row)
+    return result
+
+
 def deterministic_sample(candidates: list[dict], count: int, seed: int) -> list[dict]:
     candidates = sorted(candidates, key=lambda item: (item["query_id"], item["doc_id"]))
     random.Random(seed).shuffle(candidates)
@@ -260,6 +345,9 @@ def write_sidecar(out_dir: Path, datasets: dict[str, list[dict]], seed: int) -> 
             "beir-fiqa": {"source": "ir_datasets beir/fiqa/test", "license": FIQA_LICENSE, **summarize(datasets["beir-fiqa"])},
             "dureader-retrieval": {"source": "HuggingFace zyznull/dureader-retrieval-ranking dev", "license": DUREADER_LICENSE, **summarize(datasets["dureader-retrieval"])},
             "cmedqa-retrieval": {"source": "HuggingFace C-MTEB/CmedqaRetrieval + CmedqaRetrieval-qrels dev", "license": CMEDQA_LICENSE, **summarize(datasets["cmedqa-retrieval"])},
+            "beir-scifact": {"source": "ir_datasets beir/scifact/test", "license": SCIFACT_LICENSE, **summarize(datasets["beir-scifact"])},
+            "beir-nfcorpus": {"source": "ir_datasets beir/nfcorpus/test", "license": NFCORPUS_LICENSE, **summarize(datasets["beir-nfcorpus"])},
+            "beir-arguana": {"source": "ir_datasets beir/arguana", "license": ARGUANA_LICENSE, **summarize(datasets["beir-arguana"])},
         },
     }
     (out_dir / "dataset-manifest.json").write_text(
@@ -274,6 +362,9 @@ def main() -> None:
     parser.add_argument("--fiqa-count", type=int, default=40)
     parser.add_argument("--dureader-count", type=int, default=120)
     parser.add_argument("--cmedqa-count", type=int, default=40)
+    parser.add_argument("--scifact-count", type=int, default=60)
+    parser.add_argument("--nfcorpus-count", type=int, default=60)
+    parser.add_argument("--arguana-count", type=int, default=60)
     parser.add_argument("--distractor-count", type=int, default=40, help="random distractors sampled per sub-dataset")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -302,14 +393,50 @@ def main() -> None:
     write_records(out_dir, "cmedqa-retrieval-v1.jsonl", cmedqa)
     print(f"sampled {len(cmedqa)} CmedqaRetrieval rows ({args.distractor_count} distractors)")
 
-    combined = msmarco + fiqa + dureader + cmedqa
+    scifact = add_case_ids(
+        sample_beir(
+            "beir/scifact/test", args.scifact_count, args.distractor_count,
+            args.seed + 4, "beir-scifact", "scifact",
+        ),
+        "scifact",
+    )
+    write_records(out_dir, "beir-scifact-v1.jsonl", scifact)
+    print(f"sampled {len(scifact)} SciFact rows ({args.distractor_count} distractors)")
+
+    nfcorpus = add_case_ids(
+        sample_beir(
+            "beir/nfcorpus/test", args.nfcorpus_count, args.distractor_count,
+            args.seed + 5, "beir-nfcorpus", "nfcorpus",
+        ),
+        "nfcorpus",
+    )
+    write_records(out_dir, "beir-nfcorpus-v1.jsonl", nfcorpus)
+    print(f"sampled {len(nfcorpus)} NFCorpus rows ({args.distractor_count} distractors)")
+
+    arguana = add_case_ids(
+        sample_beir(
+            "beir/arguana", args.arguana_count, args.distractor_count,
+            args.seed + 6, "beir-arguana", "arguana",
+        ),
+        "arguana",
+    )
+    write_records(out_dir, "beir-arguana-v1.jsonl", arguana)
+    print(f"sampled {len(arguana)} ArguAna rows ({args.distractor_count} distractors)")
+
+    combined = msmarco + fiqa + dureader + cmedqa + scifact + nfcorpus + arguana
     write_records(out_dir, "samples-combined.jsonl", combined)
     write_sidecar(
         out_dir,
-        {"msmarco-passage": msmarco, "beir-fiqa": fiqa, "dureader-retrieval": dureader, "cmedqa-retrieval": cmedqa},
+        {
+            "msmarco-passage": msmarco, "beir-fiqa": fiqa,
+            "dureader-retrieval": dureader, "cmedqa-retrieval": cmedqa,
+            "beir-scifact": scifact, "beir-nfcorpus": nfcorpus, "beir-arguana": arguana,
+        },
         args.seed,
     )
-    en_notebooks = -(-sum(1 for row in msmarco + fiqa if not row["is_distractor"]) // 45)
+    en_notebooks = -(
+        -sum(1 for row in msmarco + fiqa + scifact + nfcorpus + arguana if not row["is_distractor"]) // 45
+    )
     zh_notebooks = -(-sum(1 for row in dureader + cmedqa if not row["is_distractor"]) // 45)
     print(f"wrote {len(combined)} total rows to {out_dir}; plan for roughly {en_notebooks} English and {zh_notebooks} Chinese Notebooks under the 50-Source quota")
 
