@@ -2,9 +2,10 @@
 
 ## Purpose
 
-`rag-eval sweep` runs the production retrieval pipeline (dense embedding, BM25,
-RRF fusion, evidence reload, rerank) without the Agent LLM loop, then reports
-Recall/MRR and per-stage latency for query-time parameter combinations.
+`rag-eval sweep` runs the production retrieval pipeline without the Agent LLM
+loop. An explicit `rrf_only` grid stops after Dense/BM25, RRF fusion, and
+authoritative evidence reload, so candidate-count and `rrf_k` tuning cannot
+consume reranker quota or accidentally measure reranker backoff.
 
 The current suite is `evals/rag/retrieval-sweep-v1.json`: 50 English MS MARCO
 cases and 50 Chinese DuReader-retrieval cases. Every case is one real passage
@@ -50,7 +51,10 @@ The sampler writes to gitignored `evals/rag/.dataset-cache/`:
 - `beir-fiqa-v1.jsonl`
 - `dureader-retrieval-dev.jsonl`
 - `cmedqa-retrieval-v1.jsonl`
-- `samples-combined.jsonl` (all four, for a single `build-suite` pass)
+- `beir-scifact-v1.jsonl`
+- `beir-nfcorpus-v1.jsonl`
+- `beir-arguana-v1.jsonl`
+- `samples-combined.jsonl` (all seven, for a single `build-suite` pass)
 - `dataset-manifest.json`
 
 Every row in these files carries `is_distractor`. `rag-eval ingest-samples`
@@ -82,6 +86,13 @@ Authority:
   pulls the `C-MTEB/CmedqaRetrieval` corpus/queries and
   `C-MTEB/CmedqaRetrieval-qrels` relevance judgments, both HuggingFace mirrors
   for academic use.
+- SciFact uses `ir_datasets` dataset `beir/scifact/test`; its claims are CC BY
+  4.0 and abstracts are ODC-By 1.0 under the upstream SciFact terms.
+- NFCorpus uses `ir_datasets` dataset `beir/nfcorpus/test` and adds
+  nutrition/medical-information questions.
+- ArguAna uses `ir_datasets` dataset `beir/arguana` and adds argument-counter
+  argument retrieval. All three remain single-hop in this suite: one sampled
+  query is labeled against one relevant Source.
 
 Generated dataset samples, sweep outputs, and the local retrieval suite/manifest
 are also gitignored. They can be regenerated with the commands in this runbook
@@ -146,8 +157,9 @@ go run ./cmd/rag-eval sweep \
 Output:
 
 - `<prefix>.json`: full case-level report with stage diagnostics.
-- `<prefix>.csv`: one row per parameter combination with aggregate Recall, MRR,
-  completed/failed cases, and mean stage milliseconds.
+- `<prefix>.csv`: one row per parameter combination with Recall@5/10/20,
+  MRR@20, macro metrics, and mean/p50/p95 stage milliseconds.
+- `<prefix>.md`: compact winner and comparison table.
 
 Quick summary:
 
@@ -156,15 +168,49 @@ python3 scripts/rag-eval/summarize_sweep.py \
   evals/rag/sweep-out/retrieval-sweep-v1.json
 ```
 
-The default grid is the confirmed 81-combination cross product around the
-production baseline 40/40/60/20:
+The current RRF-only grid is the confirmed 48-combination cross product:
 
-- `dense_candidates`: 20, 40, 80
-- `sparse_candidates`: 20, 40, 80
+- `dense_candidates`: 5, 10, 20, 40
+- `sparse_candidates`: 5, 10, 20, 40
 - `rrf_k`: 30, 60, 100
-- `rerank_candidates`: 10, 20, 40
+- fixed fused output: Top 20
 
 ## Results
+
+### Seven-dataset RRF-only ablation (2026-08-30)
+
+Suite: 500 single-hop cases across MS MARCO (120), FiQA (40), DuReader (120),
+CmedqaRetrieval (40), SciFact (60), NFCorpus (60), and ArguAna (60), plus 280
+random distractor Sources. The 48-combination grid completed 24,000 searches
+with 0 errors, 0 degraded cases, and 0 reranker invocations. Report files:
+
+- `evals/rag/sweep-out/rrf-only-single-hop-7-datasets-v2.json`
+- `evals/rag/sweep-out/rrf-only-single-hop-7-datasets-v2.csv`
+- `evals/rag/sweep-out/rrf-only-single-hop-7-datasets-v2.md`
+
+The selected combination is `dense=40`, `sparse=40`, `rrf_k=30`, fixed fused
+Top 20. It reached aggregate Recall@5/10/20 of 0.944/0.964/0.980 and MRR@20 of
+0.896161; macro Recall@20 was 0.976190 and macro MRR@20 was 0.863495. RRF
+critical-path latency was mean 2.227 ms, p50 2.076 ms, and p95 3.195 ms;
+authoritative evidence reload averaged 4.631 ms.
+
+The current active `40/40/60` baseline had the same aggregate Recall@20
+(0.980) and macro Recall@20 (0.976190), with aggregate MRR@20 0.896165 and
+macro MRR@20 0.863351. The quality difference is therefore small: `rrf_k=30`
+wins only on the configured macro-MRR tie-break after equal macro Recall@20.
+
+NFCorpus is the material hard set at the baseline: Recall@5/10/20 was
+0.617/0.750/0.833 and MRR@20 was 0.520. Every other dataset reached Recall@20
+1.000. This is why the earlier four-dataset suite made candidate-count changes
+look nearly indistinguishable.
+
+The active Index Version was not promoted in this run. The required frozen
+full-product Eval cannot currently execute locally because no Sprint 6 live
+Source manifest is provisioned and the Bifrost config has no transcription
+provider for the MP3/WAV/M4A fixtures (`openai/whisper-1`). Directly mutating
+the active row would bypass the repository's Eval gate. The candidate remains
+`40/40/30`; configure transcription, provision the 15 frozen fixtures, run the
+live product Eval, and promote only if it passes.
 
 ### Original two-dataset run (superseded)
 
@@ -306,20 +352,16 @@ than code:
   with limit `embed_content_free_tier_requests: 1000`. A paid tier or a later
   quota reset is required if a sweep without embedding caching is repeated.
 - `evals/rag/retrieval-sweep-grid-v1.json` is gitignored and regenerated per
-  run. For threshold calibration (as opposed to `top_k`/`rrf_k` tuning) it
-  should pin a single combination — `{"dense_candidates":[40],
-  "sparse_candidates":[40],"rrf_k":[60],"rerank_candidates":[20]}` — not the
-  81-combination cross product, since every combination now costs one real
-  rerank call per case.
+  run. Candidate-count/`rrf_k` tuning uses `mode: "rrf_only"` and a fixed
+  `fused_candidates` limit. Threshold calibration is a separate, single-config
+  run with the real reranker enabled.
 - `admitNotebook` in `internal/rageval/retrieval_live_executor.go` pins one
   agent Run per Notebook for the life of the sweep, and Postgres enforces one
   active Run per **user**, not per Notebook (`agent_runs_one_active_per_user_idx`).
   Sweeping cases across N Notebooks concurrently needs N distinct principals,
   one owner per Notebook — reusing a single user across many eval Notebooks
   makes every Notebook after the first fail admission.
-- This run's local dev Postgres now has 12 eval Notebooks (`nb_eval_msmarco_1..4`,
-  `nb_eval_fiqa_1..2`, `nb_eval_dureader_1..4`, `nb_eval_cmedqa_1..2`), one
-  eval user owning each, and 480 ingested Sources (320 relevant + 160
-  distractors, per the counts in "Data"). These are reusable fixtures for the
-  next recalibration once a production reranker decision is made; they do not
-  need to be recreated from scratch.
+- This run's local dev Postgres now has 18 eval Notebooks: the previous 12 plus
+  two each for SciFact, NFCorpus, and ArguAna. They contain 780 ingested
+  Sources (500 relevant + 280 distractors), all with active Evidence Revisions
+  and verified `riv_dev_baseline_v1` projections.
