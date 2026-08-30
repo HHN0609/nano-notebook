@@ -2,6 +2,12 @@
 
 The promotion-authorizing path is `rag-eval -live-product-sources`. It uses the frozen Suite and pinned configuration, builds the candidate projection, runs each Case through the production Agent Controller, `search_evidence`, grounding verifier, publication barrier, and Citation tables, then promotes only a passing candidate.
 
+The current pinned query configuration is Dense 40, BM25 40, RRF `k=30`, and
+at most 10 fused candidates sent to reranking. Relevance filtering remains
+0.28. The candidate count is applied before authority reload and reranking, so
+the reranker receives at most 10 candidates and the model receives at most 10
+Evidence items before output-budget truncation.
+
 Precomputed `-observations` remain useful for evaluator development, but the CLI rejects them when an Eval Run would be recorded or a Retrieval Index Version promoted. `-product-runs` audits already completed product Runs without executing new ones and cannot authorize promotion. `-executor-command` remains the bounded CI adapter for a trusted, separately packaged product runner.
 
 ## Prerequisites

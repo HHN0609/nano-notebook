@@ -6,6 +6,12 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 )
 
+func TestProductionSearchEvidenceCandidateLimitIsTen(t *testing.T) {
+	if maxSearchEvidenceCandidates != 10 {
+		t.Fatalf("production search Evidence candidate limit=%d, want 10", maxSearchEvidenceCandidates)
+	}
+}
+
 func TestRetrievalSearchRequestUsesRequestTimeOverrides(t *testing.T) {
 	request := retrievalSearchRequest(
 		"what is a galaxy",

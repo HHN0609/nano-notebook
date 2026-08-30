@@ -21,6 +21,10 @@ func TestRunEvaluatesFrozenSuiteFromProductObservations(t *testing.T) {
 		config.Index.EmbeddingProfileID != "gemini-retrieval-v1" {
 		t.Fatalf("pinned embedding config=%+v", config.Index)
 	}
+	if config.Index.DenseCandidates != 40 || config.Index.SparseCandidates != 40 ||
+		config.Index.RRFK != 30 || config.Index.RerankCandidates != 10 {
+		t.Fatalf("pinned query config=%+v, want 40/40/30/10", config.Index)
+	}
 	observations := make([]rageval.Observation, 0, len(suite.Cases))
 	for _, evalCase := range suite.Cases {
 		retrieved := make([]string, 0, len(evalCase.ExpectedEvidenceSets))

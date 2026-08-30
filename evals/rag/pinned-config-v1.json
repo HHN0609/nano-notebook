@@ -12,9 +12,9 @@
     "embedding_profile_id": "gemini-retrieval-v1",
     "dense_candidates": 40,
     "sparse_candidates": 40,
-    "rrf_k": 60,
+    "rrf_k": 30,
     "reranker_id": "cohere/rerank-v4.0-pro",
-    "rerank_candidates": 20,
+    "rerank_candidates": 10,
     "rerank_relevance_threshold": 0.28,
     "degradation_policy_id": "hybrid-required-v1"
   },

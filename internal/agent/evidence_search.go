@@ -16,7 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const maxSearchEvidenceCandidates = 8
+const maxSearchEvidenceCandidates = 10
 
 type evidenceVectorSearcher interface {
 	SearchDense(context.Context, []float32, qdrantstore.Scope, int) ([]retrieval.Candidate, error)

@@ -204,13 +204,22 @@ NFCorpus is the material hard set at the baseline: Recall@5/10/20 was
 1.000. This is why the earlier four-dataset suite made candidate-count changes
 look nearly indistinguishable.
 
-The active Index Version was not promoted in this run. The required frozen
-full-product Eval cannot currently execute locally because no Sprint 6 live
+The active Index Version was not promoted in this run. A focused follow-up sent
+the two incremental NFCorpus recoveries through the real reranker with
+`40/40/30/10`: their RRF ranks 3 and 10 became reranked ranks 5 and 7, with
+scores 0.325606 and 0.401312. Both survived the unchanged 0.28 relevance
+threshold. The two rerank calls took 1515.816 ms and 368.352 ms; the first is a
+single-call cold/network observation, not a stable latency estimate.
+
+The repository pinned configuration and production Evidence ceiling now define
+`40/40/30/10`, but this does not mutate an existing active Index Version. The
+required frozen full-product Eval cannot currently execute locally because no
+Sprint 6 live
 Source manifest is provisioned and the Bifrost config has no transcription
 provider for the MP3/WAV/M4A fixtures (`openai/whisper-1`). Directly mutating
-the active row would bypass the repository's Eval gate. The candidate remains
-`40/40/30`; configure transcription, provision the 15 frozen fixtures, run the
-live product Eval, and promote only if it passes.
+the active row would bypass the repository's Eval gate. Configure transcription,
+provision the 15 frozen fixtures, create and rebuild the `40/40/30/10`
+candidate, run the live product Eval, and promote only if it passes.
 
 ### Original two-dataset run (superseded)
 
