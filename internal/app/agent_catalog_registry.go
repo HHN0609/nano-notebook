@@ -109,10 +109,12 @@ func RegisterAgentCatalog(ctx context.Context, db *DB, catalog agentcatalog.Cata
 		}
 		if _, err := tx.Exec(ctx, `
 			insert into agent_model_policy_versions(
-				policy_identity,policy_version,canonical_sha256,provider_model,temperature,max_output_tokens,timeout_ms,canonical_payload,source_path
-			) values($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+				policy_identity,policy_version,canonical_sha256,provider_model,temperature,max_output_tokens,timeout_ms,
+				enable_thinking,canonical_payload,source_path
+			) values($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
 			on conflict(policy_identity,policy_version) do nothing
-		`, policy.Identity, policy.Version, policy.SHA256, policy.ProviderModel, policy.Temperature, policy.MaxOutputTokens, policy.TimeoutMS, string(payload), policy.SourcePath); err != nil {
+		`, policy.Identity, policy.Version, policy.SHA256, policy.ProviderModel, policy.Temperature, policy.MaxOutputTokens, policy.TimeoutMS,
+			policy.ThinkingEnabled(), string(payload), policy.SourcePath); err != nil {
 			return fmt.Errorf("register model policy %s: %w", policy.Reference(), err)
 		}
 		if err := verifyCatalogEntry(ctx, tx, "agent_model_policy_versions", "policy_identity", "policy_version", policy.Reference(), policy.SHA256, payload, policy.SourcePath, "model policy"); err != nil {

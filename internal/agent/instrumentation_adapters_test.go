@@ -60,6 +60,11 @@ func TestModelRequestHashIncludesInvocationPolicy(t *testing.T) {
 	if configuredHash := modelRequestHash(request); configuredHash == defaultHash {
 		t.Fatalf("configured and default invocation hashes are equal: %s", configuredHash)
 	}
+	configuredHash := modelRequestHash(request)
+	request.InvocationPolicy.EnableThinking = true
+	if thinkingHash := modelRequestHash(request); thinkingHash == configuredHash {
+		t.Fatalf("thinking and non-thinking invocation hashes are equal: %s", thinkingHash)
+	}
 }
 
 func TestModelAdapterLabelsAnswerCompositionPhaseWithoutContent(t *testing.T) {

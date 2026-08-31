@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 12; got != want {
+	if got, want := len(definitions), 14; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -46,12 +46,20 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			executor: "research_planner", model: "agent.deep-research-default@1",
 			tools: []string{"read_skill"},
 		},
+		"research.planner@6": {
+			executor: "research_planner", model: "agent.deep-research-default@3",
+			tools: []string{"read_skill"},
+		},
 		"research.executor@1": {
 			executor: "research_root", model: "agent.deep-research-default@1",
 			tools: []string{"read_url", "search_evidence", "web_search"},
 		},
 		"research.executor@6": {
 			executor: "research_root", model: "agent.deep-research-default@2",
+			tools: []string{"assemble_research_report", "list_research_files", "read_research_file", "read_url", "search_evidence", "web_search", "write_research_file"},
+		},
+		"research.executor@7": {
+			executor: "research_root", model: "agent.deep-research-default@4",
 			tools: []string{"assemble_research_report", "list_research_files", "read_research_file", "read_url", "search_evidence", "web_search", "write_research_file"},
 		},
 		"studio.report@1": {
@@ -94,7 +102,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			t.Fatalf("immutable identity missing for %s: %+v", key, definition)
 		}
 	}
-	if got, want := len(catalog.ModelPolicies()), 5; got != want {
+	if got, want := len(catalog.ModelPolicies()), 7; got != want {
 		t.Fatalf("model policies=%d want=%d", got, want)
 	}
 	if got, want := len(catalog.Contracts()), 12; got != want {
@@ -130,6 +138,11 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 	manifestV12, ok := catalog.ResolveRelease(MustParseReference("nano.default@12"))
 	if !ok || manifestV12.Roots["research_planner"].String() != "research.planner@5" || manifestV12.Roots["research"].String() != "research.executor@6" || manifestV12.Roots["chat"].String() != "chat.leader@3" {
 		t.Fatalf("v12 manifest=%+v ok=%v", manifestV12, ok)
+	}
+	manifestV13, ok := catalog.ResolveRelease(MustParseReference("nano.default@13"))
+	if !ok || manifestV13.Roots["research_planner"].String() != "research.planner@6" || manifestV13.Roots["research"].String() != "research.executor@7" ||
+		manifestV13.Roots["chat"].String() != "chat.leader@3" || manifestV13.Roots["studio_report"].String() != "studio.report@1" {
+		t.Fatalf("v13 manifest=%+v ok=%v", manifestV13, ok)
 	}
 	researchPolicy, ok := catalog.ResolveModelPolicy(MustParseReference("agent.deep-research-default@2"))
 	if !ok || researchPolicy.TimeoutMS != 200000 || researchPolicy.MaxOutputTokens != 16384 {

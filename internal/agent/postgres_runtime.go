@@ -153,7 +153,7 @@ const executionSelectFrom = `
 		coalesce(r.selected_source_count,0),
 		m.role,
 		(select count(*) from agent_run_delegations child_link where child_link.parent_run_id=tree.root_agent_run_id),
-		r.runtime_kind='configured',policy.temperature,policy.max_output_tokens,policy.timeout_ms,
+		r.runtime_kind='configured',policy.temperature,policy.max_output_tokens,policy.timeout_ms,policy.enable_thinking,
 		r.model_context_policy_identity,r.model_context_policy_version,r.model_context_policy_sha256,
 		context_policy.model_policy_identity,context_policy.model_policy_version,
 		r.provider_capability_identity,r.provider_capability_version,r.provider_capability_sha256,
@@ -198,6 +198,7 @@ func (r *PostgresRuntime) loadExecutionRow(ctx context.Context, tx pgx.Tx, where
 	var deadlineValid bool
 	var configured bool
 	var temperature *float64
+	var enableThinking *bool
 	var maxOutputTokens, timeoutMS *int
 	var contextIdentity, contextSHA, capabilityIdentity, capabilitySHA *string
 	var invocationPolicyIdentity *string
@@ -214,7 +215,7 @@ func (r *PostgresRuntime) loadExecutionRow(ctx context.Context, tx pgx.Tx, where
 		&execution.ActionResultByteLimit, &execution.ActionResultsByteLimit,
 		&execution.SelectedSourceCount,
 		&execution.MemberRole, &execution.ExistingChildCount,
-		&configured, &temperature, &maxOutputTokens, &timeoutMS,
+		&configured, &temperature, &maxOutputTokens, &timeoutMS, &enableThinking,
 		&contextIdentity, &contextVersion, &contextSHA,
 		&invocationPolicyIdentity, &invocationPolicyVersion,
 		&capabilityIdentity, &capabilityVersion, &capabilitySHA,
@@ -230,7 +231,7 @@ func (r *PostgresRuntime) loadExecutionRow(ctx context.Context, tx pgx.Tx, where
 		return Execution{}, false, err
 	}
 	if configured {
-		if temperature == nil || maxOutputTokens == nil || timeoutMS == nil || contextIdentity == nil || contextVersion == nil ||
+		if temperature == nil || maxOutputTokens == nil || timeoutMS == nil || enableThinking == nil || contextIdentity == nil || contextVersion == nil ||
 			contextSHA == nil || invocationPolicyIdentity == nil || invocationPolicyVersion == nil ||
 			capabilityIdentity == nil || capabilityVersion == nil || capabilitySHA == nil ||
 			resolvedModel == nil || contextWindow == nil || providerMaxInput == nil || providerMaxOutput == nil ||
@@ -240,13 +241,15 @@ func (r *PostgresRuntime) loadExecutionRow(ctx context.Context, tx pgx.Tx, where
 		}
 		execution.ModelInvocation = models.ModelInvocationPolicy{
 			Temperature: temperature, MaxOutputTokens: *maxOutputTokens, Timeout: time.Duration(*timeoutMS) * time.Millisecond,
+			EnableThinking: *enableThinking,
 		}
 		hardInput := *providerMaxInput
 		if windowInput := *contextWindow - *pinnedOutput; windowInput < hardInput {
 			hardInput = windowInput
 		}
 		safeInput := hardInput - *safety
-		if *pinnedOutput != *maxOutputTokens || *pinnedOutput > *providerMaxOutput || hardInput < 1 || safeInput < 1 ||
+		if *enableThinking != (*invocationMode == "thinking") || *pinnedOutput != *maxOutputTokens ||
+			*pinnedOutput > *providerMaxOutput || hardInput < 1 || safeInput < 1 ||
 			*softInput > safeInput || *keepRecent >= *softInput || *summaryOutput > *providerMaxOutput || *overflowLimit < 1 {
 			return Execution{}, false, errors.New("configured Model Context Policy pin is invalid")
 		}

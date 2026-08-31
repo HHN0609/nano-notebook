@@ -23,7 +23,7 @@ func TestControllerCheckpointsOrderedActionsThenFinalAndPublishesOnce(t *testing
 	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
 	temperature := 0.0
 	runtime.execution.ModelInvocation = models.ModelInvocationPolicy{
-		Temperature: &temperature, MaxOutputTokens: 555, Timeout: 4 * time.Second,
+		Temperature: &temperature, MaxOutputTokens: 555, Timeout: 4 * time.Second, EnableThinking: true,
 	}
 	model := &decisionModelStub{decisions: []models.ModelDecision{
 		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{
@@ -62,7 +62,8 @@ func TestControllerCheckpointsOrderedActionsThenFinalAndPublishesOnce(t *testing
 	}
 	for _, request := range model.requests {
 		if request.InvocationPolicy.Temperature == nil || *request.InvocationPolicy.Temperature != 0 ||
-			request.InvocationPolicy.MaxOutputTokens != 555 || request.InvocationPolicy.Timeout != 4*time.Second {
+			request.InvocationPolicy.MaxOutputTokens != 555 || request.InvocationPolicy.Timeout != 4*time.Second ||
+			!request.InvocationPolicy.EnableThinking {
 			t.Fatalf("model invocation policy = %+v", request.InvocationPolicy)
 		}
 	}

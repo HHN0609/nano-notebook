@@ -580,7 +580,8 @@ func TestPostgresRuntimeLoadsConfiguredChatRootWithoutLegacyFields(t *testing.T)
 	}
 	if execution.ModelInvocation.Temperature == nil || *execution.ModelInvocation.Temperature != policy.Temperature ||
 		execution.ModelInvocation.MaxOutputTokens != policy.MaxOutputTokens ||
-		execution.ModelInvocation.Timeout != time.Duration(policy.TimeoutMS)*time.Millisecond {
+		execution.ModelInvocation.Timeout != time.Duration(policy.TimeoutMS)*time.Millisecond ||
+		execution.ModelInvocation.EnableThinking {
 		t.Fatalf("configured invocation=%+v policy=%+v", execution.ModelInvocation, policy)
 	}
 	if !execution.DeadlineAt.Equal(deadline) {
@@ -593,6 +594,88 @@ func TestPostgresRuntimeLoadsConfiguredChatRootWithoutLegacyFields(t *testing.T)
 	resolution := agent.NewChatLeaderDefinitionExecutor(runtime).ExecuteAttempt(ctx, attempt)
 	if resolution.Disposition != agent.AttemptCompleted || normal.calls != 1 {
 		t.Fatalf("resolution=%+v normal calls=%d", resolution, normal.calls)
+	}
+}
+
+func TestPostgresRuntimeLoadsConfiguredDeepResearchThinkingPolicy(t *testing.T) {
+	api, _, _, chatID := newChatFixture(t, "configured-runtime-load@example.com")
+	ctx := context.Background()
+	var userID string
+	if err := api.db.Pool().QueryRow(ctx, `select creator_user_id from chat_chats where id=$1`, chatID).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	catalog, _ := agentcatalog.LoadEmbedded()
+	definition, _ := catalog.ResolveDefinition(agentcatalog.MustParseReference("research.executor@7"))
+	policy, _ := catalog.ResolveModelPolicy(definition.ModelPolicy)
+	modelContext, _ := catalog.ResolveModelContextPolicy(policy.Reference())
+	deadline := definitionAdmissionDeadline()
+	command := agent.ConfiguredChatAdmission{
+		RunID: "run_configured_load", UserID: userID, ChatID: chatID, InputMessageID: "msg_configured_load",
+		Definition: definition, ModelPolicy: policy, ModelContext: modelContext, DeadlineAt: deadline,
+		ContextManifest: json.RawMessage(`{"time_zone":"Asia/Shanghai"}`),
+	}
+	traceScope, err := agent.NewTraceScope(agent.DiscardTraceSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer traceScope.Rollback()
+	ctx = agent.ContextWithTraceScope(ctx, traceScope)
+	if err := api.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `insert into chat_messages(id,chat_id,role,content) values($1,$2,'user',$3)`, command.InputMessageID, chatID, "Use configured runtime."); err != nil {
+			return err
+		}
+		if err := agent.NewStore(tx).CreateConfiguredChatQueued(ctx, command); err != nil {
+			return fmt.Errorf("create configured run: %w", err)
+		}
+		if err := jobs.NewStore(tx).CreateAgentRun(ctx, "job_configured_load", command.RunID); err != nil {
+			return fmt.Errorf("create configured job: %w", err)
+		}
+		if err := agent.StartRunTraceInTx(ctx, tx, command.RunID, policy.ProviderModel, definition.Reference().String(), nil); err != nil {
+			return fmt.Errorf("start configured trace: %w", err)
+		}
+		return agent.NewStore(tx).FinalizeConfiguredChatOwnership(ctx, command.RunID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = traceScope.PublishAfterCommit(ctx)
+	const leaseToken = "0190cdd2-5f2d-7ad8-b3f5-1b588788c113"
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set status='running',attempt_no=1,lease_token=$2,lease_expires_at=now()+interval '1 minute' where id=$1`, "job_configured_load", leaseToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set status='running',started_at=now() where id=$1`, command.RunID); err != nil {
+		t.Fatal(err)
+	}
+	attempt := agent.Attempt{JobID: "job_configured_load", RunID: command.RunID, AttemptNo: 1, LeaseToken: leaseToken}
+	execution, err := agent.NewPostgresRuntime(api.db.Pool(), "", nil).Load(ctx, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.ChatID != chatID || execution.UserID != userID || execution.InputMessageID != command.InputMessageID ||
+		execution.Model != policy.ProviderModel || execution.PromptVersion != agent.BarePromptVersion ||
+		execution.AgentConfigID != definition.Reference().String() || execution.TimeZone != "Asia/Shanghai" {
+		t.Fatalf("configured execution=%+v", execution)
+	}
+	if execution.MemberRole != "owner" || execution.ExistingChildCount != 0 {
+		t.Fatalf("configured delegation policy fields=%q/%d", execution.MemberRole, execution.ExistingChildCount)
+	}
+	if execution.ModelContext.Capability.SHA256 != modelContext.Capability.SHA256 ||
+		execution.ModelContext.Policy.SHA256 != modelContext.Policy.SHA256 ||
+		execution.ModelContext.Budgets.CompactionTriggerTokens != 180_000 {
+		t.Fatalf("configured Model Context pin=%+v", execution.ModelContext)
+	}
+	if execution.ActionDecisionLimit != definition.Limits.ModelCalls-1 || execution.FinalDecisionLimit != 1 ||
+		execution.ActionLimit != definition.Limits.Actions || execution.ActionBatchLimit != definition.Limits.ActionBatch ||
+		execution.ActionResultByteLimit != definition.Limits.ResultBytes || execution.ActionResultsByteLimit != definition.Limits.ResultBytes {
+		t.Fatalf("configured limits=%+v definition=%+v", execution, definition.Limits)
+	}
+	if execution.ModelInvocation.Temperature == nil || *execution.ModelInvocation.Temperature != policy.Temperature ||
+		execution.ModelInvocation.MaxOutputTokens != policy.MaxOutputTokens ||
+		execution.ModelInvocation.Timeout != time.Duration(policy.TimeoutMS)*time.Millisecond ||
+		!execution.ModelInvocation.EnableThinking {
+		t.Fatalf("configured invocation=%+v policy=%+v", execution.ModelInvocation, policy)
+	}
+	if !execution.DeadlineAt.Equal(deadline) {
+		t.Fatalf("deadline=%s want=%s", execution.DeadlineAt, deadline)
 	}
 }
 

@@ -118,12 +118,17 @@ type ModelPolicy struct {
 	Temperature     float64 `json:"temperature"`
 	MaxOutputTokens int     `json:"max_output_tokens"`
 	TimeoutMS       int     `json:"timeout_ms"`
+	EnableThinking  *bool   `json:"enable_thinking,omitempty"`
 	SHA256          string  `json:"-"`
 	SourcePath      string  `json:"-"`
 }
 
 func (p ModelPolicy) Reference() Reference {
 	return Reference{Identity: p.Identity, Version: p.Version}
+}
+
+func (p ModelPolicy) ThinkingEnabled() bool {
+	return p.EnableThinking != nil && *p.EnableThinking
 }
 
 type ProviderModelCapability struct {
@@ -528,6 +533,9 @@ func (c Catalog) validateReferences() error {
 		}
 		if invocation.ProviderModel != capability.ProviderModel || invocation.MaxOutputTokens != policy.PinnedMaxOutputTokens {
 			return fmt.Errorf("model context policy %s contradicts invocation model or output limit", reference)
+		}
+		if invocation.ThinkingEnabled() != (capability.InvocationMode == "thinking") {
+			return fmt.Errorf("model context policy %s contradicts invocation mode", reference)
 		}
 		if _, err := deriveModelContextBudgets(policy, capability); err != nil {
 			return fmt.Errorf("model context policy %s: %w", reference, err)

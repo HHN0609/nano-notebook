@@ -26,6 +26,7 @@ type modelRequestReplay struct {
 	Temperature       *float64                 `json:"temperature,omitempty"`
 	MaxOutputTokens   int                      `json:"max_output_tokens,omitempty"`
 	TimeoutMS         int64                    `json:"timeout_ms,omitempty"`
+	EnableThinking    bool                     `json:"enable_thinking"`
 }
 
 type modelReplayMessage struct {
@@ -61,6 +62,7 @@ func EncodeModelRequestReplay(request models.ModelRequest) (replay.PlainPayload,
 		Temperature:       request.InvocationPolicy.Temperature,
 		MaxOutputTokens:   request.InvocationPolicy.MaxOutputTokens,
 		TimeoutMS:         request.InvocationPolicy.Timeout.Milliseconds(),
+		EnableThinking:    request.InvocationPolicy.EnableThinking,
 	}
 	for _, message := range request.Messages {
 		budget.addString(message.Content)

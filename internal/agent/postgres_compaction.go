@@ -302,7 +302,7 @@ func generateContextSummary(ctx context.Context, model DecisionModel, execution 
 		},
 		InvocationPolicy: models.ModelInvocationPolicy{
 			Temperature: &temperature, MaxOutputTokens: execution.ModelContext.Policy.SummaryMaxOutputTokens,
-			Timeout: execution.ModelInvocation.Timeout,
+			Timeout: execution.ModelInvocation.Timeout, EnableThinking: execution.ModelInvocation.EnableThinking,
 		},
 	})
 	if err != nil {

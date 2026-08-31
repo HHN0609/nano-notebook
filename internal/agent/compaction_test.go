@@ -1,12 +1,47 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
+
+type compactionDecisionModelFunc func(context.Context, models.ModelRequest) (models.ModelOutcome, error)
+
+func (f compactionDecisionModelFunc) Decide(ctx context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
+	return f(ctx, request)
+}
+
+func TestContextSummaryPreservesThinkingInvocation(t *testing.T) {
+	var captured models.ModelRequest
+	model := compactionDecisionModelFunc(func(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
+		captured = request
+		return models.ModelOutcome{ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: "summary"}}}, nil
+	})
+	execution := Execution{
+		Model: "aliyun/qwen-plus",
+		ModelInvocation: models.ModelInvocationPolicy{
+			Timeout: 200 * time.Second, EnableThinking: true,
+		},
+		ModelContext: agentcatalog.ResolvedModelContextPolicy{Policy: agentcatalog.ModelContextPolicy{SummaryMaxOutputTokens: 4096}},
+	}
+	_, err := generateContextSummary(context.Background(), model, execution, []ContextUnit{{
+		Kind: ContextUnitUserMessage, MessageID: "msg_old",
+		Messages: []models.ModelMessage{{Role: models.RoleUser, Content: "old research state"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !captured.InvocationPolicy.EnableThinking || captured.InvocationPolicy.Timeout != 200*time.Second ||
+		captured.InvocationPolicy.MaxOutputTokens != 4096 {
+		t.Fatalf("compaction invocation=%+v", captured.InvocationPolicy)
+	}
+}
 
 func TestSelectCompactionCutNeverSplitsAgentStep(t *testing.T) {
 	units := []ContextUnit{

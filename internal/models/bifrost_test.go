@@ -69,11 +69,13 @@ func TestBifrostClientAppliesPerRequestInvocationPolicy(t *testing.T) {
 		var request struct {
 			Temperature         *float64 `json:"temperature"`
 			MaxCompletionTokens int      `json:"max_completion_tokens"`
+			EnableThinking      *bool    `json:"enable_thinking"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
 		}
-		if request.Temperature == nil || *request.Temperature != 0 || request.MaxCompletionTokens != 321 {
+		if request.Temperature == nil || *request.Temperature != 0 || request.MaxCompletionTokens != 321 ||
+			request.EnableThinking == nil || !*request.EnableThinking {
 			t.Fatalf("invocation request=%+v", request)
 		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}]}`))
@@ -83,8 +85,31 @@ func TestBifrostClientAppliesPerRequestInvocationPolicy(t *testing.T) {
 	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
 		Model: "aliyun/qwen-plus", Messages: []ModelMessage{{Role: RoleUser, Content: "Decide."}},
 		InvocationPolicy: ModelInvocationPolicy{
-			Temperature: &temperature, MaxOutputTokens: 321, Timeout: 2 * time.Second,
+			Temperature: &temperature, MaxOutputTokens: 321, Timeout: 2 * time.Second, EnableThinking: true,
 		},
+	})
+	if err != nil || outcome.Final == nil || outcome.Final.Text != "Done." {
+		t.Fatalf("outcome=%+v err=%v", outcome, err)
+	}
+}
+
+func TestBifrostClientExplicitlyDisablesThinkingByDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			EnableThinking *bool `json:"enable_thinking"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.EnableThinking == nil || *request.EnableThinking {
+			t.Fatalf("enable_thinking=%v, want explicit false", request.EnableThinking)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "aliyun/qwen-plus", Messages: []ModelMessage{{Role: RoleUser, Content: "Decide."}},
 	})
 	if err != nil || outcome.Final == nil || outcome.Final.Text != "Done." {
 		t.Fatalf("outcome=%+v err=%v", outcome, err)

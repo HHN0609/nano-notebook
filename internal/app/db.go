@@ -909,11 +909,15 @@ create table if not exists agent_model_policy_versions (
 	temperature double precision not null check (temperature >= 0),
 	max_output_tokens integer not null check (max_output_tokens > 0),
 	timeout_ms integer not null check (timeout_ms > 0),
+	enable_thinking boolean not null default false,
 	canonical_payload jsonb not null check (jsonb_typeof(canonical_payload)='object'),
 	source_path text not null check (char_length(source_path) between 1 and 500),
 	registered_at timestamptz not null default now(),
 	primary key (policy_identity,policy_version)
 );
+
+alter table agent_model_policy_versions
+	add column if not exists enable_thinking boolean not null default false;
 
 create table if not exists provider_model_capability_versions (
 	capability_identity text not null check (char_length(capability_identity) between 3 and 255),

@@ -78,6 +78,32 @@ func TestAgentCatalogRegistersIdempotentlyAndSelectsExactRelease(t *testing.T) {
 	}
 }
 
+func TestAgentCatalogRegistersDeepResearchThinkingPolicies(t *testing.T) {
+	api := newTestAPI(t)
+	ctx := context.Background()
+	for _, version := range []int{3, 4} {
+		var enabled bool
+		if err := api.db.Pool().QueryRow(ctx, `
+			select enable_thinking from agent_model_policy_versions
+			where policy_identity='agent.deep-research-default' and policy_version=$1
+		`, version).Scan(&enabled); err != nil || !enabled {
+			t.Fatalf("deep research policy @%d enable_thinking=%t err=%v", version, enabled, err)
+		}
+	}
+	for _, row := range []struct {
+		identity string
+		version  int
+	}{{"agent.chat-default", 1}, {"agent.research-default", 1}, {"agent.studio-default", 1}} {
+		var enabled bool
+		if err := api.db.Pool().QueryRow(ctx, `
+			select enable_thinking from agent_model_policy_versions
+			where policy_identity=$1 and policy_version=$2
+		`, row.identity, row.version).Scan(&enabled); err != nil || enabled {
+			t.Fatalf("policy %s@%d enable_thinking=%t err=%v", row.identity, row.version, enabled, err)
+		}
+	}
+}
+
 func TestAgentCatalogReadinessRejectsUnregisteredOrMutableReleaseSelector(t *testing.T) {
 	api := newTestAPI(t)
 	catalog := testAgentCatalog(t, "provider/model")

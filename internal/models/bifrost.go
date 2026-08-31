@@ -77,6 +77,7 @@ type ModelInvocationPolicy struct {
 	Temperature     *float64
 	MaxOutputTokens int
 	Timeout         time.Duration
+	EnableThinking  bool
 }
 
 type ErrorKind string
@@ -254,6 +255,7 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		Stream              bool              `json:"stream"`
 		Temperature         *float64          `json:"temperature,omitempty"`
 		MaxCompletionTokens int               `json:"max_completion_tokens"`
+		EnableThinking      bool              `json:"enable_thinking"`
 		Tools               []providerTool    `json:"tools,omitempty"`
 		ToolChoice          any               `json:"tool_choice,omitempty"`
 	}{
@@ -262,6 +264,7 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		Stream:              false,
 		Temperature:         request.InvocationPolicy.Temperature,
 		MaxCompletionTokens: maxCompletionTokens,
+		EnableThinking:      request.InvocationPolicy.EnableThinking,
 		Tools:               tools,
 		ToolChoice:          toolChoice,
 	})
