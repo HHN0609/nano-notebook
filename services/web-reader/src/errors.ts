@@ -13,6 +13,7 @@ export type ErrorCode =
   | 'unsafe_destination'
   | 'response_too_large'
   | 'unsupported_type'
+  | 'document_type_mismatch'
   | 'upstream_failed'
   | 'parse_failed'
   | 'engine_unavailable'
@@ -27,6 +28,7 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   unsafe_destination: 422,
   response_too_large: 413,
   unsupported_type: 415,
+  document_type_mismatch: 415,
   upstream_failed: 502,
   parse_failed: 422,
   engine_unavailable: 503,

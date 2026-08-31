@@ -16,7 +16,7 @@
  */
 
 import http from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import { OUTPUT_FORMATS, type OutputFormat } from './reader.js';
 import { createEngine, type Engine, type EngineDeps } from './engine.js';
@@ -26,6 +26,7 @@ import type { Config } from './config.js';
 const SERVICE_NAME = 'web-reader';
 const SCHEMA_VERSION = '1';
 const PARSE_PATH = '/v1/parse';
+const ACQUIRE_PATH = '/v1/acquire';
 const HEALTH_PATH = '/health/live';
 
 const REQUEST_KEYS = new Set(['url', 'format', 'with_links', 'with_images', 'max_chars']);
@@ -106,7 +107,55 @@ async function handleRequest(
     return;
   }
 
+  if (path === ACQUIRE_PATH) {
+    if (req.method !== 'POST') {
+      throw new ReaderError('method_not_allowed', `${req.method} is not allowed on ${ACQUIRE_PATH}`);
+    }
+    if (!authorized(req, config.serviceToken)) {
+      throw new ReaderError('unauthorized', 'missing or invalid bearer token');
+    }
+    await handleAcquire(req, res, config, gate, engine);
+    return;
+  }
+
   throw new ReaderError('not_found', `unknown path: ${path}`);
+}
+
+async function handleAcquire(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  config: Config,
+  gate: ConcurrencyGate,
+  engine: Engine,
+): Promise<void> {
+  const parsed = parseRequestBody(await readJsonBody(req, config.maxRequestBodyBytes), config);
+  if (!gate.tryAcquire()) {
+    throw new ReaderError('service_busy', `service is at its concurrency limit (${config.maxConcurrent})`);
+  }
+  try {
+    const outcome = await engine.acquire(parsed.url, {
+      format: parsed.format,
+      withLinks: parsed.withLinks,
+      withImages: parsed.withImages,
+    });
+    if (outcome.mediaType === 'application/pdf') {
+      const metadata = {
+        schema_version: SCHEMA_VERSION,
+        media_type: outcome.mediaType,
+        url: parsed.url,
+        final_url: outcome.finalUrl,
+        sha256: createHash('sha256').update(outcome.body).digest('hex'),
+        fetch: outcome.fetch,
+      };
+      respondMultipart(res, metadata, outcome.body);
+      return;
+    }
+
+    const payload = readPayload(parsed, outcome.read);
+    respondMultipart(res, { ...payload, media_type: outcome.mediaType });
+  } finally {
+    gate.release();
+  }
 }
 
 async function handleParse(
@@ -128,38 +177,40 @@ async function handleParse(
       withLinks: parsed.withLinks,
       withImages: parsed.withImages,
     });
-    const page = outcome.page;
-
-    let content = page.content;
-    let truncated = false;
-    if (content.length > parsed.maxChars) {
-      content = `${content.slice(0, parsed.maxChars)}\n\n[content truncated]`;
-      truncated = true;
-    }
-
-    const payload = {
-      schema_version: SCHEMA_VERSION,
-      url: parsed.url,
-      final_url: outcome.finalUrl,
-      title: page.title,
-      description: page.description,
-      site_name: page.siteName,
-      published_time: page.publishedTime,
-      lang: page.lang,
-      extraction: page.extraction,
-      engine: outcome.engine,
-      upgraded: outcome.upgraded,
-      format: parsed.format,
-      content,
-      char_count: content.length,
-      word_count: page.wordCount,
-      truncated,
-      fetch: outcome.fetch,
-    };
+    const payload = readPayload(parsed, outcome);
     respondJson(res, 200, JSON.stringify(payload));
   } finally {
     gate.release();
   }
+}
+
+function readPayload(parsed: ParseRequest, outcome: Awaited<ReturnType<Engine['readPage']>>) {
+  const page = outcome.page;
+  let content = page.content;
+  let truncated = false;
+  if (content.length > parsed.maxChars) {
+    content = `${content.slice(0, parsed.maxChars)}\n\n[content truncated]`;
+    truncated = true;
+  }
+  return {
+    schema_version: SCHEMA_VERSION,
+    url: parsed.url,
+    final_url: outcome.finalUrl,
+    title: page.title,
+    description: page.description,
+    site_name: page.siteName,
+    published_time: page.publishedTime,
+    lang: page.lang,
+    extraction: page.extraction,
+    engine: outcome.engine,
+    upgraded: outcome.upgraded,
+    format: parsed.format,
+    content,
+    char_count: content.length,
+    word_count: page.wordCount,
+    truncated,
+    fetch: outcome.fetch,
+  };
 }
 
 function parseRequestBody(raw: unknown, config: Config): ParseRequest {
@@ -279,4 +330,18 @@ function respondJson(res: http.ServerResponse, status: number, body: string): vo
     'content-length': Buffer.byteLength(body),
   });
   res.end(body);
+}
+
+function respondMultipart(res: http.ServerResponse, metadata: object, document?: Buffer): void {
+  const boundary = `nano-${randomBytes(18).toString('hex')}`;
+  res.writeHead(200, { 'content-type': `multipart/mixed; boundary=${boundary}` });
+  res.write(`--${boundary}\r\ncontent-type: application/json; charset=utf-8\r\ncontent-id: metadata\r\n\r\n`);
+  res.write(JSON.stringify(metadata));
+  res.write('\r\n');
+  if (document !== undefined) {
+    res.write(`--${boundary}\r\ncontent-type: application/pdf\r\ncontent-id: document\r\ncontent-length: ${document.byteLength}\r\n\r\n`);
+    res.write(document);
+    res.write('\r\n');
+  }
+  res.end(`--${boundary}--\r\n`);
 }

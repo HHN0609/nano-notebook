@@ -1,16 +1,22 @@
 package webreader_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 )
+
+var validPDF = []byte("%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n")
 
 const validBody = `{
 	"schema_version": "1",
@@ -66,6 +72,124 @@ func TestHTTPAdapterParsesMarkdownPage(t *testing.T) {
 	}
 }
 
+func TestHTTPAdapterAcquiresHTMLMetadataPart(t *testing.T) {
+	adapter := newAdapter(t, multipartHandler(t, []multipartFixturePart{{
+		contentType: "application/json; charset=utf-8", contentID: "metadata",
+		body: []byte(strings.Replace(validBody, `"schema_version": "1",`, `"schema_version": "1", "media_type": "text/html",`, 1)),
+	}}), "token")
+
+	content, err := adapter.Acquire(context.Background(), webreader.Request{
+		URL: "https://example.com/post", Format: webreader.FormatMarkdown, MaxChars: webreader.MaxContentChars,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.MediaType != webreader.MediaTypeHTML || content.Page.Title != "Example Post" || content.Page.Content == "" || len(content.PDF) != 0 {
+		t.Fatalf("content=%+v", content)
+	}
+}
+
+func TestHTTPAdapterAcquiresExactPDFBytes(t *testing.T) {
+	metadata := `{
+		"schema_version":"1","media_type":"application/pdf",
+		"url":"https://example.com/paper","final_url":"https://cdn.example.com/paper.pdf",
+		"sha256":"904636248025ad20fb9c6bd8b700179a2a42edb5df3636e926c7e09055ee3f75",
+		"fetch":{"status":200,"content_type":"application/pdf","charset":"","bytes":51,"redirects":1}
+	}`
+	adapter := newAdapter(t, multipartHandler(t, []multipartFixturePart{
+		{contentType: "application/json; charset=utf-8", contentID: "metadata", body: []byte(metadata)},
+		{contentType: "application/pdf", contentID: "document", body: validPDF, withLength: true},
+	}), "token")
+
+	content, err := adapter.Acquire(context.Background(), webreader.Request{
+		URL: "https://example.com/paper", Format: webreader.FormatMarkdown, MaxChars: webreader.MaxContentChars,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.MediaType != webreader.MediaTypePDF || content.FinalURL != "https://cdn.example.com/paper.pdf" || !bytes.Equal(content.PDF, validPDF) {
+		t.Fatalf("content=%+v", content)
+	}
+}
+
+func TestHTTPAdapterRejectsAcquireMultipartContractViolations(t *testing.T) {
+	pdfMetadata := []byte(`{"schema_version":"1","media_type":"application/pdf","url":"https://example.com/paper","final_url":"https://example.com/paper","fetch":{"status":200,"content_type":"application/pdf","charset":"","bytes":10,"redirects":0}}`)
+	htmlMetadata := []byte(strings.Replace(validBody, `"schema_version": "1",`, `"schema_version": "1", "media_type": "text/html",`, 1))
+	tests := map[string]http.Handler{
+		"wrong top-level type": http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(htmlMetadata)
+		}),
+		"document before metadata": multipartHandler(t, []multipartFixturePart{
+			{contentType: "application/pdf", contentID: "document", body: validPDF, withLength: true},
+			{contentType: "application/json; charset=utf-8", contentID: "metadata", body: pdfMetadata},
+		}),
+		"pdf missing document": multipartHandler(t, []multipartFixturePart{
+			{contentType: "application/json; charset=utf-8", contentID: "metadata", body: pdfMetadata},
+		}),
+		"html has extra document": multipartHandler(t, []multipartFixturePart{
+			{contentType: "application/json; charset=utf-8", contentID: "metadata", body: htmlMetadata},
+			{contentType: "application/pdf", contentID: "document", body: validPDF, withLength: true},
+		}),
+		"pdf signature mismatch": multipartHandler(t, []multipartFixturePart{
+			{contentType: "application/json; charset=utf-8", contentID: "metadata", body: pdfMetadata},
+			{contentType: "application/pdf", contentID: "document", body: []byte("not-pdf"), withLength: true},
+		}),
+		"unknown metadata field": multipartHandler(t, []multipartFixturePart{{
+			contentType: "application/json; charset=utf-8", contentID: "metadata",
+			body: []byte(strings.Replace(string(htmlMetadata), `"media_type": "text/html"`, `"media_type": "text/html", "unknown": true`, 1)),
+		}}),
+	}
+
+	for name, handler := range tests {
+		t.Run(name, func(t *testing.T) {
+			adapter := newAdapter(t, handler, "")
+			_, err := adapter.Acquire(context.Background(), webreader.Request{
+				URL: "https://example.com/paper", Format: webreader.FormatMarkdown, MaxChars: webreader.MaxContentChars,
+			})
+			if !errors.Is(err, webreader.ErrResponseInvalid) {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+type multipartFixturePart struct {
+	contentType string
+	contentID   string
+	body        []byte
+	withLength  bool
+}
+
+func multipartHandler(t *testing.T, parts []multipartFixturePart) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/acquire" || r.Method != http.MethodPost {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		for _, fixture := range parts {
+			header := make(textproto.MIMEHeader)
+			header.Set("Content-Type", fixture.contentType)
+			header.Set("Content-ID", fixture.contentID)
+			if fixture.withLength {
+				header.Set("Content-Length", strconv.Itoa(len(fixture.body)))
+			}
+			part, err := writer.CreatePart(header)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = part.Write(fixture.body)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "multipart/mixed; boundary="+writer.Boundary())
+		_, _ = w.Write(body.Bytes())
+	})
+}
+
 func TestHTTPAdapterSendsBearerTokenAndRequestContract(t *testing.T) {
 	adapter := newAdapter(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer token" {
@@ -97,6 +221,7 @@ func TestHTTPAdapterSurfacesSidecarErrorEnvelope(t *testing.T) {
 		{code: "unsafe_destination", status: http.StatusUnprocessableEntity, want: webreader.ErrUnsafeDestination},
 		{code: "response_too_large", status: http.StatusRequestEntityTooLarge, want: webreader.ErrResponseTooLarge},
 		{code: "unsupported_type", status: http.StatusUnsupportedMediaType, want: webreader.ErrUnsupportedType},
+		{code: "document_type_mismatch", status: http.StatusUnsupportedMediaType, want: webreader.ErrDocumentTypeMismatch},
 	} {
 		t.Run(test.code, func(t *testing.T) {
 			adapter := newAdapter(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

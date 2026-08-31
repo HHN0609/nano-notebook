@@ -36,6 +36,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     fetchTimeoutMs: 3_000,
     maxRedirects: 5,
     maxResponseBytes: 1024 * 1024,
+    maxPdfResponseBytes: 20 * 1024 * 1024,
     maxContentChars: 50_000,
     maxRequestBodyBytes: 16 * 1024,
     allowPrivateTargets: true,
@@ -51,12 +52,18 @@ function testConfig(overrides: Partial<Config> = {}): Config {
 }
 
 let upstreamBase = '';
+const PDF = Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n', 'ascii');
 const upstream = http.createServer((req, res) => {
   if (req.url === '/slow') {
     setTimeout(() => {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(ARTICLE_HTML);
     }, 300);
+    return;
+  }
+  if (req.url === '/paper') {
+    res.writeHead(200, { 'content-type': 'application/pdf' });
+    res.end(PDF);
     return;
   }
   res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -93,6 +100,39 @@ function parse(url: string, body: unknown, token = 'test-token'): Promise<Respon
     },
     body: JSON.stringify(body),
   });
+}
+
+interface MultipartPart {
+  headers: Record<string, string>;
+  body: Buffer;
+}
+
+async function readMultipart(res: Response): Promise<MultipartPart[]> {
+  const contentType = res.headers.get('content-type') ?? '';
+  const match = /boundary="?([^";]+)"?/i.exec(contentType);
+  assert.ok(match?.[1], `missing multipart boundary in ${contentType}`);
+  const boundary = Buffer.from(`--${match[1]}`, 'ascii');
+  const raw = Buffer.from(await res.arrayBuffer());
+  const parts: MultipartPart[] = [];
+  let cursor = boundary.length + 2;
+  while (cursor < raw.length && !raw.subarray(cursor - 2, cursor).equals(Buffer.from('--'))) {
+    const headerEnd = raw.indexOf(Buffer.from('\r\n\r\n'), cursor);
+    assert.notEqual(headerEnd, -1, 'multipart part has no header terminator');
+    const headers: Record<string, string> = {};
+    for (const line of raw.subarray(cursor, headerEnd).toString('utf8').split('\r\n')) {
+      const split = line.indexOf(':');
+      assert.ok(split > 0, `invalid multipart header: ${line}`);
+      headers[line.slice(0, split).toLowerCase()] = line.slice(split + 1).trim();
+    }
+    const next = raw.indexOf(Buffer.concat([Buffer.from('\r\n'), boundary]), headerEnd + 4);
+    assert.notEqual(next, -1, 'multipart part has no following boundary');
+    parts.push({ headers, body: raw.subarray(headerEnd + 4, next) });
+    cursor = next + 2 + boundary.length;
+    if (raw.subarray(cursor, cursor + 2).equals(Buffer.from('--'))) break;
+    assert.ok(raw.subarray(cursor, cursor + 2).equals(Buffer.from('\r\n')));
+    cursor += 2;
+  }
+  return parts;
 }
 
 test('health/live is public', async () => {
@@ -160,6 +200,69 @@ test('parse returns clean markdown for an article', async () => {
   assert.ok(!payload.content.includes('# Understanding Vector Databases'));
   assert.ok(!payload.content.includes('Example Corp'));
   assert.ok(!payload.content.includes('Home'));
+});
+
+test('acquire returns HTML as a metadata-only multipart response', async () => {
+  const res = await parse('/v1/acquire', { url: `${upstreamBase}/article` });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') ?? '', /^multipart\/mixed;/i);
+
+  const parts = await readMultipart(res);
+  assert.equal(parts.length, 1);
+  assert.equal(parts[0]?.headers['content-type'], 'application/json; charset=utf-8');
+  assert.equal(parts[0]?.headers['content-id'], 'metadata');
+  const metadata = JSON.parse(parts[0]?.body.toString('utf8') ?? '{}') as {
+    schema_version: string;
+    media_type: string;
+    content: string;
+    title: string;
+  };
+  assert.equal(metadata.schema_version, '1');
+  assert.equal(metadata.media_type, 'text/html');
+  assert.equal(metadata.title, 'Understanding Vector Databases');
+  assert.match(metadata.content, /nearest-neighbor search/);
+});
+
+test('acquire returns strict PDF metadata followed by exact raw bytes', async () => {
+  const res = await parse('/v1/acquire', { url: `${upstreamBase}/paper` });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') ?? '', /^multipart\/mixed;/i);
+
+  const parts = await readMultipart(res);
+  assert.equal(parts.length, 2);
+  assert.equal(parts[0]?.headers['content-type'], 'application/json; charset=utf-8');
+  assert.equal(parts[0]?.headers['content-id'], 'metadata');
+  const metadata = JSON.parse(parts[0]?.body.toString('utf8') ?? '{}') as {
+    schema_version: string;
+    media_type: string;
+    final_url: string;
+    sha256: string;
+    fetch: { bytes: number; content_type: string };
+  };
+  assert.equal(metadata.schema_version, '1');
+  assert.equal(metadata.media_type, 'application/pdf');
+  assert.equal(metadata.final_url, `${upstreamBase}/paper`);
+  assert.equal(metadata.sha256, '904636248025ad20fb9c6bd8b700179a2a42edb5df3636e926c7e09055ee3f75');
+  assert.equal(metadata.fetch.bytes, PDF.byteLength);
+  assert.equal(metadata.fetch.content_type, 'application/pdf');
+  assert.equal(parts[1]?.headers['content-type'], 'application/pdf');
+  assert.equal(parts[1]?.headers['content-id'], 'document');
+  assert.equal(parts[1]?.headers['content-length'], String(PDF.byteLength));
+  assert.deepEqual(parts[1]?.body, PDF);
+});
+
+test('acquire uses the same authorization and method boundary as parse', async () => {
+  const unauthenticated = await fetch(`${readerBase}/v1/acquire`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ url: `${upstreamBase}/paper` }),
+  });
+  assert.equal(unauthenticated.status, 401);
+
+  const wrongMethod = await fetch(`${readerBase}/v1/acquire`, {
+    headers: { authorization: 'Bearer test-token' },
+  });
+  assert.equal(wrongMethod.status, 405);
 });
 
 test('parse validates the request body', async () => {
@@ -283,6 +386,9 @@ test('loadConfig validates environment values', () => {
   assert.equal(loadConfig({ NANO_WEB_READER_ALLOW_PRIVATE_TARGETS: 'true' }).allowPrivateTargets, true);
   assert.equal(loadConfig({}).allowSyntheticProxyTargets, false);
   assert.equal(loadConfig({ NANO_WEB_READER_ALLOW_SYNTHETIC_PROXY_TARGETS: 'true' }).allowSyntheticProxyTargets, true);
+  assert.equal(loadConfig({}).maxPdfResponseBytes, 20 * 1024 * 1024);
+  assert.equal(loadConfig({ NANO_WEB_READER_MAX_PDF_RESPONSE_BYTES: '4096' }).maxPdfResponseBytes, 4096);
+  assert.throws(() => loadConfig({ NANO_WEB_READER_MAX_PDF_RESPONSE_BYTES: 'unbounded' }));
 
   assert.equal(loadConfig({}).engine, 'auto');
   assert.equal(loadConfig({ NANO_WEB_READER_ENGINE: 'lightweight' }).engine, 'lightweight');

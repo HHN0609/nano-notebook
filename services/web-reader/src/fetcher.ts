@@ -2,7 +2,7 @@
  * Bounded URL fetcher with SSRF protection, following the repo's Go
  * source-fetcher semantics (ADR-0032): http(s) only, no userinfo/fragment,
  * every DNS result (including every redirect hop) must be a public address,
- * bounded redirects/bytes/timeout, gzip-only compression, HTML-only types.
+ * bounded redirects/bytes/timeout, gzip-only compression, HTML/PDF types.
  */
 
 import http from 'node:http';
@@ -18,6 +18,7 @@ import { ReaderError } from './errors.js';
 import type { Config } from './config.js';
 
 export interface FetchResult {
+  mediaType: 'html';
   finalUrl: string;
   status: number;
   contentType: string;
@@ -26,6 +27,19 @@ export interface FetchResult {
   bytes: number;
   redirects: number;
 }
+
+export interface PDFResult {
+  mediaType: 'pdf';
+  finalUrl: string;
+  status: number;
+  contentType: string;
+  charset: '';
+  body: Buffer;
+  bytes: number;
+  redirects: number;
+}
+
+export type FetchResourceResult = FetchResult | PDFResult;
 
 class UnsafeDestinationSignal extends Error {}
 class TimeoutSignal extends Error {}
@@ -62,11 +76,23 @@ export function validateUrl(raw: string): URL {
 }
 
 export async function fetchPage(rawUrl: string, config: Config): Promise<FetchResult> {
+  const resource = await fetchResourceInternal(rawUrl, config, false);
+  if (resource.mediaType !== 'html') {
+    throw new ReaderError('unsupported_type', `unsupported content type: ${resource.contentType}`);
+  }
+  return resource;
+}
+
+export async function fetchResource(rawUrl: string, config: Config): Promise<FetchResourceResult> {
+  return fetchResourceInternal(rawUrl, config, true);
+}
+
+async function fetchResourceInternal(rawUrl: string, config: Config, allowPDF: boolean): Promise<FetchResourceResult> {
   let current = validateUrl(rawUrl);
   let redirects = 0;
 
   for (;;) {
-    const hop = await requestOnce(current, config);
+    const hop = await requestOnce(current, config, allowPDF);
 
     if (REDIRECT_STATUSES.has(hop.status)) {
       const location = hop.headers['location'];
@@ -97,7 +123,7 @@ export async function fetchPage(rawUrl: string, config: Config): Promise<FetchRe
 
     const contentType = hop.headers['content-type'] ?? '';
     const mediaType = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
-    if (!HTML_CONTENT_TYPES.has(mediaType)) {
+    if (!HTML_CONTENT_TYPES.has(mediaType) && (mediaType !== 'application/pdf' || !allowPDF)) {
       hop.clearTimeout();
       hop.stream.destroy();
       throw new ReaderError('unsupported_type', `unsupported content type: ${contentType || '(none)'}`);
@@ -109,7 +135,8 @@ export async function fetchPage(rawUrl: string, config: Config): Promise<FetchRe
 
     let buffer: Buffer;
     try {
-      buffer = await readBody(hop.stream, hop.headers, config);
+      const byteLimit = mediaType === 'application/pdf' ? config.maxPdfResponseBytes : config.maxResponseBytes;
+      buffer = await readBody(hop.stream, hop.headers, byteLimit);
     } catch (err) {
       throw classifyError(err);
     } finally {
@@ -117,8 +144,29 @@ export async function fetchPage(rawUrl: string, config: Config): Promise<FetchRe
       clearTimeout(bodyTimer);
     }
 
+    const hasPdfSignature = buffer.subarray(0, 5).equals(Buffer.from('%PDF-', 'ascii'));
+    if (mediaType === 'application/pdf') {
+      if (!hasPdfSignature) {
+        throw new ReaderError('document_type_mismatch', 'PDF content type does not match the required %PDF- signature');
+      }
+      return {
+        mediaType: 'pdf',
+        finalUrl: current.toString(),
+        status: hop.status,
+        contentType,
+        charset: '',
+        body: buffer,
+        bytes: buffer.byteLength,
+        redirects,
+      };
+    }
+    if (hasPdfSignature) {
+      throw new ReaderError('document_type_mismatch', 'PDF signature does not match the upstream content type');
+    }
+
     const charset = resolveCharset(contentType, buffer);
     return {
+      mediaType: 'html',
       finalUrl: current.toString(),
       status: hop.status,
       contentType,
@@ -138,7 +186,7 @@ interface Hop {
   abort: (err: Error) => void;
 }
 
-function requestOnce(url: URL, config: Config): Promise<Hop> {
+function requestOnce(url: URL, config: Config, allowPDF: boolean): Promise<Hop> {
   // IP-literal hosts never reach the `lookup` hook (node connects directly),
   // so they must be validated here as well; this covers every redirect hop.
   if (!config.allowPrivateTargets) {
@@ -160,7 +208,7 @@ function requestOnce(url: URL, config: Config): Promise<Hop> {
       },
       headers: {
         'user-agent': config.userAgent,
-        accept: 'text/html,application/xhtml+xml',
+        accept: allowPDF ? 'text/html,application/xhtml+xml,application/pdf' : 'text/html,application/xhtml+xml',
         'accept-encoding': 'gzip',
       },
     });
@@ -242,7 +290,7 @@ function validatingLookup(
     });
 }
 
-function readBody(stream: http.IncomingMessage, headers: http.IncomingHttpHeaders, config: Config): Promise<Buffer> {
+function readBody(stream: http.IncomingMessage, headers: http.IncomingHttpHeaders, byteLimit: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const encoding = (headers['content-encoding'] ?? '').trim().toLowerCase();
     if (encoding !== '' && encoding !== 'gzip' && encoding !== 'identity') {
@@ -273,8 +321,8 @@ function readBody(stream: http.IncomingMessage, headers: http.IncomingHttpHeader
 
     source.on('data', (chunk: Buffer) => {
       total += chunk.byteLength;
-      if (total > config.maxResponseBytes) {
-        fail(new ReaderError('response_too_large', `upstream body exceeds ${config.maxResponseBytes} bytes`));
+      if (total > byteLimit) {
+        fail(new ReaderError('response_too_large', `upstream body exceeds ${byteLimit} bytes`));
         stream.destroy();
         return;
       }

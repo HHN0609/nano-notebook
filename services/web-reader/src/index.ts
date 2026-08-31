@@ -21,7 +21,7 @@ server.listen(port, host, () => {
         ? 'auto engine (lightweight with browser upgrade)'
         : 'lightweight engine';
   console.log(
-    `[web-reader] listening on ${config.addr} (${engineNote}, concurrency ${config.maxConcurrent}/${config.browserMaxConcurrent} browser, fetch budget ${config.maxResponseBytes} bytes / ${config.fetchTimeoutMs}ms)`,
+    `[web-reader] listening on ${config.addr} (${engineNote}, concurrency ${config.maxConcurrent}/${config.browserMaxConcurrent} browser, fetch budgets html=${config.maxResponseBytes} pdf=${config.maxPdfResponseBytes} bytes / ${config.fetchTimeoutMs}ms)`,
   );
 });
 

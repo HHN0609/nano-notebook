@@ -12,7 +12,7 @@
  * render errors) degrades gracefully to the lightweight outcome.
  */
 
-import { fetchPage } from './fetcher.js';
+import { fetchPage, fetchResource, type FetchResult, type PDFResult } from './fetcher.js';
 import { renderPage, closeBrowser, type RenderedPage } from './browser.js';
 import { parsePage, type ParseOptions, type ParseResult } from './reader.js';
 import { ReaderError } from './errors.js';
@@ -37,13 +37,19 @@ export interface ReadOutcome {
   fetch: FetchSummary;
 }
 
+export type AcquireOutcome =
+  | { mediaType: 'text/html'; read: ReadOutcome }
+  | { mediaType: 'application/pdf'; finalUrl: string; body: Buffer; fetch: FetchSummary };
+
 export interface EngineDeps {
   fetchPage: typeof fetchPage;
+  fetchResource: typeof fetchResource;
   renderPage: typeof renderPage;
 }
 
 export interface Engine {
   readPage(url: string, options: ParseOptions): Promise<ReadOutcome>;
+  acquire(url: string, options: ParseOptions): Promise<AcquireOutcome>;
   close(): Promise<void>;
 }
 
@@ -67,6 +73,7 @@ class Semaphore {
 
 export function createEngine(config: Config, deps: Partial<EngineDeps> = {}): Engine {
   const doFetch = deps.fetchPage ?? fetchPage;
+  const doFetchResource = deps.fetchResource ?? fetchResource;
   const doRender = deps.renderPage ?? renderPage;
   const browserGate = new Semaphore(config.browserMaxConcurrent);
   let warnedUnavailable = false;
@@ -86,6 +93,17 @@ export function createEngine(config: Config, deps: Partial<EngineDeps> = {}): En
         bytes: fetched.bytes,
         redirects: fetched.redirects,
       },
+    };
+  }
+
+  function parseFetched(fetched: FetchResult, options: ParseOptions): ReadOutcome {
+    const page = parsePage(fetched.body, fetched.finalUrl, options);
+    return {
+      engine: 'lightweight',
+      upgraded: false,
+      finalUrl: fetched.finalUrl,
+      page,
+      fetch: fetchSummary(fetched),
     };
   }
 
@@ -181,9 +199,68 @@ export function createEngine(config: Config, deps: Partial<EngineDeps> = {}): En
     }
   }
 
+  async function acquire(url: string, options: ParseOptions): Promise<AcquireOutcome> {
+    let fetched: FetchResult | PDFResult;
+    try {
+      fetched = await doFetchResource(url, config);
+    } catch (err) {
+      if (config.engine === 'auto' && isRecoverableFailure(err)) {
+        return { mediaType: 'text/html', read: await readPage(url, options) };
+      }
+      throw err;
+    }
+
+    if (fetched.mediaType === 'pdf') {
+      return {
+        mediaType: 'application/pdf',
+        finalUrl: fetched.finalUrl,
+        body: fetched.body,
+        fetch: fetchSummary(fetched),
+      };
+    }
+
+    const light = parseFetched(fetched, options);
+    if (config.engine === 'lightweight') {
+      return { mediaType: 'text/html', read: light };
+    }
+    if (config.engine === 'browser') {
+      if (!browserGate.tryAcquire()) {
+        throw new ReaderError('service_busy', `browser engine is at its concurrency limit (${config.browserMaxConcurrent})`);
+      }
+      try {
+        return { mediaType: 'text/html', read: await runBrowser(url, options) };
+      } finally {
+        browserGate.release();
+      }
+    }
+    if (!isThinContent(light, config) || !browserGate.tryAcquire()) {
+      return { mediaType: 'text/html', read: light };
+    }
+    try {
+      const browser = await runBrowser(url, options);
+      browser.upgraded = true;
+      return { mediaType: 'text/html', read: browser.page.wordCount > light.page.wordCount ? browser : light };
+    } catch {
+      return { mediaType: 'text/html', read: light };
+    } finally {
+      browserGate.release();
+    }
+  }
+
   return {
     readPage,
+    acquire,
     close: () => closeBrowser(),
+  };
+}
+
+function fetchSummary(fetched: FetchResult | PDFResult): FetchSummary {
+  return {
+    status: fetched.status,
+    content_type: fetched.contentType,
+    charset: fetched.charset,
+    bytes: fetched.bytes,
+    redirects: fetched.redirects,
   };
 }
 

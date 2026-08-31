@@ -14,6 +14,7 @@ export interface Config {
   fetchTimeoutMs: number;
   maxRedirects: number;
   maxResponseBytes: number;
+  maxPdfResponseBytes: number;
   maxContentChars: number;
   maxRequestBodyBytes: number;
   allowPrivateTargets: boolean;
@@ -41,6 +42,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const fetchTimeoutMs = parsePositiveInt(env['NANO_WEB_READER_FETCH_TIMEOUT_MS'], 20_000, 'NANO_WEB_READER_FETCH_TIMEOUT_MS');
   const maxRedirects = parsePositiveInt(env['NANO_WEB_READER_MAX_REDIRECTS'], 5, 'NANO_WEB_READER_MAX_REDIRECTS');
   const maxResponseBytes = parsePositiveInt(env['NANO_WEB_READER_MAX_RESPONSE_BYTES'], 5 * 1024 * 1024, 'NANO_WEB_READER_MAX_RESPONSE_BYTES');
+  const maxPdfResponseBytes = parsePositiveInt(env['NANO_WEB_READER_MAX_PDF_RESPONSE_BYTES'], 20 * 1024 * 1024, 'NANO_WEB_READER_MAX_PDF_RESPONSE_BYTES');
   const maxContentChars = parsePositiveInt(env['NANO_WEB_READER_MAX_CONTENT_CHARS'], 250_000, 'NANO_WEB_READER_MAX_CONTENT_CHARS');
   const maxRequestBodyBytes = parsePositiveInt(env['NANO_WEB_READER_MAX_REQUEST_BODY_BYTES'], 16 * 1024, 'NANO_WEB_READER_MAX_REQUEST_BODY_BYTES');
 
@@ -71,6 +73,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     fetchTimeoutMs,
     maxRedirects,
     maxResponseBytes,
+    maxPdfResponseBytes,
     maxContentChars,
     maxRequestBodyBytes,
     allowPrivateTargets,

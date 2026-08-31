@@ -1,7 +1,8 @@
 # Web Reader
 
-A self-hosted web page reader sidecar: fetches a URL and returns the parsed
-main content as clean, LLM-ready Markdown. Parsing follows the
+A self-hosted public-URL reader sidecar: fetches HTML or direct PDF resources.
+HTML is returned as clean, LLM-ready Markdown, while Research PDF acquisition
+returns bounded raw bytes for the Go document pipeline. HTML parsing follows the
 [jina-ai/reader](https://github.com/jina-ai/reader) approach — Mozilla
 Readability for main-content extraction plus a rule-based Markdown
 conversion — with a two-stage engine (plain HTTP fetch, optional headless
@@ -32,6 +33,9 @@ the reader's Markdown output is stored as a derived artifact.
   text.
 - **Bounded everything** — request body size, response size, redirects,
   timeouts, per-service and per-engine concurrency.
+- **Media-aware Research acquisition** — `/v1/acquire` returns strict
+  `multipart/mixed`; PDFs require both `application/pdf` and a `%PDF-`
+  signature and never enter the browser engine.
 
 ## API
 
@@ -76,6 +80,17 @@ Response (200):
 | `format` / `content` / `char_count` / `word_count` / `truncated` | Output payload. |
 | `fetch` | `{status, content_type, charset, bytes, redirects}` of the winning fetch. |
 
+### `POST /v1/acquire`
+
+Uses the same authentication and request JSON as `/v1/parse`. A successful
+response is `multipart/mixed` with an `application/json` `metadata` part first.
+HTML has only that part and includes the same parsed content fields as
+`/v1/parse`, plus `media_type: "text/html"`. PDF adds a second `document` part
+with `Content-Type: application/pdf`, exact `Content-Length`, and the raw bytes;
+its metadata reports `media_type: "application/pdf"`, requested/final URLs, and
+fetch details and SHA-256. Unknown, missing, duplicate, or reordered parts are contract
+violations for clients.
+
 ### Error contract
 
 Every failure returns `{"error":{"code":"...","message":"..."}}` with the
@@ -89,7 +104,8 @@ stable error codes shared with the repo's Go sidecars:
 | `unsafe_destination` | 422 | Non-public IP, private range, userinfo/fragment, blocked by SSRF guard. |
 | `parse_failed` | 422 | No extractable main content. |
 | `response_too_large` | 413 | Upstream body exceeds the byte budget. |
-| `unsupported_type` | 415 | Non-HTML content type. |
+| `unsupported_type` | 415 | Unsupported media type. |
+| `document_type_mismatch` | 415 | PDF response media type and `%PDF-` signature disagree. |
 | `upstream_failed` | 502 | DNS failure, timeout, upstream 4xx/5xx, too many redirects. |
 | `engine_unavailable` | 503 | Browser engine requested but no executable found. |
 | `service_busy` | 503 | Concurrency limit reached. |
@@ -167,12 +183,13 @@ All configuration is environment-driven with fail-fast validation
 | Variable | Default | Description |
 | --- | --- | --- |
 | `NANO_WEB_READER_ADDR` | `127.0.0.1:8085` | Listen address (`:8085` binds all interfaces). |
-| `NANO_WEB_READER_SERVICE_TOKEN` | *(empty)* | Bearer token for `/v1/parse`; empty disables auth. |
+| `NANO_WEB_READER_SERVICE_TOKEN` | *(empty)* | Bearer token for `/v1/parse` and `/v1/acquire`; empty disables auth. |
 | `NANO_WEB_READER_ENGINE` | `auto` | `lightweight` \| `browser` \| `auto`. |
 | `NANO_WEB_READER_MAX_CONCURRENT` | `8` | Max in-flight parse requests. |
 | `NANO_WEB_READER_FETCH_TIMEOUT_MS` | `20000` | Per-request fetch timeout (ms). |
 | `NANO_WEB_READER_MAX_REDIRECTS` | `5` | Redirect budget. |
-| `NANO_WEB_READER_MAX_RESPONSE_BYTES` | `5242880` | Upstream body byte budget. |
+| `NANO_WEB_READER_MAX_RESPONSE_BYTES` | `5242880` | HTML upstream body byte budget. |
+| `NANO_WEB_READER_MAX_PDF_RESPONSE_BYTES` | `20971520` | PDF upstream body byte budget. |
 | `NANO_WEB_READER_MAX_CONTENT_CHARS` | `250000` | Ceiling for `max_chars` and the default truncation point. |
 | `NANO_WEB_READER_MAX_REQUEST_BODY_BYTES` | `16384` | Request body byte budget. |
 | `NANO_WEB_READER_ALLOW_PRIVATE_TARGETS` | `false` | Allow private/non-public destinations (dev only). |

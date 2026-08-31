@@ -4,7 +4,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import zlib from 'node:zlib';
 
-import { fetchPage, validateUrl } from '../src/fetcher.js';
+import { fetchPage, fetchResource, validateUrl } from '../src/fetcher.js';
 import { ReaderError } from '../src/errors.js';
 import type { Config } from '../src/config.js';
 
@@ -18,6 +18,7 @@ function baseConfig(overrides: Partial<Config> = {}): Config {
     fetchTimeoutMs: 3_000,
     maxRedirects: 5,
     maxResponseBytes: 1024 * 1024,
+    maxPdfResponseBytes: 20 * 1024 * 1024,
     maxContentChars: 250_000,
     maxRequestBodyBytes: 16 * 1024,
     allowPrivateTargets: true,
@@ -31,6 +32,8 @@ function baseConfig(overrides: Partial<Config> = {}): Config {
     ...overrides,
   };
 }
+
+const PDF = Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n', 'ascii');
 
 interface Fixture {
   url: (path: string) => string;
@@ -205,6 +208,92 @@ test('fetchPage rejects non-html content types', async () => {
   try {
     await assert.rejects(
       fetchPage(fixture.url('/page'), baseConfig()),
+      (err: unknown) => err instanceof ReaderError && err.code === 'unsupported_type',
+    );
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('fetchResource acquires bounded PDF bytes without decoding them as text', async () => {
+  const fixture = await startFixture((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/pdf' });
+    res.end(PDF);
+  });
+  try {
+    const result = await fetchResource(fixture.url('/paper'), baseConfig());
+
+    assert.equal(result.mediaType, 'pdf');
+    assert.equal(result.contentType, 'application/pdf');
+    assert.equal(result.finalUrl, fixture.url('/paper'));
+    assert.deepEqual(result.body, PDF);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('fetchResource requires PDF content type and signature to agree', async () => {
+  const badPdf = await startFixture((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/pdf' });
+    res.end('<html>not a pdf</html>');
+  });
+  const disguisedPdf = await startFixture((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(PDF);
+  });
+  try {
+    await assert.rejects(
+      fetchResource(badPdf.url('/paper'), baseConfig()),
+      (err: unknown) => err instanceof ReaderError && err.code === 'document_type_mismatch' && /signature/i.test(err.message),
+    );
+    await assert.rejects(
+      fetchResource(disguisedPdf.url('/paper'), baseConfig()),
+      (err: unknown) => err instanceof ReaderError && err.code === 'document_type_mismatch' && /content type/i.test(err.message),
+    );
+  } finally {
+    await badPdf.close();
+    await disguisedPdf.close();
+  }
+});
+
+test('fetchResource applies the separate PDF byte budget', async () => {
+  const fixture = await startFixture((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/pdf' });
+    res.end(Buffer.concat([PDF, Buffer.alloc(2048)]));
+  });
+  try {
+    await assert.rejects(
+      fetchResource(fixture.url('/paper'), baseConfig({ maxPdfResponseBytes: 1024 })),
+      (err: unknown) => err instanceof ReaderError && err.code === 'response_too_large',
+    );
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('fetchPage remains HTML-only when the upstream is a PDF', async () => {
+  const fixture = await startFixture((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/pdf' });
+    res.end(PDF);
+  });
+  try {
+    await assert.rejects(
+      fetchPage(fixture.url('/paper'), baseConfig()),
+      (err: unknown) => err instanceof ReaderError && err.code === 'unsupported_type',
+    );
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('fetchPage rejects PDF from headers before applying the PDF body budget', async () => {
+  const fixture = await startFixture((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/pdf' });
+    res.end(Buffer.concat([PDF, Buffer.alloc(2048)]));
+  });
+  try {
+    await assert.rejects(
+      fetchPage(fixture.url('/paper'), baseConfig({ maxPdfResponseBytes: 16 })),
       (err: unknown) => err instanceof ReaderError && err.code === 'unsupported_type',
     );
   } finally {

@@ -17,6 +17,7 @@ function testConfig(overrides: Partial<Config> = {}): Config {
     fetchTimeoutMs: 3_000,
     maxRedirects: 5,
     maxResponseBytes: 1024 * 1024,
+    maxPdfResponseBytes: 20 * 1024 * 1024,
     maxContentChars: 250_000,
     maxRequestBodyBytes: 16 * 1024,
     allowPrivateTargets: true,
@@ -38,6 +39,7 @@ function articleHtml(words: number, title = 'Article'): string {
 
 function fakeFetch(body: string, extra: Partial<FetchResult> = {}): () => Promise<FetchResult> {
   return async () => ({
+    mediaType: 'html',
     finalUrl: 'https://example.com/a',
     status: 200,
     contentType: 'text/html; charset=utf-8',
