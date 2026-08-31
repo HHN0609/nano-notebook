@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/documentreading"
 	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -330,6 +331,7 @@ type NativeExtractor struct {
 	media     MediaModels
 	webReader webreader.Adapter
 	config    NativeExtractorConfig
+	pdf       *documentreading.PDFExtractor
 }
 
 func NewNativeExtractor(media MediaModels, config NativeExtractorConfig) *NativeExtractor {
@@ -347,20 +349,24 @@ func NewNativeExtractorWithWebReader(media MediaModels, webReader webreader.Adap
 	if config.MaxVisionPages == 0 {
 		config.MaxVisionPages = 20
 	}
-	return &NativeExtractor{media: media, webReader: webReader, config: config}
+	return &NativeExtractor{
+		media: media, webReader: webReader, config: config,
+		pdf: documentreading.NewPDFExtractor(media, documentreading.PDFExtractorConfig{
+			VisionModel: config.VisionModel, VisionPromptVersion: config.VisionPromptVersion, MaxVisionPages: config.MaxVisionPages,
+		}),
+	}
 }
 
 func (e *NativeExtractor) ExtractRendered(ctx context.Context, item source.Source, payload []byte, extractionConfigID string, rendered documentrender.Result) (normalize.Artifact, error) {
-	if item.Format != source.FormatPDF && item.Format != source.FormatPPTX {
+	if item.Format == source.FormatPDF {
+		return e.pdf.Extract(ctx, documentreading.PDFDocument{
+			ID: item.ID, Payload: payload, ExtractionConfigID: extractionConfigID,
+		}, rendered)
+	}
+	if item.Format != source.FormatPPTX {
 		return e.Extract(ctx, item, payload, extractionConfigID)
 	}
-	var missing []int
-	var err error
-	if item.Format == source.FormatPDF {
-		missing, err = normalize.PDFPagesRequiringVision(payload)
-	} else {
-		missing, err = normalize.PPTXSlidesRequiringVision(payload)
-	}
+	missing, err := normalize.PPTXSlidesRequiringVision(payload)
 	if err != nil {
 		return normalize.Artifact{}, err
 	}
@@ -399,10 +405,7 @@ func (e *NativeExtractor) ExtractRendered(ctx context.Context, item source.Sourc
 	input := normalize.Input{
 		SourceID: item.ID, ExtractionConfigID: extractionConfigID, Format: string(item.Format), Payload: payload,
 	}
-	if item.Format == source.FormatPPTX {
-		return normalize.PPTXWithVisualSlides(input, visualPages)
-	}
-	return normalize.PDFWithVisualPages(input, visualPages)
+	return normalize.PPTXWithVisualSlides(input, visualPages)
 }
 
 func (e *NativeExtractor) Extract(ctx context.Context, item source.Source, payload []byte, extractionConfigID string) (normalize.Artifact, error) {
