@@ -159,6 +159,7 @@ func NanoToolCapabilities() map[string]agentcatalog.ToolCapability {
 		"current_time":             {Scheduling: agentcatalog.ToolParallel},
 		"list_research_files":      {Scheduling: agentcatalog.ToolParallel},
 		"read_research_file":       {Scheduling: agentcatalog.ToolParallel},
+		"read_document_pages":      {Scheduling: agentcatalog.ToolParallel},
 		"read_skill":               {Scheduling: agentcatalog.ToolParallel},
 		"read_url":                 {Scheduling: agentcatalog.ToolParallel},
 		"search_evidence":          {Scheduling: agentcatalog.ToolParallel},
@@ -227,7 +228,7 @@ func ResearchRootExecutorCapability() agentcatalog.ExecutorCapability {
 		},
 		Tools: map[string]bool{
 			"assemble_research_report": true, "list_research_files": true, "read_research_file": true,
-			"read_url": true, "search_evidence": true, "web_search": true, "write_research_file": true,
+			"read_document_pages": true, "read_url": true, "search_evidence": true, "web_search": true, "write_research_file": true,
 		},
 		MaxLimits: agentcatalog.Limits{
 			ModelCalls: 120, Actions: 100, ActionBatch: 6, ContextBytes: 8388608, ResultBytes: 33554432, Attempts: 5,

@@ -667,7 +667,7 @@ func materializeResearchEvidence(ctx context.Context, tx pgx.Tx, sessionID, runI
 			return err
 		}
 		if action.Result.Status != ActionSucceeded {
-			_, err := tx.Exec(ctx, `insert into research_evidence_ledger(session_id,url,status,read_run_id,read_action_id) values($1,$2,'failed',$3,$4) on conflict(session_id,url) do update set status=case when research_evidence_ledger.status='read' then 'read' else 'failed' end,read_run_id=excluded.read_run_id,read_action_id=excluded.read_action_id,last_seen_at=now()`, sessionID, input.URL, runID, action.ActionID)
+			_, err := tx.Exec(ctx, `insert into research_evidence_ledger(session_id,url,status,read_run_id,read_action_id,failure_reason) values($1,$2,'failed',$3,$4,$5) on conflict(session_id,url) do update set status=case when research_evidence_ledger.status='read' then 'read' else 'failed' end,read_run_id=excluded.read_run_id,read_action_id=excluded.read_action_id,failure_reason=case when research_evidence_ledger.status='read' then research_evidence_ledger.failure_reason else excluded.failure_reason end,last_seen_at=now()`, sessionID, input.URL, runID, action.ActionID, action.Result.ErrorCode)
 			return err
 		}
 		var output readURLOutput
@@ -676,11 +676,12 @@ func materializeResearchEvidence(ctx context.Context, tx pgx.Tx, sessionID, runI
 		}
 		digest := sha256.Sum256([]byte(output.Markdown))
 		_, err := tx.Exec(ctx, `
-			insert into research_evidence_ledger(session_id,url,final_url,title,status,read_run_id,read_action_id,content_sha256,word_count,engine)
-			values($1,$2,$3,$4,'read',$5,$6,$7,$8,$9)
-			on conflict(session_id,url) do update set final_url=excluded.final_url,title=excluded.title,status='read',read_run_id=excluded.read_run_id,
-				read_action_id=excluded.read_action_id,content_sha256=excluded.content_sha256,word_count=excluded.word_count,engine=excluded.engine,last_seen_at=now()
-		`, sessionID, input.URL, output.FinalURL, output.Title, runID, action.ActionID, hex.EncodeToString(digest[:]), output.WordCount, output.Engine)
+			insert into research_evidence_ledger(session_id,url,final_url,title,status,read_run_id,read_action_id,content_sha256,word_count,engine,media_type,page_count,document_handle,failure_reason)
+			values($1,$2,$3,$4,'read',$5,$6,$7,$8,$9,nullif($10,''),nullif($11,0),nullif($12,''),null)
+			on conflict(session_id,url) do update set final_url=excluded.final_url,title=case when excluded.title<>'' then excluded.title else research_evidence_ledger.title end,status='read',read_run_id=excluded.read_run_id,
+				read_action_id=excluded.read_action_id,content_sha256=excluded.content_sha256,word_count=excluded.word_count,engine=excluded.engine,
+				media_type=excluded.media_type,page_count=excluded.page_count,document_handle=excluded.document_handle,failure_reason=null,last_seen_at=now()
+		`, sessionID, input.URL, output.FinalURL, output.Title, runID, action.ActionID, hex.EncodeToString(digest[:]), output.WordCount, output.Engine, output.MediaType, output.PageCount, output.DocumentHandle)
 		return err
 	}
 	return nil

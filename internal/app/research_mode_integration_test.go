@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,8 +13,10 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/documentreading"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/skillcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
@@ -326,10 +329,10 @@ func (researchSearchProvider) Search(_ context.Context, request websearch.Reques
 	}, nil
 }
 
-type researchReader struct{}
+type researchPDFAcquirer struct{ payload []byte }
 
-func (researchReader) Parse(_ context.Context, request webreader.Request) (webreader.Page, error) {
-	return webreader.Page{Title: "Harness source", FinalURL: request.URL, Content: "# Architecture\n\nThe harness uses a checkpointed tool loop.", Engine: "readability", WordCount: 8}, nil
+func (r researchPDFAcquirer) Acquire(_ context.Context, request webreader.Request) (webreader.Content, error) {
+	return webreader.Content{MediaType: webreader.MediaTypePDF, FinalURL: request.URL, PDF: r.payload}, nil
 }
 
 func TestResearchExecutorPersistsStepCapsulesEvidenceAndReportVersion(t *testing.T) {
@@ -338,7 +341,7 @@ func TestResearchExecutorPersistsStepCapsulesEvidenceAndReportVersion(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	api.server = app.NewServer(app.Config{CookieSecure: false, AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@5")}, api.db)
+	api.server = app.NewServer(app.Config{CookieSecure: false, AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@14")}, api.db)
 	api.handler = api.server.Handler()
 	sessionCookie, csrfCookie := api.registerWithCSRF(t, "research-executor@example.com")
 	_, chatID := createNotebookAndChatForEvidenceSet(t, api, sessionCookie, csrfCookie)
@@ -398,8 +401,19 @@ func TestResearchExecutorPersistsStepCapsulesEvidenceAndReportVersion(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	researchObjects := objectstore.NewMemoryStore()
+	urlReader := agent.NewResearchURLContentReader(
+		researchPDFAcquirer{payload: researchNativePDF("The harness uses a checkpointed tool loop.")}, nil,
+		documentreading.NewPDFExtractor(nil, documentreading.PDFExtractorConfig{}), researchObjects,
+		agent.ResearchURLReaderConfig{
+			ExtractionConfigID: "research-pdf-v1", RenderConfigID: "render-v1", RenderMaxPages: 500,
+			RenderDPI: 144, RenderMaxPixelsPerPage: 20_000_000, RenderMaxOutputBytes: 256 << 20,
+			MaxNormalizedRunes: 20_000_000, MaxModelChars: agent.ResearchReadURLMaxChars, MaxPageRead: 20,
+		},
+	)
+	urlActions := agent.NewResearchURLActions(urlReader)
 	registry, err := agent.NewActionRegistry(
-		agent.NewWebSearchAction(researchSearchProvider{}), agent.NewReadURLAction(researchReader{}), agent.NewSearchEvidenceAction(nil),
+		agent.NewWebSearchAction(researchSearchProvider{}), urlActions[0], urlActions[1], agent.NewSearchEvidenceAction(nil),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -410,6 +424,10 @@ func TestResearchExecutorPersistsStepCapsulesEvidenceAndReportVersion(t *testing
 	}
 	var sessionStatus, runStatus, jobStatus, report string
 	var capsules, discovered, read, assistants int
+	var mediaType *string
+	var pageCount *int
+	var documentHandle *string
+	var sourceCount int
 	if err := api.db.Pool().QueryRow(ctx, `select session.status,run.status,job.status,report.content_markdown from research_sessions session join agent_runs run on run.id=session.execution_run_id join agent_jobs job on job.run_id=run.id join research_report_versions report on report.session_id=session.id and report.version=1 where session.id=$1`, admitted.ResearchSessionID).Scan(&sessionStatus, &runStatus, &jobStatus, &report); err != nil {
 		t.Fatal(err)
 	}
@@ -419,12 +437,43 @@ func TestResearchExecutorPersistsStepCapsulesEvidenceAndReportVersion(t *testing
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) filter(where status='discovered'),count(*) filter(where status='read') from research_evidence_ledger where session_id=$1`, admitted.ResearchSessionID).Scan(&discovered, &read); err != nil {
 		t.Fatal(err)
 	}
+	if err := api.db.Pool().QueryRow(ctx, `select media_type,page_count,document_handle from research_evidence_ledger where session_id=$1 and status='read'`, admitted.ResearchSessionID).Scan(&mediaType, &pageCount, &documentHandle); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from source_sources`).Scan(&sourceCount); err != nil {
+		t.Fatal(err)
+	}
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id=$1 and role='assistant'`, chatID).Scan(&assistants); err != nil {
 		t.Fatal(err)
 	}
-	if modelCalls != 3 || sessionStatus != "completed" || runStatus != "completed" || jobStatus != "succeeded" || capsules != 2 || discovered != 1 || read != 1 || assistants != 1 || !strings.Contains(report, "Harness source") || !strings.Contains(report, "1 successfully read") || strings.Contains(report, "99 successfully read") || strings.Contains(report, "https://unread.example/lead") || strings.Contains(report, "Publication note") {
+	if modelCalls != 3 || sessionStatus != "completed" || runStatus != "completed" || jobStatus != "succeeded" || capsules != 2 || discovered != 1 || read != 1 || mediaType == nil || *mediaType != "application/pdf" || pageCount == nil || *pageCount != 1 || documentHandle == nil || !strings.HasPrefix(*documentHandle, "rdoc_") || sourceCount != 0 || researchObjects.Len() < 4 || assistants != 1 || !strings.Contains(report, "Harness source") || !strings.Contains(report, "1 successfully read") || strings.Contains(report, "99 successfully read") || strings.Contains(report, "https://unread.example/lead") || strings.Contains(report, "Publication note") {
 		t.Fatalf("calls=%d session=%s run=%s job=%s capsules=%d discovered=%d read=%d assistants=%d report=%s", modelCalls, sessionStatus, runStatus, jobStatus, capsules, discovered, read, assistants, report)
 	}
+}
+
+func researchNativePDF(text string) []byte {
+	objects := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>",
+	}
+	content := "BT /F1 12 Tf 72 720 Td (" + strings.NewReplacer("\\", "\\\\", "(", "\\(", ")", "\\)").Replace(text) + ") Tj ET"
+	objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content))
+	var document bytes.Buffer
+	document.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objects)+1)
+	for index, object := range objects {
+		offsets[index+1] = document.Len()
+		fmt.Fprintf(&document, "%d 0 obj\n%s\nendobj\n", index+1, object)
+	}
+	xref := document.Len()
+	fmt.Fprintf(&document, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for index := 1; index < len(offsets); index++ {
+		fmt.Fprintf(&document, "%010d 00000 n \n", offsets[index])
+	}
+	fmt.Fprintf(&document, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
+	return document.Bytes()
 }
 
 func researchPlanFixture(title string) map[string]any {

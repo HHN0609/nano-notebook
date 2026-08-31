@@ -12,24 +12,43 @@ import (
 const ResearchReadURLMaxChars = 120_000
 
 type readURLAction struct {
-	reader webreader.Adapter
+	reader     researchURLReader
+	htmlReader webreader.Adapter
 }
+
+type researchURLReader interface {
+	Read(context.Context, ResearchURLReadRequest) (ResearchURLReadResult, error)
+	ReadPages(context.Context, ResearchPageReadRequest) (ResearchPageReadResult, error)
+}
+
+type legacyResearchURLReader struct{ adapter webreader.Adapter }
 
 type readURLInput struct {
 	URL string `json:"url"`
 }
 
 type readURLOutput struct {
-	Title     string `json:"title"`
-	FinalURL  string `json:"final_url"`
-	Markdown  string `json:"markdown"`
-	Engine    string `json:"engine"`
-	WordCount int    `json:"word_count"`
-	Truncated bool   `json:"truncated"`
+	Title          string `json:"title"`
+	FinalURL       string `json:"final_url"`
+	Markdown       string `json:"markdown"`
+	Engine         string `json:"engine"`
+	WordCount      int    `json:"word_count"`
+	Truncated      bool   `json:"truncated"`
+	MediaType      string `json:"media_type,omitempty"`
+	PageCount      int    `json:"page_count,omitempty"`
+	DocumentHandle string `json:"document_handle,omitempty"`
 }
 
 func NewReadURLAction(reader webreader.Adapter) Action {
-	return &readURLAction{reader: reader}
+	return &readURLAction{reader: legacyResearchURLReader{adapter: reader}}
+}
+
+func NewResearchURLActions(reader *ResearchURLContentReader, legacyHTML ...webreader.Adapter) []Action {
+	var htmlReader webreader.Adapter
+	if len(legacyHTML) > 0 {
+		htmlReader = legacyHTML[0]
+	}
+	return []Action{&readURLAction{reader: reader, htmlReader: htmlReader}, &readDocumentPagesAction{reader: reader}}
 }
 
 func (*readURLAction) CrashReplaySafe() bool { return true }
@@ -58,21 +77,143 @@ func (a *readURLAction) Execute(ctx context.Context, request ActionRequest) (Act
 	if a == nil || a.reader == nil {
 		return ActionResult{Status: ActionDomainError, ErrorCode: "read_url_unavailable"}, nil
 	}
-	page, err := a.reader.Parse(ctx, webreader.Request{URL: input.URL, Format: webreader.FormatMarkdown, MaxChars: ResearchReadURLMaxChars})
+	reader := a.reader
+	if a.htmlReader != nil && request.Definition.String() != "research.executor@8" {
+		reader = legacyResearchURLReader{adapter: a.htmlReader}
+	}
+	read, err := reader.Read(ctx, ResearchURLReadRequest{
+		URL: input.URL, RunID: request.Attempt.RunID, ActionID: request.ActionID,
+	})
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return ActionResult{}, contextErr
 		}
-		return ActionResult{Status: ActionDomainError, ErrorCode: "read_url_failed"}, nil
+		return ActionResult{Status: ActionDomainError, ErrorCode: classifyReadURLError(err)}, nil
 	}
 	payload, err := json.Marshal(readURLOutput{
-		Title: page.Title, FinalURL: page.FinalURL, Markdown: page.Content,
-		Engine: page.Engine, WordCount: page.WordCount, Truncated: page.Truncated,
+		Title: read.Title, FinalURL: read.FinalURL, Markdown: read.Markdown,
+		Engine: read.Engine, WordCount: read.WordCount, Truncated: read.Truncated,
+		MediaType: read.MediaType, PageCount: read.PageCount, DocumentHandle: read.DocumentHandle,
 	})
 	if err != nil {
 		return ActionResult{}, err
 	}
 	return ActionResult{Status: ActionSucceeded, Output: payload}, nil
+}
+
+func classifyReadURLError(err error) string {
+	switch {
+	case errors.Is(err, webreader.ErrUnsafeDestination):
+		return "read_url_unsafe_destination"
+	case errors.Is(err, webreader.ErrResponseTooLarge):
+		return "read_url_response_too_large"
+	case errors.Is(err, webreader.ErrDocumentTypeMismatch):
+		return "read_url_document_type_mismatch"
+	case errors.Is(err, webreader.ErrUnsupportedType):
+		return "read_url_unsupported_type"
+	case errors.Is(err, webreader.ErrResponseInvalid):
+		return "read_url_response_invalid"
+	default:
+		return "read_url_failed"
+	}
+}
+
+func (r legacyResearchURLReader) Read(ctx context.Context, request ResearchURLReadRequest) (ResearchURLReadResult, error) {
+	if r.adapter == nil {
+		return ResearchURLReadResult{}, errors.New("web reader is unavailable")
+	}
+	page, err := r.adapter.Parse(ctx, webreader.Request{
+		URL: request.URL, Format: webreader.FormatMarkdown, MaxChars: ResearchReadURLMaxChars,
+	})
+	if err != nil {
+		return ResearchURLReadResult{}, err
+	}
+	return ResearchURLReadResult{
+		Title: page.Title, FinalURL: page.FinalURL, Markdown: page.Content, Engine: page.Engine,
+		WordCount: page.WordCount, Truncated: page.Truncated,
+	}, nil
+}
+
+func (legacyResearchURLReader) ReadPages(context.Context, ResearchPageReadRequest) (ResearchPageReadResult, error) {
+	return ResearchPageReadResult{}, ErrResearchDocumentNotFound
+}
+
+type readDocumentPagesAction struct{ reader researchURLReader }
+
+type readDocumentPagesInput struct {
+	DocumentHandle string `json:"document_handle"`
+	StartPage      int    `json:"start_page"`
+	EndPage        int    `json:"end_page"`
+}
+
+type readDocumentPagesOutput struct {
+	DocumentHandle string `json:"document_handle"`
+	StartPage      int    `json:"start_page"`
+	EndPage        int    `json:"end_page"`
+	PageCount      int    `json:"page_count"`
+	Markdown       string `json:"markdown"`
+	Truncated      bool   `json:"truncated"`
+}
+
+func (*readDocumentPagesAction) CrashReplaySafe() bool { return true }
+
+func (*readDocumentPagesAction) Definition() models.ActionDefinition {
+	return models.ActionDefinition{
+		Name:        "read_document_pages",
+		Description: "Read an inclusive range of at most 20 pages from a PDF document_handle returned by read_url in this same Research Run. This never performs another network fetch.",
+		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["document_handle","start_page","end_page"],"properties":{"document_handle":{"type":"string","pattern":"^rdoc_[a-f0-9]{32}$"},"start_page":{"type":"integer","minimum":1},"end_page":{"type":"integer","minimum":1}}}`),
+	}
+}
+
+func (*readDocumentPagesAction) ValidateInput(raw json.RawMessage) error {
+	_, err := decodeReadDocumentPagesInput(raw)
+	return err
+}
+
+func (a *readDocumentPagesAction) Execute(ctx context.Context, request ActionRequest) (ActionResult, error) {
+	input, err := decodeReadDocumentPagesInput(request.Input)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return ActionResult{}, err
+	}
+	if a == nil || a.reader == nil {
+		return ActionResult{Status: ActionDomainError, ErrorCode: "read_document_unavailable"}, nil
+	}
+	pages, err := a.reader.ReadPages(ctx, ResearchPageReadRequest{
+		RunID: request.Attempt.RunID, DocumentHandle: input.DocumentHandle,
+		StartPage: input.StartPage, EndPage: input.EndPage,
+	})
+	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return ActionResult{}, contextErr
+		}
+		code := "read_document_failed"
+		if errors.Is(err, ErrResearchDocumentNotFound) {
+			code = "research_document_not_found"
+		} else if errors.Is(err, ErrResearchPageRangeInvalid) {
+			code = "invalid_document_page_range"
+		}
+		return ActionResult{Status: ActionDomainError, ErrorCode: code}, nil
+	}
+	payload, err := json.Marshal(readDocumentPagesOutput{
+		DocumentHandle: pages.DocumentHandle, StartPage: pages.StartPage, EndPage: pages.EndPage,
+		PageCount: pages.PageCount, Markdown: pages.Markdown, Truncated: pages.Truncated,
+	})
+	if err != nil {
+		return ActionResult{}, err
+	}
+	return ActionResult{Status: ActionSucceeded, Output: payload}, nil
+}
+
+func decodeReadDocumentPagesInput(raw json.RawMessage) (readDocumentPagesInput, error) {
+	var input readDocumentPagesInput
+	if decodeExactJSON(raw, &input) != nil || !researchDocumentHandlePattern.MatchString(input.DocumentHandle) ||
+		input.StartPage < 1 || input.EndPage < input.StartPage || input.EndPage-input.StartPage+1 > 20 {
+		return readDocumentPagesInput{}, errors.New("invalid read_document_pages input")
+	}
+	return input, nil
 }
 
 func decodeReadURLInput(raw json.RawMessage) (readURLInput, error) {

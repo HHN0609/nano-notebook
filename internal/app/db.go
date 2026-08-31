@@ -1362,6 +1362,15 @@ create table if not exists research_evidence_ledger (
 	primary key (session_id,url)
 );
 
+alter table research_evidence_ledger add column if not exists media_type text
+	check (media_type is null or media_type in ('text/html','application/pdf'));
+alter table research_evidence_ledger add column if not exists page_count integer
+	check (page_count is null or page_count > 0);
+alter table research_evidence_ledger add column if not exists document_handle text
+	check (document_handle is null or document_handle ~ '^rdoc_[0-9a-f]{32}$');
+alter table research_evidence_ledger add column if not exists failure_reason text
+	check (failure_reason is null or char_length(failure_reason) between 1 and 64);
+
 create table if not exists research_step_capsules (
 	session_id text not null references research_sessions(id) on delete cascade,
 	run_id text not null references agent_runs(id) on delete cascade,

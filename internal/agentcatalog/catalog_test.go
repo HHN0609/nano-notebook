@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 14; got != want {
+	if got, want := len(definitions), 15; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -61,6 +61,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"research.executor@7": {
 			executor: "research_root", model: "agent.deep-research-default@4",
 			tools: []string{"assemble_research_report", "list_research_files", "read_research_file", "read_url", "search_evidence", "web_search", "write_research_file"},
+		},
+		"research.executor@8": {
+			executor: "research_root", model: "agent.deep-research-default@4",
+			tools: []string{"assemble_research_report", "list_research_files", "read_document_pages", "read_research_file", "read_url", "search_evidence", "web_search", "write_research_file"},
 		},
 		"studio.report@1": {
 			executor: "studio_structured_output", model: "agent.studio-default@1",
@@ -143,6 +147,11 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 	if !ok || manifestV13.Roots["research_planner"].String() != "research.planner@6" || manifestV13.Roots["research"].String() != "research.executor@7" ||
 		manifestV13.Roots["chat"].String() != "chat.leader@3" || manifestV13.Roots["studio_report"].String() != "studio.report@1" {
 		t.Fatalf("v13 manifest=%+v ok=%v", manifestV13, ok)
+	}
+	manifestV14, ok := catalog.ResolveRelease(MustParseReference("nano.default@14"))
+	if !ok || manifestV14.Roots["research_planner"].String() != "research.planner@6" || manifestV14.Roots["research"].String() != "research.executor@8" ||
+		manifestV14.Roots["chat"].String() != "chat.leader@3" || manifestV14.Roots["studio_report"].String() != "studio.report@1" {
+		t.Fatalf("v14 manifest=%+v ok=%v", manifestV14, ok)
 	}
 	researchPolicy, ok := catalog.ResolveModelPolicy(MustParseReference("agent.deep-research-default@2"))
 	if !ok || researchPolicy.TimeoutMS != 200000 || researchPolicy.MaxOutputTokens != 16384 {

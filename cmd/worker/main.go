@@ -21,6 +21,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/otelbridge"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/documentreading"
 	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
@@ -431,6 +432,29 @@ func main() {
 		slog.Error("web reader Adapter invalid", "error", err)
 		os.Exit(1)
 	}
+	documentRenderer, err := documentrender.NewHTTPAdapter(documentrender.HTTPConfig{
+		Endpoint: config.DocumentRendererURL, ServiceToken: config.DocumentRendererServiceToken,
+		HTTPClient: &http.Client{Timeout: config.DocumentRenderTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+	})
+	if err != nil {
+		slog.Error("document renderer Adapter invalid", "error", err)
+		os.Exit(1)
+	}
+	researchPDFExtractor := documentreading.NewPDFExtractor(modelClient, documentreading.PDFExtractorConfig{
+		VisionModel: config.SourceVisionModel, VisionPromptVersion: config.SourceVisionPromptVersion,
+		MaxVisionPages: config.SourceMaxVisionPages,
+	})
+	researchURLReader := agent.NewResearchURLContentReader(
+		webReaderAdapter, documentRenderer, researchPDFExtractor, workspaceObjects,
+		agent.ResearchURLReaderConfig{
+			ExtractionConfigID: "research-pdf-v1",
+			RenderConfigID:     config.DocumentRenderConfigID, RenderMaxPages: config.DocumentRenderMaxPages,
+			RenderDPI: config.DocumentRenderDPI, RenderMaxPixelsPerPage: config.DocumentRenderMaxPixelsPerPage,
+			RenderMaxOutputBytes: config.DocumentRenderMaxOutputBytes,
+			MaxNormalizedRunes:   config.SourceProcessingMaxRunes, MaxModelChars: agent.ResearchReadURLMaxChars,
+			MaxPageRead: 20, MaxPDFConcurrent: 2, ReadTimeout: 120 * time.Second,
+		},
+	)
 	grounder := agent.NewGroundingService(db.Pool())
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
 		agent.WithTraceSink(traceSink), agent.WithBestEffortTraceExporter(traceBridge),
@@ -441,13 +465,15 @@ func main() {
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
 	webSearchTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewWebSearchAction(searchProvider))
 	readSkillTool := agent.NewReadSkillAction(definitionCatalog, skillCatalog)
-	readURLTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewReadURLAction(webReaderAdapter))
+	researchURLTools := agent.NewResearchURLActions(researchURLReader, webReaderAdapter)
+	readURLTool := agent.NewResearchDeduplicatingAction(db.Pool(), researchURLTools[0])
+	readDocumentPagesTool := researchURLTools[1]
 	workspaceTools, err := agent.NewResearchWorkspaceActions(db.Pool(), workspaceObjects)
 	if err != nil {
 		slog.Error("Research workspace Tools invalid", "error", err)
 		os.Exit(1)
 	}
-	registryTools := []agent.Action{calculateTool, currentTimeTool, searchEvidenceTool, webSearchTool, readSkillTool, readURLTool}
+	registryTools := []agent.Action{calculateTool, currentTimeTool, searchEvidenceTool, webSearchTool, readSkillTool, readURLTool, readDocumentPagesTool}
 	registryTools = append(registryTools, workspaceTools...)
 	registry, err := agent.NewActionRegistry(registryTools...)
 	if err != nil {
@@ -461,6 +487,7 @@ func main() {
 		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readSkillTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readURLTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: readDocumentPagesTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 	}
 	for _, workspaceTool := range workspaceTools {
 		scheduling := agentcatalog.ToolParallel
@@ -575,14 +602,6 @@ func main() {
 	sourcePurgeProcessor := sourcepurge.NewProcessorWithProjectionPurger(db.Pool(), sourceObjects, qdrant, config.SourcePurgeLease)
 	go func() { sourcePurgeDone <- sourcePurgeProcessor.Run(ctx, config.SourcePurgePoll) }()
 	sourceQueue := sourcejobs.NewQueue(db.Pool(), config.SourceProcessingLease).WithMetrics(taskMetrics)
-	documentRenderer, err := documentrender.NewHTTPAdapter(documentrender.HTTPConfig{
-		Endpoint: config.DocumentRendererURL, ServiceToken: config.DocumentRendererServiceToken,
-		HTTPClient: &http.Client{Timeout: config.DocumentRenderTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
-	})
-	if err != nil {
-		slog.Error("document renderer Adapter invalid", "error", err)
-		os.Exit(1)
-	}
 	sourceProcessor := sourceprocessing.NewProcessorWithExtractorTraceAndRenderer(
 		db.Pool(), sourceQueue, evidence.NewPublisher(db.Pool(), sourceObjects), sourceObjects,
 		sourceprojection.New(db.Pool(), qdrant, modelClient),
@@ -766,7 +785,7 @@ func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@13"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@14"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}
