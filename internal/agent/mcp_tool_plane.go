@@ -348,7 +348,7 @@ func (s *MCPAttemptSession) ListTools(ctx context.Context) ([]MaterializedMCPToo
 }
 
 func (s *MCPAttemptSession) ActionDefinitions(ctx context.Context, policy ActionPolicy, tracers ...*agentobs.Tracer) ([]models.ActionDefinition, error) {
-	if policy.RemainingActions <= 0 {
+	if policy.RemainingActions <= 0 && policy.RemainingPlanMutations <= 0 {
 		return nil, nil
 	}
 	var tracer *agentobs.Tracer
@@ -362,6 +362,13 @@ func (s *MCPAttemptSession) ActionDefinitions(ctx context.Context, policy Action
 	definitions := make([]models.ActionDefinition, 0, len(tools))
 	for _, tool := range tools {
 		registered := s.byName[tool.Name]
+		planMutation := false
+		if mutation, ok := registered.Action.(PlanMutationPolicy); ok {
+			planMutation = mutation.IsPlanMutation()
+		}
+		if (planMutation && policy.RemainingPlanMutations <= 0) || (!planMutation && policy.RemainingActions <= 0) {
+			continue
+		}
 		if policy.Execution != nil {
 			if availability, ok := registered.Action.(ActionAvailability); ok {
 				available, reasonCode := availability.Available(*policy.Execution)
@@ -464,7 +471,7 @@ func (s *MCPAttemptSession) CallTool(ctx context.Context, name string, input jso
 		cause := mcpToolErrorCause(envelope.ErrorCode)
 		return ActionResult{}, &ToolCallError{Kind: envelope.ErrorKind, Code: envelope.ErrorCode, Cause: cause}
 	}
-	actionResult := ActionResult{Status: envelope.Status, Output: envelope.Output, ErrorCode: envelope.ErrorCode, traceAttributes: envelope.Attributes}
+	actionResult := ActionResult{Status: envelope.Status, Output: envelope.Output, ErrorCode: envelope.ErrorCode, Error: envelope.Error, traceAttributes: envelope.Attributes}
 	if err := actionResult.Validate(); err != nil {
 		return ActionResult{}, &ToolCallError{Kind: ToolErrorInvariant, Code: "action_result_invalid", Cause: err}
 	}
@@ -498,6 +505,7 @@ type mcpToolEnvelope struct {
 	Output     json.RawMessage      `json:"output,omitempty"`
 	ErrorKind  ToolErrorKind        `json:"error_kind,omitempty"`
 	ErrorCode  string               `json:"error_code,omitempty"`
+	Error      *ActionError         `json:"error,omitempty"`
 	Attributes []agentobs.Attribute `json:"attributes,omitempty"`
 }
 
@@ -543,7 +551,7 @@ func (h *MCPToolHost) executeMCPTool(ctx context.Context, request *mcp.CallToolR
 	if err := result.Validate(); err != nil {
 		return mcpToolErrorResult(ToolErrorInvariant, "action_result_invalid"), nil
 	}
-	envelope := mcpToolEnvelope{Status: result.Status, Output: result.Output, ErrorCode: result.ErrorCode, Attributes: result.traceAttributes}
+	envelope := mcpToolEnvelope{Status: result.Status, Output: result.Output, ErrorCode: result.ErrorCode, Error: result.Error, Attributes: result.traceAttributes}
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(result.Status)}}, StructuredContent: envelope,
 	}, nil

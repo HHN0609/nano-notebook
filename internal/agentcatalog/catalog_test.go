@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 15; got != want {
+	if got, want := len(definitions), 16; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -33,6 +33,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"chat.leader@3": {
 			executor: "chat_leader", model: "agent.chat-default@1",
 			tools: []string{"calculate", "current_time", "search_evidence"}, children: []string{"research.source-discovery@1"},
+		},
+		"chat.leader@4": {
+			executor: "chat_leader", model: "agent.chat-default@1",
+			tools: []string{"calculate", "current_time", "rewrite_todo_list", "search_evidence", "update_todo_status"}, children: []string{"research.source-discovery@1"},
 		},
 		"research.source-discovery@1": {
 			executor: "research", model: "agent.research-default@1",
@@ -152,6 +156,15 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 	if !ok || manifestV14.Roots["research_planner"].String() != "research.planner@6" || manifestV14.Roots["research"].String() != "research.executor@8" ||
 		manifestV14.Roots["chat"].String() != "chat.leader@3" || manifestV14.Roots["studio_report"].String() != "studio.report@1" {
 		t.Fatalf("v14 manifest=%+v ok=%v", manifestV14, ok)
+	}
+	manifestV15, ok := catalog.ResolveRelease(MustParseReference("nano.default@15"))
+	if !ok || manifestV15.Roots["chat"].String() != "chat.leader@4" || manifestV15.Roots["research_planner"].String() != "research.planner@6" ||
+		manifestV15.Roots["research"].String() != "research.executor@8" || manifestV15.Roots["studio_report"].String() != "studio.report@1" {
+		t.Fatalf("v15 manifest=%+v ok=%v", manifestV15, ok)
+	}
+	chatV4, ok := catalog.ResolveDefinition(MustParseReference("chat.leader@4"))
+	if !ok || chatV4.Limits.PlanMutations != 12 || chatV4.Limits.ActionDecisions != 4 || chatV4.Limits.ModelCalls != 17 || chatV4.Prompts["chat_composer_bare"].String() != "agent.chat-composer-bare@3" || chatV4.Prompts["chat_composer_grounded"].String() != "agent.chat-composer-grounded@4" {
+		t.Fatalf("chat v4=%+v ok=%v", chatV4, ok)
 	}
 	researchPolicy, ok := catalog.ResolveModelPolicy(MustParseReference("agent.deep-research-default@2"))
 	if !ok || researchPolicy.TimeoutMS != 200000 || researchPolicy.MaxOutputTokens != 16384 {

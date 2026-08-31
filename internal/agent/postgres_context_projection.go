@@ -149,9 +149,10 @@ func reconcileTerminalRunActions(ctx context.Context, tx pgx.Tx, runID string) e
 	}
 	sequenceNo := len(checkpoints)
 	for _, action := range pending {
-		closing, err := NewActionResultCheckpoint(proposal.DecisionNo, action.Index, action.ActionID, ActionResult{
+		result := enrichActionDomainError(ActionResult{
 			Status: ActionDomainError, ErrorCode: ErrorActionInterrupted,
 		})
+		closing, err := NewActionResultCheckpoint(proposal.DecisionNo, action.Index, action.ActionID, result)
 		if err != nil {
 			return err
 		}

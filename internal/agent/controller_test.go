@@ -75,6 +75,81 @@ func TestControllerCheckpointsOrderedActionsThenFinalAndPublishesOnce(t *testing
 	}
 }
 
+func TestControllerPlanMutationDoesNotConsumeBusinessActionOrDecisionBudget(t *testing.T) {
+	at := time.Date(2026, 8, 31, 7, 20, 1, 0, time.UTC)
+	registry, err := NewActionRegistry(
+		NewRewriteTodoListAction(&todoActionLoaderStub{inputMessageID: "msg_1", proposedAt: at}),
+		NewCalculateAction(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	runtime.execution.InputMessageID = "msg_1"
+	runtime.execution.ActionDecisionLimit = 1
+	runtime.execution.ActionLimit = 1
+	runtime.execution.PlanMutationLimit = 1
+	runtime.execution.ActionBatchLimit = 1
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "rewrite_todo_list", Input: json.RawMessage(`{"items":["plan","execute"]}`)}}}},
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "calculate", Input: json.RawMessage(`{"operation":"add","operands":["1","2"]}`)}}}},
+		{Final: &models.FinalDraft{Text: "done"}},
+	}}
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := LoadCheckpointPrefix(context.Background(), runtime.checkpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acceptedPlanMutations(prefix) != 1 || acceptedBusinessActions(prefix) != 1 || acceptedBusinessDecisions(prefix) != 1 {
+		t.Fatalf("accepted budget use: plan=%d actions=%d decisions=%d", acceptedPlanMutations(prefix), acceptedBusinessActions(prefix), acceptedBusinessDecisions(prefix))
+	}
+	if len(model.requests) != 3 || definitionNames(model.requests[0].ActionDefinitions) != "calculate,rewrite_todo_list" || definitionNames(model.requests[1].ActionDefinitions) != "calculate" || len(model.requests[2].ActionDefinitions) != 0 {
+		t.Fatalf("request definitions = %#v", model.requests)
+	}
+	if len(runtime.published) != 1 || len(runtime.failed) != 0 {
+		t.Fatalf("published=%v failed=%v", runtime.published, runtime.failed)
+	}
+}
+
+func TestControllerPersistsNewOrdinaryDomainErrorsAsStructuredV2(t *testing.T) {
+	registry, err := NewActionRegistry(NewCalculateAction())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{
+			Name: "calculate", Input: json.RawMessage(`{"operation":"divide","operands":["1","0"]}`),
+		}}}},
+		{Final: &models.FinalDraft{Text: "cannot divide by zero"}},
+	}}
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := LoadCheckpointPrefix(context.Background(), runtime.checkpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := prefix.Proposals[0].Actions[0].Result
+	if result == nil || result.Error == nil || result.ErrorCode != "" ||
+		result.Error.Code != "division_by_zero" || result.Error.Suggestion == "" {
+		t.Fatalf("structured domain error = %+v", result)
+	}
+	if runtime.checkpoints[1].PayloadVersion != 2 {
+		t.Fatalf("Action Result payload version = %d", runtime.checkpoints[1].PayloadVersion)
+	}
+}
+
+func definitionNames(definitions []models.ActionDefinition) string {
+	names := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		names = append(names, definition.Name)
+	}
+	return strings.Join(names, ",")
+}
+
 func TestControllerUsesIsolatedQueryContextBeforeGroundedComposer(t *testing.T) {
 	backend := &evidenceSearchStub{}
 	registry, err := NewActionRegistry(NewSearchEvidenceAction(backend))
@@ -413,7 +488,7 @@ func TestControllerReconcilesUnknownNonReplaySafeActionAfterCrash(t *testing.T) 
 		t.Fatal(err)
 	}
 	result := prefix.Proposals[0].Actions[0].Result
-	if result == nil || result.Status != ActionDomainError || result.ErrorCode != ErrorActionInterrupted {
+	if result == nil || result.Status != ActionDomainError || result.Error == nil || result.Error.Code != ErrorActionInterrupted {
 		t.Fatalf("closing Result=%+v", result)
 	}
 }
@@ -1021,12 +1096,11 @@ func defaultControllerExecution() Execution {
 }
 
 type controllerRuntimeStub struct {
-	execution       Execution
-	checkpoints     []Checkpoint
-	published       []models.FinalDraft
-	failed          []string
-	authorityChecks int
-	appendErrors    []error
+	execution    Execution
+	checkpoints  []Checkpoint
+	published    []models.FinalDraft
+	failed       []string
+	appendErrors []error
 }
 
 type queryContextControllerRuntimeStub struct {
@@ -1123,7 +1197,6 @@ func (r *controllerRuntimeStub) BuildDecisionRequest(_ context.Context, executio
 }
 
 func (r *controllerRuntimeStub) CheckAuthority(context.Context, Attempt) error {
-	r.authorityChecks++
 	return nil
 }
 

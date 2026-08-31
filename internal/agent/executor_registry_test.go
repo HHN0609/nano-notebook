@@ -33,7 +33,9 @@ func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testi
 		"read_research_file":       agentcatalog.ToolParallel,
 		"read_skill":               agentcatalog.ToolParallel,
 		"read_url":                 agentcatalog.ToolParallel,
+		"rewrite_todo_list":        agentcatalog.ToolOrderedSync,
 		"search_evidence":          agentcatalog.ToolParallel,
+		"update_todo_status":       agentcatalog.ToolOrderedSync,
 		"web_search":               agentcatalog.ToolOrderedSync,
 		"write_research_file":      agentcatalog.ToolOrderedSync,
 	}
@@ -176,7 +178,9 @@ func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 		"read_research_file":       {Scheduling: agentcatalog.ToolOrderedSync},
 		"read_skill":               {Scheduling: agentcatalog.ToolOrderedSync},
 		"read_url":                 {Scheduling: agentcatalog.ToolOrderedSync},
+		"rewrite_todo_list":        {Scheduling: agentcatalog.ToolOrderedSync},
 		"search_evidence":          {Scheduling: agentcatalog.ToolOrderedSync},
+		"update_todo_status":       {Scheduling: agentcatalog.ToolOrderedSync},
 		"web_search":               {Scheduling: agentcatalog.ToolOrderedSync},
 		"write_research_file":      {Scheduling: agentcatalog.ToolOrderedSync},
 	}
@@ -185,7 +189,7 @@ func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 func productionExecutorRegistrations() []ExecutorRegistration {
 	return []ExecutorRegistration{
 		{Identity: "chat_leader", Executor: noopDefinitionExecutor{}, Capability: leaderExecutorCapability(map[string]bool{
-			"calculate": true, "current_time": true, "search_evidence": true,
+			"calculate": true, "current_time": true, "rewrite_todo_list": true, "search_evidence": true, "update_todo_status": true,
 		})},
 		{Identity: "research", Executor: noopDefinitionExecutor{}, Capability: agentcatalog.ExecutorCapability{
 			PromptPurposes: map[string]bool{"planner": true},
@@ -216,7 +220,7 @@ func leaderExecutorCapability(tools map[string]bool) agentcatalog.ExecutorCapabi
 		},
 		Tools: tools, ChildExecutors: map[string]bool{"research": true},
 		MaxLimits: agentcatalog.Limits{
-			ModelCalls: 5, Actions: 8, ActionBatch: 4, ContextBytes: 65536, ResultBytes: 65536, Attempts: 3,
+			ModelCalls: 17, ActionDecisions: 4, Actions: 8, PlanMutations: 12, ActionBatch: 4, ContextBytes: 65536, ResultBytes: 65536, Attempts: 3,
 		},
 		MaxChildren: 1, MemberVisible: true, CanPublish: true,
 	}

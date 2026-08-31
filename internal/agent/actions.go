@@ -34,18 +34,38 @@ type ActionResult struct {
 	Status          ActionResultStatus
 	Output          json.RawMessage
 	ErrorCode       string
+	Error           *ActionError
 	traceAttributes []agentobs.Attribute
+}
+
+type ActionError struct {
+	Kind       string `json:"kind"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Suggestion string `json:"suggestion,omitempty"`
+	Retryable  bool   `json:"retryable"`
+}
+
+func (e ActionError) Validate() error {
+	if !actionCodePattern.MatchString(e.Kind) || !actionCodePattern.MatchString(e.Code) ||
+		strings.TrimSpace(e.Message) == "" || len([]rune(e.Message)) > 512 ||
+		len([]rune(e.Suggestion)) > 512 {
+		return fmt.Errorf("invalid structured Action error")
+	}
+	return nil
 }
 
 func (r ActionResult) Validate() error {
 	switch r.Status {
 	case ActionSucceeded:
 		var output map[string]json.RawMessage
-		if r.ErrorCode != "" || len(r.Output) == 0 || json.Unmarshal(r.Output, &output) != nil || output == nil {
+		if r.ErrorCode != "" || r.Error != nil || len(r.Output) == 0 || json.Unmarshal(r.Output, &output) != nil || output == nil {
 			return fmt.Errorf("invalid succeeded Action result")
 		}
 	case ActionDomainError:
-		if len(r.Output) != 0 || !actionCodePattern.MatchString(r.ErrorCode) {
+		legacy := r.Error == nil && actionCodePattern.MatchString(r.ErrorCode)
+		structured := r.ErrorCode == "" && r.Error != nil && r.Error.Validate() == nil
+		if len(r.Output) != 0 || (!legacy && !structured) {
 			return fmt.Errorf("invalid domain-error Action result")
 		}
 	default:
@@ -61,9 +81,10 @@ type Action interface {
 }
 
 type ActionPolicy struct {
-	AllowedNames     map[string]bool
-	RemainingActions int
-	Execution        *Execution
+	AllowedNames           map[string]bool
+	RemainingActions       int
+	RemainingPlanMutations int
+	Execution              *Execution
 }
 
 type ActionAvailability interface {
@@ -115,7 +136,7 @@ func NewActionRegistry(actions ...Action) (*ActionRegistry, error) {
 }
 
 func (r *ActionRegistry) Definitions(ctx context.Context, policy ActionPolicy, tracers ...*agentobs.Tracer) []models.ActionDefinition {
-	if policy.RemainingActions <= 0 {
+	if policy.RemainingActions <= 0 && policy.RemainingPlanMutations <= 0 {
 		return nil
 	}
 	var tracer *agentobs.Tracer
@@ -125,6 +146,13 @@ func (r *ActionRegistry) Definitions(ctx context.Context, policy ActionPolicy, t
 	definitions := make([]models.ActionDefinition, 0, len(r.actions))
 	for _, action := range r.actions {
 		definition := action.definition
+		planMutation := false
+		if mutation, ok := action.executor.(PlanMutationPolicy); ok {
+			planMutation = mutation.IsPlanMutation()
+		}
+		if (planMutation && policy.RemainingPlanMutations <= 0) || (!planMutation && policy.RemainingActions <= 0) {
+			continue
+		}
 		if policy.Execution != nil {
 			if availability, ok := action.executor.(ActionAvailability); ok {
 				available, reasonCode := availability.Available(*policy.Execution)

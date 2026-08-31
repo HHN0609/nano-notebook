@@ -42,6 +42,10 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 	}
 	request := buildProjectedRequest(execution, r.contextSystemPrompt(execution), units, definitions)
 	request.InvocationPolicy = execution.ModelInvocation
+	request, err = r.FinalizeDecisionRequest(ctx, execution, prefix, request)
+	if err != nil {
+		return models.ModelRequest{}, err
+	}
 	count, err := EstimateModelRequestTokens(request)
 	if err != nil {
 		return models.ModelRequest{}, err

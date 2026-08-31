@@ -129,6 +129,15 @@ func modelContextTraceAttributes(metadata models.ModelContextTelemetry) []agento
 		agentobs.String(TraceKeyContextInputTokenSource, metadata.InputTokenSource),
 		agentobs.Int64(TraceKeyExactSuffixTokens, int64(metadata.ExactSuffixTokens)),
 		agentobs.Int64(TraceKeyOverflowRecoveryAttempt, int64(metadata.OverflowRecoveryAttempt)),
+		agentobs.Bool(TraceKeyAgentStatusInjected, metadata.AgentStatusInjected),
+		agentobs.Int64(TraceKeyAgentStatusBytes, int64(metadata.AgentStatusBytes)),
+		agentobs.Int64(TraceKeyAgentStatusTokens, int64(metadata.AgentStatusTokens)),
+		agentobs.Int64(TraceKeyTodoRevision, int64(metadata.TodoRevision)),
+		agentobs.Int64(TraceKeyTodoPendingCount, int64(metadata.TodoPendingCount)),
+		agentobs.Int64(TraceKeyTodoInProgressCount, int64(metadata.TodoInProgressCount)),
+		agentobs.Int64(TraceKeyTodoCompletedCount, int64(metadata.TodoCompletedCount)),
+		agentobs.Int64(TraceKeyTodoCancelledCount, int64(metadata.TodoCancelledCount)),
+		agentobs.Int64(TraceKeyMaxToolInputRepeatCount, int64(metadata.MaxToolInputRepeatCount)),
 	}
 	if metadata.CompactionID != "" {
 		attributes = append(attributes,

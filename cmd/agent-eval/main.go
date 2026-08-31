@@ -73,7 +73,7 @@ func runSuite(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("agent-eval run", flag.ContinueOnError)
 	databaseURL := flags.String("database-url", "", "PostgreSQL URL")
 	bifrostURL := flags.String("bifrost-url", "http://127.0.0.1:56666", "Bifrost model gateway URL")
-	agentReleaseFlag := flags.String("agent-release", "nano.default@14", "Agent Catalog release identity@version")
+	agentReleaseFlag := flags.String("agent-release", "nano.default@15", "Agent Catalog release identity@version")
 	suitePath := flags.String("suite", "", "path to a Decision Suite JSON file")
 	qdrantURL := flags.String("qdrant-url", "http://127.0.0.1:56333", "Qdrant base URL")
 	qdrantAPIKey := flags.String("qdrant-api-key", "", "Qdrant API key")

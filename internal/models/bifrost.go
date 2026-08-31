@@ -71,6 +71,15 @@ type ModelContextTelemetry struct {
 	BeforeCompactionTokens     int
 	AfterCompactionTokens      int
 	OverflowRecoveryAttempt    int
+	AgentStatusInjected        bool
+	AgentStatusBytes           int
+	AgentStatusTokens          int
+	TodoRevision               int
+	TodoPendingCount           int
+	TodoInProgressCount        int
+	TodoCompletedCount         int
+	TodoCancelledCount         int
+	MaxToolInputRepeatCount    int
 }
 
 type ModelInvocationPolicy struct {

@@ -18,6 +18,7 @@ type mcpToolAction struct {
 	definition models.ActionDefinition
 	calls      []ActionRequest
 	err        error
+	result     *ActionResult
 	attributes []agentobs.Attribute
 }
 
@@ -33,6 +34,9 @@ func (a *mcpToolAction) Execute(_ context.Context, request ActionRequest) (Actio
 	a.calls = append(a.calls, request)
 	if a.err != nil {
 		return ActionResult{}, a.err
+	}
+	if a.result != nil {
+		return *a.result, nil
 	}
 	return ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"value":"5"}`), traceAttributes: a.attributes}, nil
 }
@@ -368,6 +372,43 @@ func TestMCPToolPlaneReturnsRecoverableWebSearchFailureToTheModel(t *testing.T) 
 	result, err := session.CallTool(context.Background(), "web_search", json.RawMessage(`{"queries":["alpha"]}`), "research:web_search:0")
 	if err != nil || result.Status != ActionDomainError || result.ErrorCode != "web_search_rate_limited" {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestMCPToolPlanePreservesStructuredDomainError(t *testing.T) {
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	calculate := testMCPAction("calculate")
+	calculate.result = &ActionResult{Status: ActionDomainError, Error: &ActionError{
+		Kind: "domain", Code: "todo_revision_conflict", Message: "The TODO list revision is stale.",
+		Suggestion: "Use the current revision.", Retryable: true,
+	}}
+	registry, err := NewMCPToolRegistry(
+		MCPToolRegistration{Action: calculate, Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("current_time"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("search_evidence"), Scheduling: agentcatalog.ToolOrderedSync},
+		testDelegationMCPRegistration(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := NewMCPToolHost(catalog, registry, &mcpToolAuthority{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := host.OpenAttempt(context.Background(), AttemptToolScope{
+		Definition: agentcatalog.MustParseReference("chat.leader@1"),
+		Attempt:    Attempt{RunID: "run", JobID: "job", AttemptNo: 1, LeaseToken: "lease"}, RemainingActions: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	result, err := session.CallTool(context.Background(), "calculate", json.RawMessage(`{}`), "decision:1/action:0")
+	if err != nil || result.Error == nil || result.Error.Code != "todo_revision_conflict" || !result.Error.Retryable {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 

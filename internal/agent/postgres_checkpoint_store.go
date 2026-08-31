@@ -341,11 +341,13 @@ func canonicalStoredCheckpointPayload(checkpoint Checkpoint, raw []byte) (json.R
 		if err := decodeCheckpointPayload(raw, &payload); err != nil {
 			return nil, invalidCheckpoint("stored Action Result payload is invalid")
 		}
-		if payload.ActionID != checkpoint.ActionID {
+		if payload.ActionID != checkpoint.ActionID || (checkpoint.PayloadVersion != 1 && checkpoint.PayloadVersion != 2) ||
+			(checkpoint.PayloadVersion == 1 && payload.Error != nil) ||
+			(checkpoint.PayloadVersion == 2 && (payload.Error == nil || payload.ErrorCode != "")) {
 			return nil, invalidCheckpoint("stored Action Result identity is invalid")
 		}
 		expected, err = NewActionResultCheckpoint(checkpoint.DecisionNo, *checkpoint.ActionIndex, checkpoint.ActionID, ActionResult{
-			Status: payload.Status, Output: payload.Output, ErrorCode: payload.ErrorCode,
+			Status: payload.Status, Output: payload.Output, ErrorCode: payload.ErrorCode, Error: payload.Error,
 		})
 	case CheckpointFinalDraft:
 		var payload finalDraftCheckpointPayload
