@@ -126,7 +126,7 @@ func TestDecisionContextReconstructsCompletedCheckpointBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(emptyRequest.Messages) != 2 {
+	if len(emptyRequest.Messages) != 3 || !isAgentStatusMessage(string(emptyRequest.Messages[2].Role), emptyRequest.Messages[2].Content) {
 		t.Fatalf("empty-prefix messages=%+v", emptyRequest.Messages)
 	}
 	proposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
@@ -179,7 +179,7 @@ func TestDecisionContextReconstructsCompletedCheckpointBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Model != "aliyun/qwen-plus" || len(request.Messages) != 5 {
+	if request.Model != "aliyun/qwen-plus" || len(request.Messages) != 6 || !isAgentStatusMessage(string(request.Messages[5].Role), request.Messages[5].Content) {
 		t.Fatalf("request model/messages = %q/%+v", request.Model, request.Messages)
 	}
 	if request.Messages[0].Role != models.RoleSystem || request.Messages[0].Content != "System prompt for checkpoint context." ||

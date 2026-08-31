@@ -6,10 +6,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
+	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -77,7 +81,8 @@ func TestWorkerClaimsBuildsContextAndPublishesOneAnswer(t *testing.T) {
 	if modelRequest.Model != "aliyun/qwen-plus" || modelRequest.Stream || modelRequest.MaxCompletionTokens != 2048 {
 		t.Fatalf("model request = %+v", modelRequest)
 	}
-	if len(modelRequest.Messages) != 2 || modelRequest.Messages[0].Role != "system" || modelRequest.Messages[1].Role != "user" || modelRequest.Messages[1].Content != "Why is a publication barrier useful?" {
+	if len(modelRequest.Messages) != 3 || modelRequest.Messages[0].Role != "system" || modelRequest.Messages[1].Role != "user" || modelRequest.Messages[1].Content != "Why is a publication barrier useful?" ||
+		!isAgentStatusMessage(string(modelRequest.Messages[2].Role), modelRequest.Messages[2].Content) {
 		t.Fatalf("model context = %+v", modelRequest.Messages)
 	}
 
@@ -148,7 +153,8 @@ func TestControllerExecutesBifrostActionBatchAndPublishesFinal(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch modelCalls {
 		case 1:
-			if len(request.Tools) != 2 || request.Tools[0].Function.Name != "calculate" || request.Tools[1].Function.Name != "current_time" || len(request.Messages) != 2 {
+			if len(request.Tools) != 2 || request.Tools[0].Function.Name != "calculate" || request.Tools[1].Function.Name != "current_time" || len(request.Messages) != 3 ||
+				!isAgentStatusMessage(request.Messages[2].Role, request.Messages[2].Content) {
 				t.Fatalf("first model request = %+v", request)
 			}
 			_, _ = w.Write([]byte(`{
@@ -158,11 +164,12 @@ func TestControllerExecutesBifrostActionBatchAndPublishesFinal(t *testing.T) {
 				]},"finish_reason":"tool_calls"}]
 			}`))
 		case 2:
-			if len(request.Messages) != 5 || len(request.Messages[2].ToolCalls) != 2 ||
+			if len(request.Messages) != 6 || len(request.Messages[2].ToolCalls) != 2 ||
 				request.Messages[2].ToolCalls[0].ID != "decision:1/action:0" ||
 				request.Messages[2].ToolCalls[1].ID != "decision:1/action:1" ||
 				request.Messages[3].Role != "tool" || request.Messages[3].ToolCallID != "decision:1/action:0" ||
-				request.Messages[4].Role != "tool" || request.Messages[4].ToolCallID != "decision:1/action:1" {
+				request.Messages[4].Role != "tool" || request.Messages[4].ToolCallID != "decision:1/action:1" ||
+				!isAgentStatusMessage(request.Messages[5].Role, request.Messages[5].Content) {
 				t.Fatalf("reconstructed model request = %+v", request.Messages)
 			}
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"12.5 + 3.2 = 15.7, and 4 × 5 = 20."},"finish_reason":"stop"}]}`))
@@ -209,6 +216,325 @@ func TestControllerExecutesBifrostActionBatchAndPublishesFinal(t *testing.T) {
 			t.Fatalf("checkpoint kinds = %v, want %v", checkpointKinds, wantKinds)
 		}
 	}
+}
+
+func TestLeaderLoopUsesCheckpointBackedTodoAndInjectsCurrentAgentStatus(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "controller-todo-status@example.com")
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestServer := app.NewServer(app.Config{
+		CookieSecure: false, AgentRun: agent.DefaultRunConfig("nano-interactive-v1"),
+		AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@15"),
+	}, api.db)
+	api.server = latestServer
+	api.handler = latestServer.Handler()
+
+	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c172"
+	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": messageID, "content": "Plan the work, calculate 12.5 + 3.2, and verify the result.", "time_zone": "Asia/Shanghai",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if admitted.Code != http.StatusAccepted {
+		t.Fatalf("admission status = %d, body = %s", admitted.Code, admitted.Body.String())
+	}
+	var admittedBody struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, admitted, &admittedBody)
+	ctx := context.Background()
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok || claimed.RunID != admittedBody.RunID {
+		t.Fatalf("claim=%+v ok=%t err=%v", claimed, ok, err)
+	}
+
+	fixedNow := time.Date(2026, 8, 31, 7, 24, 10, 0, time.UTC)
+	statuses := make([]string, 0, 6)
+	modelCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		modelCalls++
+		var request struct {
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if len(request.Messages) == 0 || request.Messages[len(request.Messages)-1].Role != "user" || !strings.HasPrefix(request.Messages[len(request.Messages)-1].Content, `<agent_status version="1">`) {
+			t.Fatalf("model call %d has no final user Agent Status: %+v", modelCalls, request.Messages)
+		}
+		status := request.Messages[len(request.Messages)-1].Content
+		statuses = append(statuses, status)
+		toolNames := make(map[string]bool, len(request.Tools))
+		for _, tool := range request.Tools {
+			toolNames[tool.Function.Name] = true
+		}
+		if !toolNames["rewrite_todo_list"] || !toolNames["update_todo_status"] {
+			t.Fatalf("model call %d tools=%v", modelCalls, toolNames)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch modelCalls {
+		case 1:
+			if strings.Contains(status, "TODO List") || !strings.Contains(status, "Generated at: 2026-08-31T15:24:10+08:00") {
+				t.Fatalf("initial status=%s", status)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"todo-rewrite","type":"function","function":{"name":"rewrite_todo_list","arguments":"{\"items\":[\"Plan the calculation\",\"Calculate 12.5 + 3.2\",\"Verify the result\"]}"}}]},"finish_reason":"tool_calls"}]}`))
+		case 2:
+			if !strings.Contains(status, "TODO List (revision=1):") || !strings.Contains(status, "[todo_1] pending") || !strings.Contains(status, "rewrite_todo_list: 1") {
+				t.Fatalf("status after rewrite=%s", status)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"todo-start","type":"function","function":{"name":"update_todo_status","arguments":"{\"revision\":1,\"updates\":[{\"id\":\"todo_1\",\"status\":\"completed\"},{\"id\":\"todo_2\",\"status\":\"in_progress\"}]}"}}]},"finish_reason":"tool_calls"}]}`))
+		case 3:
+			if !strings.Contains(status, "TODO List (revision=2):") || !strings.Contains(status, "[todo_2] in_progress") || !strings.Contains(status, "update_todo_status: 1") {
+				t.Fatalf("status after first update=%s", status)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"calculate","type":"function","function":{"name":"calculate","arguments":"{\"operation\":\"add\",\"operands\":[\"12.5\",\"3.2\"]}"}}]},"finish_reason":"tool_calls"}]}`))
+		case 4:
+			if !strings.Contains(status, "calculate: 1") || !strings.Contains(status, "TODO List (revision=2):") {
+				t.Fatalf("status after calculate=%s", status)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"todo-verify","type":"function","function":{"name":"update_todo_status","arguments":"{\"revision\":2,\"updates\":[{\"id\":\"todo_2\",\"status\":\"completed\"},{\"id\":\"todo_3\",\"status\":\"in_progress\"}]}"}}]},"finish_reason":"tool_calls"}]}`))
+		case 5:
+			if !strings.Contains(status, "TODO List (revision=3):") || !strings.Contains(status, "[todo_3] in_progress") || !strings.Contains(status, "update_todo_status: 2") {
+				t.Fatalf("status during verification=%s", status)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"todo-complete","type":"function","function":{"name":"update_todo_status","arguments":"{\"revision\":3,\"updates\":[{\"id\":\"todo_3\",\"status\":\"completed\"}]}"}}]},"finish_reason":"tool_calls"}]}`))
+		case 6:
+			if !strings.Contains(status, "TODO List (revision=4):") || strings.Contains(status, "in_progress") || !strings.Contains(status, "update_todo_status: 3") {
+				t.Fatalf("completed status=%s", status)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"12.5 + 3.2 = 15.7, and the TODO plan was verified."},"finish_reason":"stop"}]}`))
+		default:
+			t.Fatalf("unexpected model call %d", modelCalls)
+		}
+	}))
+	defer upstream.Close()
+
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, func() string { return "msg_todo_status_answer" }, agent.WithRuntimeClock(func() time.Time { return fixedNow }))
+	execution, err := runtime.Load(ctx, attemptFromClaim(claimed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.PlanMutationLimit != 12 || execution.ActionDecisionLimit != 4 || execution.ActionLimit != 8 {
+		t.Fatalf("pinned budgets plan/actions/decisions=%d/%d/%d", execution.PlanMutationLimit, execution.ActionLimit, execution.ActionDecisionLimit)
+	}
+	rewrite := agent.NewRewriteTodoListAction(runtime)
+	update := agent.NewUpdateTodoStatusAction(runtime)
+	calculate := agent.NewCalculateAction()
+	currentTime := agent.NewCurrentTimeAction(nil)
+	searchEvidence := agent.NewSearchEvidenceAction(nil)
+	directRegistry, err := agent.NewActionRegistry(rewrite, update, calculate, currentTime, searchEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcpRegistry, err := agent.NewMCPToolRegistry(
+		agent.MCPToolRegistration{Action: calculate, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: currentTime, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: rewrite, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: searchEvidence, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: update, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: todoDelegationStub{}, Scheduling: agentcatalog.ToolExclusiveDelegation},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := agent.NewMCPToolHost(catalog, mcpRegistry, runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := agent.NewMCPController(runtime, models.NewBifrostClient(upstream.URL, upstream.Client(), 2048), directRegistry, host, agentcatalog.MustParseReference("chat.leader@4"))
+	if err := controller.Execute(ctx, attemptFromClaim(claimed)); err != nil {
+		t.Fatal(err)
+	}
+	if modelCalls != 6 || len(statuses) != 6 {
+		t.Fatalf("model calls/statuses=%d/%d", modelCalls, len(statuses))
+	}
+
+	var runStatus, jobStatus, content string
+	var checkpointCount, todoResultCount, persistedStatusCount int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.status,j.status,message.content
+		from agent_runs r join agent_jobs j on j.run_id=r.id join chat_messages message on message.id=r.output_message_id
+		where r.id=$1`, admittedBody.RunID).Scan(&runStatus, &jobStatus, &content); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_run_checkpoints where run_id=$1`, admittedBody.RunID).Scan(&checkpointCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(*) from agent_run_checkpoints result
+		join agent_run_checkpoints proposal on proposal.run_id=result.run_id and proposal.decision_no=result.decision_no and proposal.kind='action_proposal'
+		where result.run_id=$1 and result.kind='action_result'
+		  and (proposal.payload::text like '%rewrite_todo_list%' or proposal.payload::text like '%update_todo_status%')
+		  and result.payload->>'status'='succeeded'`, admittedBody.RunID).Scan(&todoResultCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `
+		select
+			(select count(*) from chat_messages where chat_id=$1 and content like '%<agent_status%')+
+			(select count(*) from agent_run_checkpoints where run_id=$2 and payload::text like '%<agent_status%')
+	`, chatID, admittedBody.RunID).Scan(&persistedStatusCount); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "completed" || jobStatus != "succeeded" || content != "12.5 + 3.2 = 15.7, and the TODO plan was verified." || checkpointCount != 11 || todoResultCount != 4 || persistedStatusCount != 0 {
+		t.Fatalf("durable state run/job=%s/%s content=%q checkpoints=%d TODO results=%d persisted statuses=%d", runStatus, jobStatus, content, checkpointCount, todoResultCount, persistedStatusCount)
+	}
+}
+
+func TestTodoStatusSurvivesRuntimeRestartAndRetryButNotANewInputMessage(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "todo-retry-scope@example.com")
+	const inputMessageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c173"
+	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": inputMessageID, "content": "Plan this retry-scoped task.", "time_zone": "Asia/Shanghai",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if admitted.Code != http.StatusAccepted {
+		t.Fatalf("admission status=%d body=%s", admitted.Code, admitted.Body.String())
+	}
+	var admittedBody struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, admitted, &admittedBody)
+	ctx := context.Background()
+	firstClaim, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok || firstClaim.RunID != admittedBody.RunID {
+		t.Fatalf("first claim=%+v ok=%t err=%v", firstClaim, ok, err)
+	}
+	firstAttempt := attemptFromClaim(firstClaim)
+	firstRuntime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil)
+	proposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{{
+		Name: "rewrite_todo_list", Input: json.RawMessage(`{"items":["inspect retry state","finish retry state"]}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstRuntime.AppendCheckpoint(ctx, firstAttempt, proposal); err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.NewRewriteTodoListAction(firstRuntime).Execute(ctx, agent.ActionRequest{
+		ActionID: "decision:1/action:0", Input: proposalInput(t, proposal), Attempt: firstAttempt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultCheckpoint, err := agent.NewActionResultCheckpoint(1, 0, "decision:1/action:0", result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := firstRuntime.AppendCheckpoint(ctx, firstAttempt, resultCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstRuntime.Fail(ctx, firstAttempt, "retry_scope_fixture"); err != nil {
+		t.Fatal(err)
+	}
+
+	retry := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+admittedBody.RunID+"/retry", map[string]any{
+		"time_zone": "Asia/Shanghai",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "todo-retry-scope")
+	if retry.Code != http.StatusAccepted {
+		t.Fatalf("retry status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	var retryBody struct {
+		Run struct {
+			ID string `json:"id"`
+		} `json:"run"`
+	}
+	decodeBody(t, retry, &retryBody)
+	retryClaim, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok || retryClaim.RunID != retryBody.Run.ID {
+		t.Fatalf("retry claim=%+v ok=%t err=%v", retryClaim, ok, err)
+	}
+	// A fresh runtime instance simulates a worker restart. Its empty Retry Run
+	// must reconstruct TODO authority from the prior same-input checkpoint.
+	restartedRuntime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil,
+		agent.WithRuntimeClock(func() time.Time { return time.Date(2026, 8, 31, 7, 30, 0, 0, time.UTC) }))
+	retryExecution, err := restartedRuntime.Load(ctx, attemptFromClaim(retryClaim))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryPrefix, err := restartedRuntime.LoadCheckpointPrefix(ctx, attemptFromClaim(retryClaim))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryRequest, err := restartedRuntime.BuildDecisionRequest(ctx, retryExecution, retryPrefix, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryStatus := retryRequest.Messages[len(retryRequest.Messages)-1].Content
+	if !strings.Contains(retryStatus, "TODO List (revision=1):") ||
+		!strings.Contains(retryStatus, "inspect retry state") || !strings.Contains(retryStatus, "rewrite_todo_list: 1") {
+		t.Fatalf("restarted Retry status=%s", retryStatus)
+	}
+	if err := restartedRuntime.Fail(ctx, attemptFromClaim(retryClaim), "new_input_scope_fixture"); err != nil {
+		t.Fatal(err)
+	}
+
+	const newMessageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c174"
+	newMessage := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": newMessageID, "content": "This is a new input scope.", "time_zone": "Asia/Shanghai",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if newMessage.Code != http.StatusAccepted {
+		t.Fatalf("new input status=%d body=%s", newMessage.Code, newMessage.Body.String())
+	}
+	var newBody struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, newMessage, &newBody)
+	newClaim, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok || newClaim.RunID != newBody.RunID {
+		t.Fatalf("new input claim=%+v ok=%t err=%v", newClaim, ok, err)
+	}
+	newRuntime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil)
+	newExecution, err := newRuntime.Load(ctx, attemptFromClaim(newClaim))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPrefix, err := newRuntime.LoadCheckpointPrefix(ctx, attemptFromClaim(newClaim))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRequest, err := newRuntime.BuildDecisionRequest(ctx, newExecution, newPrefix, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newStatus := newRequest.Messages[len(newRequest.Messages)-1].Content
+	if strings.Contains(newStatus, "TODO List") || strings.Contains(newStatus, "rewrite_todo_list") {
+		t.Fatalf("new input inherited prior status=%s", newStatus)
+	}
+}
+
+func proposalInput(t *testing.T, proposal agent.PendingCheckpoint) json.RawMessage {
+	t.Helper()
+	var payload struct {
+		Actions []struct {
+			Input json.RawMessage `json:"input"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal(proposal.Payload, &payload); err != nil || len(payload.Actions) != 1 {
+		t.Fatalf("proposal payload=%s err=%v", proposal.Payload, err)
+	}
+	return payload.Actions[0].Input
+}
+
+type todoDelegationStub struct{}
+
+func (todoDelegationStub) Definition() models.ActionDefinition {
+	return models.ActionDefinition{
+		Name: "delegate.research.source-discovery.v1", Description: "Unused configured delegation fixture.",
+		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["request"],"properties":{"request":{"type":"string"}}}`),
+	}
+}
+
+func (todoDelegationStub) ValidateInput(json.RawMessage) error { return nil }
+
+func (todoDelegationStub) Execute(context.Context, agent.ActionRequest) (agent.ActionResult, error) {
+	return agent.ActionResult{}, errors.New("unexpected delegation")
 }
 
 func TestReclaimedControllerResumesTheFirstMissingActionOnTheSameRunAndJob(t *testing.T) {
@@ -259,8 +585,9 @@ func TestReclaimedControllerResumesTheFirstMissingActionOnTheSameRunAndJob(t *te
 	if len(action.calls) != 1 || action.calls[0] != "resume-here" || model.calls != 1 {
 		t.Fatalf("recovered Action/model calls=%v/%d", action.calls, model.calls)
 	}
-	if len(model.request.Messages) != 5 || model.request.Messages[2].Role != models.RoleAssistant || len(model.request.Messages[2].ActionCalls) != 2 ||
-		model.request.Messages[3].ActionCallID != "decision:1/action:0" || model.request.Messages[4].ActionCallID != "decision:1/action:1" {
+	if len(model.request.Messages) != 6 || model.request.Messages[2].Role != models.RoleAssistant || len(model.request.Messages[2].ActionCalls) != 2 ||
+		model.request.Messages[3].ActionCallID != "decision:1/action:0" || model.request.Messages[4].ActionCallID != "decision:1/action:1" ||
+		!isAgentStatusMessage(string(model.request.Messages[5].Role), model.request.Messages[5].Content) {
 		t.Fatalf("reconstructed request=%+v", model.request.Messages)
 	}
 	var jobID, runStatus, jobStatus, outputID string
@@ -377,12 +704,17 @@ func TestContextBuilderProjectsAllDurableUserMessagesThroughTheCurrentRun(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(request.Messages) != 27 || request.Messages[0].Role != "system" || request.Messages[0].Content != "Bounded system prompt." {
+	if len(request.Messages) != 28 || request.Messages[0].Role != "system" || request.Messages[0].Content != "Bounded system prompt." ||
+		!isAgentStatusMessage(string(request.Messages[27].Role), request.Messages[27].Content) {
 		t.Fatalf("context size/system = %d/%+v", len(request.Messages), request.Messages[0])
 	}
 	if request.Messages[1].Content != "message-01" || request.Messages[25].Content != "message-25" || request.Messages[26].Content == "must-not-enter-earlier-run" {
 		t.Fatalf("context bounds = %q ... %q", request.Messages[1].Content, request.Messages[20].Content)
 	}
+}
+
+func isAgentStatusMessage(role, content string) bool {
+	return role == "user" && strings.HasPrefix(content, `<agent_status version="1">`) && strings.HasSuffix(content, `</agent_status>`)
 }
 
 func TestPublicationRejectsAnExpiredAttemptAfterTheJobIsReclaimed(t *testing.T) {
