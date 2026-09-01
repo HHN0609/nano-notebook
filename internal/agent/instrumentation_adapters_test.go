@@ -249,6 +249,26 @@ func TestActionAdapterStagesReplayAndBindsBothSidesOfThePhysicalCall(t *testing.
 	}
 }
 
+func TestActionAdapterProjectsLargeResultBeforeReplayStaging(t *testing.T) {
+	tracer, _, ctx := instrumentationTestTracer(t)
+	stager := &recordingReplayStager{}
+	rawMarker := strings.Repeat("raw-secret-evidence-", 100)
+	action := &cacheableResultAction{output: json.RawMessage(`{"markdown":"` + rawMarker + `"}`)}
+	projected := ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"content_state":"externalized","result_ref":"tr_safe_reference"}`)}
+	result, err := InvokeAgentAction(ctx, tracer, action, "decision:1/action:0", ActionRequest{Input: json.RawMessage(`{"key":"paper"}`)}, ActionTraceOptions{
+		StartIdentity: "run/run-1/attempt/1/action/0/start", InputIdentity: "run/run-1/attempt/1/action/0/replay/input",
+		ResultIdentity: "run/run-1/attempt/1/action/0/replay/result", ReplayStager: stager,
+		PrepareResult: func(context.Context, ActionResult) (ActionResult, error) { return projected, nil },
+	})
+	if err != nil || string(result.Output) != string(projected.Output) {
+		t.Fatalf("result=%s err=%v", result.Output, err)
+	}
+	if len(stager.requests) != 2 || strings.Contains(string(stager.requests[1].Payload.Bytes), rawMarker) ||
+		!strings.Contains(string(stager.requests[1].Payload.Bytes), "tr_safe_reference") {
+		t.Fatalf("staged result=%s", stager.requests[1].Payload.Bytes)
+	}
+}
+
 func TestSearchEvidenceActionRecordsRAGMetadataWithoutQueryOrEvidenceBodies(t *testing.T) {
 	tracer, exporter, ctx := instrumentationTestTracer(t)
 	backend := &evidenceSearchStub{result: retrieval.SearchResult{

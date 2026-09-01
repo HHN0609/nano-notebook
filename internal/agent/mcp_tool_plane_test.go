@@ -75,7 +75,7 @@ func TestMCPToolPlaneUsesOfficialInMemoryProtocolAndDefinitionScope(t *testing.T
 	attempt := Attempt{RunID: "run-mcp", JobID: "job-mcp", AttemptNo: 2, LeaseToken: "lease-mcp"}
 	session, err := host.OpenAttempt(context.Background(), AttemptToolScope{
 		Definition: agentcatalog.MustParseReference("chat.leader@1"), Attempt: attempt,
-		DefaultTimeZone: "Asia/Shanghai", RemainingActions: 2,
+		UserID: "user_scope", ChatID: "chat_scope", DefaultTimeZone: "Asia/Shanghai", RemainingActions: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +101,8 @@ func TestMCPToolPlaneUsesOfficialInMemoryProtocolAndDefinitionScope(t *testing.T
 	if err != nil || result.Status != ActionSucceeded || string(result.Output) != `{"value":"5"}` {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	if len(calculate.calls) != 1 || calculate.calls[0].ActionID != "action-stable-1" || calculate.calls[0].Attempt != attempt || len(authority.calls) != 2 {
+	if len(calculate.calls) != 1 || calculate.calls[0].ActionID != "action-stable-1" || calculate.calls[0].Attempt != attempt ||
+		calculate.calls[0].UserID != "user_scope" || calculate.calls[0].ChatID != "chat_scope" || len(authority.calls) != 2 {
 		t.Fatalf("action calls=%+v authority=%+v", calculate.calls, authority.calls)
 	}
 	if _, err := session.CallTool(context.Background(), "web_search", json.RawMessage(`{}`), "action-stable-2"); !isToolErrorKind(err, ToolErrorAuthorization) {

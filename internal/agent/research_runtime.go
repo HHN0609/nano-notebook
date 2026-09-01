@@ -34,10 +34,18 @@ var chineseReadCountClaimPattern = regexp.MustCompile(`其中\s*\*{0,2}\d+\s*个
 var englishReadCountClaimPattern = regexp.MustCompile(`(?i)\b(?:of which\s+)?\*{0,2}\d+\*{0,2}\s+(?:were\s+)?successfully read(?:\s+(?:primary\s+)?sources?)?\b`)
 
 type ResearchRuntime struct {
-	base      *PostgresRuntime
-	pool      *pgxpool.Pool
-	prompts   promptcatalog.Catalog
-	workspace objectstore.Store
+	base        *PostgresRuntime
+	pool        *pgxpool.Pool
+	prompts     promptcatalog.Catalog
+	workspace   objectstore.Store
+	toolResults *ToolResultReader
+}
+
+func (r *ResearchRuntime) WithToolResultReader(reader ToolResultReader) *ResearchRuntime {
+	if r != nil && reader.Store != nil && reader.MaximumPageBytes >= 4 {
+		r.toolResults = &reader
+	}
+	return r
 }
 
 func (*ResearchRuntime) InvalidModelResponseRetryLimit() int { return 5 }
@@ -552,6 +560,24 @@ func (r *ResearchRuntime) materializeCompletedStep(ctx context.Context, attempt 
 	if proposal == nil || firstMissingResult(*proposal) >= 0 {
 		return nil
 	}
+	if r.toolResults != nil {
+		var userID, chatID string
+		if err := r.pool.QueryRow(ctx, `
+			select coalesce(run.user_id,product.user_id),coalesce(run.chat_id,product.chat_id)
+			from agent_runs run
+			left join chat_runs product on product.root_agent_run_id=run.id
+			where run.id=$1
+		`, attempt.RunID).Scan(&userID, &chatID); err != nil {
+			return err
+		}
+		hydrated, err := hydrateExternalizedResearchProposal(ctx, *r.toolResults, ToolResultScope{
+			UserID: userID, ChatID: chatID, RunID: attempt.RunID,
+		}, *proposal)
+		if err != nil {
+			return err
+		}
+		proposal = &hydrated
+	}
 	content := buildResearchStepCapsule(*proposal)
 	rawHash := sha256.New()
 	for _, action := range proposal.Actions {
@@ -588,6 +614,55 @@ func (r *ResearchRuntime) materializeCompletedStep(ctx context.Context, attempt 
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func hydrateExternalizedResearchProposal(ctx context.Context, reader ToolResultReader, scope ToolResultScope, proposal AcceptedProposal) (AcceptedProposal, error) {
+	hydrated := AcceptedProposal{DecisionNo: proposal.DecisionNo, Actions: make([]AcceptedAction, len(proposal.Actions))}
+	copy(hydrated.Actions, proposal.Actions)
+	for index := range hydrated.Actions {
+		action := &hydrated.Actions[index]
+		if action.Result == nil || action.Result.Status != ActionSucceeded {
+			continue
+		}
+		var projection ToolResultProjection
+		if json.Unmarshal(action.Result.Output, &projection) != nil || projection.ContentState != ToolResultExternalized || projection.ResultRef == "" {
+			continue
+		}
+		pageScope := scope
+		pageScope.ActionID = action.ActionID
+		pageScope.ToolName = action.Name
+		body := make([]byte, 0, projection.ResultBytes)
+		offset := 0
+		expired := false
+		for {
+			page, err := reader.Read(ctx, pageScope, projection.ResultRef, offset, reader.MaximumPageBytes)
+			if err != nil {
+				if errors.Is(err, ErrToolResultExpired) {
+					expired = true
+					break
+				}
+				return AcceptedProposal{}, err
+			}
+			body = append(body, page.Content...)
+			if page.Complete {
+				break
+			}
+			if page.NextOffset <= offset {
+				return AcceptedProposal{}, ErrToolResultCorrupt
+			}
+			offset = page.NextOffset
+		}
+		if expired {
+			continue
+		}
+		if len(body) != projection.ResultBytes || hashPayload(body) != projection.SHA256 {
+			return AcceptedProposal{}, ErrToolResultCorrupt
+		}
+		copyResult := *action.Result
+		copyResult.Output = json.RawMessage(body)
+		action.Result = &copyResult
+	}
+	return hydrated, nil
 }
 
 func buildResearchStepCapsule(proposal AcceptedProposal) string {
@@ -687,8 +762,13 @@ func materializeResearchEvidence(ctx context.Context, tx pgx.Tx, sessionID, runI
 			return err
 		}
 		if action.Result.Status != ActionSucceeded {
-			_, err := tx.Exec(ctx, `insert into research_evidence_ledger(session_id,url,status,read_run_id,read_action_id,failure_reason) values($1,$2,'failed',$3,$4,$5) on conflict(session_id,url) do update set status=case when research_evidence_ledger.status='read' then 'read' else 'failed' end,read_run_id=excluded.read_run_id,read_action_id=excluded.read_action_id,failure_reason=case when research_evidence_ledger.status='read' then research_evidence_ledger.failure_reason else excluded.failure_reason end,last_seen_at=now()`, sessionID, input.URL, runID, action.ActionID, action.Result.ErrorCode)
+			_, err := tx.Exec(ctx, `insert into research_evidence_ledger(session_id,url,status,read_run_id,read_action_id,failure_reason) values($1,$2,'failed',$3,$4,$5) on conflict(session_id,url) do update set status=case when research_evidence_ledger.status='read' then 'read' else 'failed' end,read_run_id=excluded.read_run_id,read_action_id=excluded.read_action_id,failure_reason=case when research_evidence_ledger.status='read' then research_evidence_ledger.failure_reason else excluded.failure_reason end,last_seen_at=now()`, sessionID, input.URL, runID, action.ActionID, researchActionFailureReason(*action.Result))
 			return err
+		}
+		var projection ToolResultProjection
+		if json.Unmarshal(action.Result.Output, &projection) == nil &&
+			(projection.ContentState == ToolResultNotCached || projection.ContentState == ToolResultExternalized) {
+			return nil
 		}
 		var output readURLOutput
 		if err := json.Unmarshal(action.Result.Output, &output); err != nil {
@@ -721,6 +801,13 @@ func materializeResearchEvidence(ctx context.Context, tx pgx.Tx, sessionID, runI
 		return err
 	}
 	return nil
+}
+
+func researchActionFailureReason(result ActionResult) string {
+	if result.Error != nil {
+		return result.Error.Code
+	}
+	return result.ErrorCode
 }
 
 func maybeCreateResearchRollup(ctx context.Context, tx pgx.Tx, sessionID string, throughDecision int) error {

@@ -2,7 +2,7 @@
 
 ## Status
 
-- **Status:** Proposed
+- **Status:** Implemented
 - **Date:** 2026-09-01
 - **Initial scope:** Deep Research read-only tools
 
@@ -195,3 +195,22 @@ old Runs retain their original checkpoint and projection semantics.
 9. Unit and integration tests cover TTL, pagination, UTF-8 boundaries, hash
    validation, authorization, cache outage, early eviction, and checkpoint
    recovery after expiry.
+
+## Implementation evidence
+
+- The behavior is pinned by `research.executor@14` and `nano.default@21`.
+- Only successful, eligible results larger than the 16 KiB inline limit are
+  externalized. Small results stay inline and side-effecting tools remain
+  ineligible.
+- The authoritative full Planner-to-Executor E2E artifacts, exact cache lifecycle evidence, full
+  before/after messages, and per-layer compression measurements are preserved
+  under `.codex-artifacts/tool-result-cache-vlm-vla-full-e2e-20260901T1747/`.
+- The accepted session used its own completed Planner output without plan
+  substitution: Planner `run_u-zu-2eZb06ZK2JtwXk4gw`, Executor
+  `run__Gn78OUd_28BGBmexFhP5g`.
+- A deliberate Redis restart removed all three ephemeral keys while the
+  Evidence/Capsule/Rollup/report fingerprint and sampled workspace object hash
+  remained unchanged. Permanent PDF and page-aware Source Map integration tests
+  also passed with Redis empty.
+- Layer 1, Layer 2, Layer 3, and cumulative compression are measured separately
+  in both UTF-8 bytes and deterministic estimated tokens.

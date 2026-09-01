@@ -66,6 +66,29 @@ func TestResearchReadURLAndDocumentPagesActionsExposePDFEvidence(t *testing.T) {
 	}
 }
 
+func TestResearchReadActionsCacheLongResultsOnlyForVersion14(t *testing.T) {
+	actions := NewVersionedResearchURLActions(nil, &webReaderStub{}, &acquiringStub{})
+	for _, action := range actions {
+		policy, ok := action.(ToolResultCacheEligibility)
+		if !ok {
+			t.Fatalf("%s has no Tool Result cache eligibility", action.Definition().Name)
+		}
+		if policy.CacheLongToolResults(agentcatalog.MustParseReference("research.executor@13")) {
+			t.Fatalf("%s enabled cache for old Definition", action.Definition().Name)
+		}
+		if !policy.CacheLongToolResults(agentcatalog.MustParseReference("research.executor@14")) {
+			t.Fatalf("%s did not enable cache for v14", action.Definition().Name)
+		}
+	}
+}
+
+func TestSideEffectingSourceImportIsNeverToolResultCacheEligible(t *testing.T) {
+	action := NewSaveURLAsSourceAction(nil)
+	if _, ok := action.(ToolResultCacheEligibility); ok {
+		t.Fatal("save_url_as_source must not externalize a result whose expiry could induce a repeated mutation")
+	}
+}
+
 func TestPinnedPreV8ResearchDefinitionKeepsHTMLOnlyReadURLPath(t *testing.T) {
 	legacy := &webReaderStub{page: webreader.Page{
 		Title: "Legacy HTML", FinalURL: "https://example.com/article", Content: "Legacy evidence.",

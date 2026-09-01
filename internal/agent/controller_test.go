@@ -983,6 +983,44 @@ func TestControllerDerivesActionResultByteBudgetsFromAcceptedCheckpoints(t *test
 	})
 }
 
+func TestControllerExternalizesEligibleLargeResultBeforeCheckpointBudget(t *testing.T) {
+	store := &recordingToolResultStore{}
+	externalizer := testToolResultExternalizer(store)
+	action := &cacheableResultAction{output: json.RawMessage(`{"markdown":"` + strings.Repeat("decision-evidence-", 300) + `"}`)}
+	registry, err := NewActionRegistry(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	runtime.execution.AgentConfigID = "research.executor@14"
+	runtime.execution.UserID = "user_a"
+	runtime.execution.ChatID = "chat_a"
+	runtime.execution.ActionResultByteLimit = 1024
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "cacheable_read", Input: json.RawMessage(`{"key":"paper"}`)}}}},
+		{Final: &models.FinalDraft{Text: "done"}},
+	}}
+
+	controller := NewController(runtime, model, registry).WithToolResultCache(externalizer, 512)
+	if err := controller.Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.envelopes) != 1 {
+		t.Fatalf("cache writes = %d", len(store.envelopes))
+	}
+	prefix, err := LoadCheckpointPrefix(context.Background(), runtime.checkpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := prefix.Proposals[0].Actions[0].Result
+	if result == nil || len(result.Output) > 512 || strings.Contains(string(result.Output), string(action.output)) {
+		t.Fatalf("checkpoint result leaked large body: %#v", result)
+	}
+	if len(runtime.failed) != 0 || len(runtime.published) != 1 {
+		t.Fatalf("failed=%v published=%v", runtime.failed, runtime.published)
+	}
+}
+
 func TestControllerCallsModelAgainWhenProposalWasNotAccepted(t *testing.T) {
 	executionOrder := make([]string, 0, 1)
 	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &executionOrder})
@@ -1275,6 +1313,22 @@ type recordingAction struct {
 	proceed         <-chan struct{}
 	attempts        []Attempt
 	crashReplaySafe bool
+}
+
+type cacheableResultAction struct{ output json.RawMessage }
+
+func (*cacheableResultAction) Definition() models.ActionDefinition {
+	return models.ActionDefinition{Name: "cacheable_read", Description: "Return cacheable read-only data.", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (*cacheableResultAction) ValidateInput(json.RawMessage) error { return nil }
+
+func (a *cacheableResultAction) Execute(context.Context, ActionRequest) (ActionResult, error) {
+	return ActionResult{Status: ActionSucceeded, Output: append(json.RawMessage(nil), a.output...)}, nil
+}
+
+func (*cacheableResultAction) CacheLongToolResults(definition agentcatalog.Reference) bool {
+	return definition.Identity == "research.executor" && definition.Version >= 10
 }
 
 func (a *recordingAction) CrashReplaySafe() bool { return a.crashReplaySafe }

@@ -24,6 +24,8 @@ const (
 type ActionRequest struct {
 	ActionID         string
 	Input            json.RawMessage
+	UserID           string
+	ChatID           string
 	DefaultTimeZone  string
 	Attempt          Attempt
 	Definition       agentcatalog.Reference

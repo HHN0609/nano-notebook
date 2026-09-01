@@ -158,6 +158,7 @@ type ActionTraceOptions struct {
 	InputIdentity  string
 	ResultIdentity string
 	ReplayStager   ReplayStager
+	PrepareResult  func(context.Context, ActionResult) (ActionResult, error)
 }
 
 func InvokeAgentAction(ctx context.Context, tracer *agentobs.Tracer, action Action, logicalActionID string, request ActionRequest, optionValues ...ActionTraceOptions) (ActionResult, error) {
@@ -207,6 +208,9 @@ func InvokeAgentAction(ctx context.Context, tracer *agentobs.Tracer, action Acti
 			}
 		}
 		result, err := action.Execute(callContext, request)
+		if err == nil && options.PrepareResult != nil {
+			result, err = options.PrepareResult(callContext, result)
+		}
 		if err == nil && options.ReplayStager != nil {
 			payload, payloadErr := EncodeActionResultReplay(name, logicalActionID, result)
 			if payloadErr != nil {

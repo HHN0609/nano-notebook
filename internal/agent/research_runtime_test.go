@@ -47,6 +47,68 @@ func TestCanonicalizeResearchEvidenceClaimsUsesLedgerAuthority(t *testing.T) {
 	}
 }
 
+func TestHydrateExternalizedResearchProposalRestoresScopedBody(t *testing.T) {
+	body := []byte(`{"engine":"lightweight","final_url":"https://example.com/paper","markdown":"full primary evidence"}`)
+	envelope := testToolResultEnvelope(body)
+	projection, err := json.Marshal(ToolResultProjection{
+		ContentState: ToolResultExternalized, ResultRef: envelope.ResultRef,
+		ResultBytes: len(body), SHA256: envelope.SHA256, ReadTool: ToolResultReadTool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := AcceptedProposal{DecisionNo: 1, Actions: []AcceptedAction{{
+		ActionID: envelope.ActionID, Name: "read_url", Result: &ActionResult{Status: ActionSucceeded, Output: projection},
+	}}}
+	reader := ToolResultReader{Store: &recordingToolResultStore{envelopes: []ToolResultEnvelope{envelope}}, MaximumPageBytes: 11, Now: testToolResultNow}
+
+	hydrated, err := hydrateExternalizedResearchProposal(context.Background(), reader, ToolResultScope{
+		UserID: envelope.UserID, ChatID: envelope.ChatID, RunID: envelope.RunID,
+	}, proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(hydrated.Actions[0].Result.Output); got != string(body) {
+		t.Fatalf("hydrated body=%q want=%q", got, body)
+	}
+	if got := string(proposal.Actions[0].Result.Output); got == string(body) {
+		t.Fatal("hydration mutated the checkpoint projection")
+	}
+}
+
+func TestHydrateExternalizedResearchProposalKeepsProjectionAfterExpiry(t *testing.T) {
+	projection, err := json.Marshal(ToolResultProjection{
+		ContentState: ToolResultExternalized, ResultRef: "tr_expired_result",
+		ResultBytes: 100000, SHA256: strings.Repeat("a", 64), ReadTool: ToolResultReadTool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := AcceptedProposal{DecisionNo: 1, Actions: []AcceptedAction{{
+		ActionID: "decision:1/action:0", Name: "read_url", Result: &ActionResult{Status: ActionSucceeded, Output: projection},
+	}}}
+	reader := ToolResultReader{Store: &recordingToolResultStore{}, MaximumPageBytes: 16, Now: testToolResultNow}
+
+	hydrated, err := hydrateExternalizedResearchProposal(context.Background(), reader, ToolResultScope{
+		UserID: "user_a", ChatID: "chat_a", RunID: "run_a",
+	}, proposal)
+	if err != nil {
+		t.Fatalf("expired ephemeral result must not block compaction: %v", err)
+	}
+	if got := string(hydrated.Actions[0].Result.Output); got != string(projection) {
+		t.Fatalf("expired projection changed: %s", got)
+	}
+}
+
+func TestResearchActionFailureReasonUsesStructuredDomainErrorCode(t *testing.T) {
+	result := ActionResult{Status: ActionDomainError, Error: &ActionError{
+		Kind: "domain", Code: "read_url_failed", Message: "safe", Suggestion: "try another source",
+	}}
+	if got := researchActionFailureReason(result); got != "read_url_failed" {
+		t.Fatalf("failure reason=%q", got)
+	}
+}
+
 func TestCanonicalizeResearchEvidenceClaimsDoesNotAddOperationalBoilerplate(t *testing.T) {
 	got, corrections := canonicalizeResearchEvidenceClaims("# Decision\n\nAdopt A for the pilot.", 40, 25, 12, 3)
 	if corrections != 0 || got != "# Decision\n\nAdopt A for the pilot." {

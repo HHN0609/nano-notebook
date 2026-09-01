@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 )
@@ -67,6 +68,10 @@ func NewVersionedResearchURLActions(reader *ResearchURLContentReader, legacyHTML
 }
 
 func (*readURLAction) CrashReplaySafe() bool { return true }
+
+func (*readURLAction) CacheLongToolResults(definition agentcatalog.Reference) bool {
+	return definition.Identity == "research.executor" && definition.Version >= 14
+}
 
 func (*readURLAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
@@ -219,6 +224,10 @@ type readDocumentPagesOutput struct {
 }
 
 func (*readDocumentPagesAction) CrashReplaySafe() bool { return true }
+
+func (*readDocumentPagesAction) CacheLongToolResults(definition agentcatalog.Reference) bool {
+	return definition.Identity == "research.executor" && definition.Version >= 14
+}
 
 func (*readDocumentPagesAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{

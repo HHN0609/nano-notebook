@@ -56,6 +56,26 @@ var actionErrorCatalog = map[string]ActionError{
 		Kind: "domain", Code: "read_url_failed", Retryable: true,
 		Message: "The requested page could not be read.", Suggestion: "Verify the URL or use another accessible source.",
 	},
+	"tool_result_expired": {
+		Kind: "domain", Code: "tool_result_expired",
+		Message: "The recent Tool Result is no longer available.", Suggestion: "Repeat the original read-only Tool Call if the content is still needed.",
+	},
+	"tool_result_unauthorized": {
+		Kind: "authorization", Code: "tool_result_unauthorized",
+		Message: "The Tool Result does not belong to the current user, Chat, and Run.", Suggestion: "Use only result references returned in this Research Run.",
+	},
+	"tool_result_corrupt": {
+		Kind: "infrastructure", Code: "tool_result_corrupt",
+		Message: "The cached Tool Result failed integrity validation.", Suggestion: "Repeat the original read-only Tool Call if the content is still needed.",
+	},
+	"tool_result_range_invalid": {
+		Kind: "domain", Code: "tool_result_range_invalid",
+		Message: "The requested Tool Result byte range is invalid.", Suggestion: "Use offset zero or the exact next_offset returned by the previous page.",
+	},
+	"tool_result_read_failed": {
+		Kind: "infrastructure", Code: "tool_result_read_failed", Retryable: true,
+		Message: "The recent Tool Result cache could not be read.", Suggestion: "Retry once or repeat the original read-only Tool Call.",
+	},
 	"skill_not_allowed": {
 		Kind: "domain", Code: "skill_not_allowed",
 		Message: "The requested skill is not allowed for this Agent.", Suggestion: "Use one of the skills exposed to the current Agent.",

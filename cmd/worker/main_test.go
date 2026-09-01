@@ -40,8 +40,14 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	if config.WebReaderURL != "http://127.0.0.1:8085" {
 		t.Fatalf("Web Reader URL default=%q", config.WebReaderURL)
 	}
-	if config.AgentRelease.String() != "nano.default@16" {
+	if config.AgentRelease.String() != "nano.default@21" {
 		t.Fatalf("Agent release default=%q", config.AgentRelease)
+	}
+	if config.ToolResultRedisURL != "redis://:nano-tool-results@127.0.0.1:56379/0" ||
+		config.ToolResultCacheTTL != 30*time.Minute || config.ToolResultInlineBytes != 16*1024 ||
+		config.ToolResultPageBytes != 16*1024 || config.ToolResultMaximumBytes != 2*1024*1024 ||
+		config.ToolResultOperationTimeout != 750*time.Millisecond {
+		t.Fatalf("Tool Result cache defaults=%#v", config)
 	}
 }
 

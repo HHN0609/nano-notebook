@@ -176,6 +176,8 @@ type MCPToolAuthority interface {
 type AttemptToolScope struct {
 	Definition       agentcatalog.Reference
 	Attempt          Attempt
+	UserID           string
+	ChatID           string
 	DefaultTimeZone  string
 	RemainingActions int
 	Deadline         time.Time
@@ -185,6 +187,8 @@ type attemptToolContext struct {
 	handle           string
 	definition       agentcatalog.Definition
 	attempt          Attempt
+	userID           string
+	chatID           string
 	defaultTimeZone  string
 	remainingActions int
 	deadline         time.Time
@@ -262,6 +266,7 @@ func (h *MCPToolHost) OpenAttempt(ctx context.Context, scope AttemptToolScope) (
 	}
 	record := attemptToolContext{
 		handle: handle, definition: definition, attempt: scope.Attempt,
+		userID: scope.UserID, chatID: scope.ChatID,
 		defaultTimeZone: scope.DefaultTimeZone, remainingActions: scope.RemainingActions,
 		deadline: scope.Deadline, tools: byName,
 	}
@@ -427,6 +432,11 @@ func (a mcpSessionAction) Execute(ctx context.Context, request ActionRequest) (A
 	return a.session.CallTool(ctx, a.tool.Name, request.Input, request.ActionID)
 }
 
+func (a mcpSessionAction) CacheLongToolResults(definition agentcatalog.Reference) bool {
+	policy, ok := a.tool.Action.(ToolResultCacheEligibility)
+	return ok && policy.CacheLongToolResults(definition)
+}
+
 func (s *MCPAttemptSession) CallTool(ctx context.Context, name string, input json.RawMessage, actionID string) (toolResult ActionResult, callErr error) {
 	if s == nil || s.host == nil || s.clientSession == nil {
 		return ActionResult{}, &ToolCallError{Kind: ToolErrorInvariant, Code: "attempt_session_closed"}
@@ -541,7 +551,8 @@ func (h *MCPToolHost) executeMCPTool(ctx context.Context, request *mcp.CallToolR
 		return mcpToolErrorResult(ToolErrorSchema, "tool_input_invalid"), nil
 	}
 	result, err := tool.Action.Execute(ctx, ActionRequest{
-		ActionID: actionID, Input: input, DefaultTimeZone: record.defaultTimeZone, Attempt: record.attempt,
+		ActionID: actionID, Input: input, UserID: record.userID, ChatID: record.chatID,
+		DefaultTimeZone: record.defaultTimeZone, Attempt: record.attempt,
 		Definition: record.definition.Reference(), DefinitionSHA256: record.definition.SHA256,
 	})
 	if err != nil {

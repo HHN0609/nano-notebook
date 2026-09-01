@@ -1,0 +1,76 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"regexp"
+
+	"github.com/huangxinxinyu/nano-notebook/internal/models"
+)
+
+var toolResultReferencePattern = regexp.MustCompile(`^tr_[A-Za-z0-9_-]{12,128}$`)
+
+type readToolResultAction struct{ reader ToolResultReader }
+
+type readToolResultInput struct {
+	ResultRef string `json:"result_ref"`
+	Offset    int    `json:"offset,omitempty"`
+	MaxBytes  int    `json:"max_bytes,omitempty"`
+}
+
+func NewReadToolResultAction(reader ToolResultReader) Action {
+	return &readToolResultAction{reader: reader}
+}
+
+func (*readToolResultAction) CrashReplaySafe() bool { return true }
+
+func (*readToolResultAction) Definition() models.ActionDefinition {
+	return models.ActionDefinition{
+		Name:        "read_tool_result",
+		Description: "Read one bounded byte range from a recent externalized read-only Tool Result. Reads do not extend its expiry.",
+		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["result_ref"],"properties":{"result_ref":{"type":"string","pattern":"^tr_[A-Za-z0-9_-]{12,128}$"},"offset":{"type":"integer","minimum":0},"max_bytes":{"type":"integer","minimum":1}}}`),
+	}
+}
+
+func (*readToolResultAction) ValidateInput(raw json.RawMessage) error {
+	_, err := decodeReadToolResultInput(raw)
+	return err
+}
+
+func (a *readToolResultAction) Execute(ctx context.Context, request ActionRequest) (ActionResult, error) {
+	input, err := decodeReadToolResultInput(request.Input)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	page, err := a.reader.Read(ctx, ToolResultScope{
+		UserID: request.UserID, ChatID: request.ChatID, RunID: request.Attempt.RunID,
+	}, input.ResultRef, input.Offset, input.MaxBytes)
+	if err != nil {
+		code := "tool_result_read_failed"
+		switch {
+		case errors.Is(err, ErrToolResultExpired):
+			code = "tool_result_expired"
+		case errors.Is(err, ErrToolResultUnauthorized):
+			code = "tool_result_unauthorized"
+		case errors.Is(err, ErrToolResultCorrupt):
+			code = "tool_result_corrupt"
+		case errors.Is(err, ErrToolResultInvalidOffset), errors.Is(err, ErrToolResultInvalidPageSize):
+			code = "tool_result_range_invalid"
+		}
+		return ActionResult{Status: ActionDomainError, ErrorCode: code}, nil
+	}
+	output, err := json.Marshal(page)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	return ActionResult{Status: ActionSucceeded, Output: output}, nil
+}
+
+func decodeReadToolResultInput(raw json.RawMessage) (readToolResultInput, error) {
+	var input readToolResultInput
+	if decodeExactJSON(raw, &input) != nil || !toolResultReferencePattern.MatchString(input.ResultRef) || input.Offset < 0 || input.MaxBytes < 0 {
+		return readToolResultInput{}, errors.New("invalid read_tool_result input")
+	}
+	return input, nil
+}

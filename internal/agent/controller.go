@@ -91,12 +91,14 @@ type FinalPreparationTraceRuntime interface {
 }
 
 type Controller struct {
-	runtime       ControllerRuntime
-	model         DecisionModel
-	registry      *ActionRegistry
-	mcpHost       *MCPToolHost
-	mcpDefinition agentcatalog.Reference
-	metrics       *TaskMetricsRecorder
+	runtime                   ControllerRuntime
+	model                     DecisionModel
+	registry                  *ActionRegistry
+	mcpHost                   *MCPToolHost
+	mcpDefinition             agentcatalog.Reference
+	metrics                   *TaskMetricsRecorder
+	toolResults               *ToolResultExternalizer
+	toolResultInlineByteLimit int
 }
 
 // WithControllerMetrics attaches the Sprint 12 task-lifecycle metrics
@@ -104,6 +106,12 @@ type Controller struct {
 // constructor below.
 func (c *Controller) WithControllerMetrics(recorder *TaskMetricsRecorder) *Controller {
 	c.metrics = recorder
+	return c
+}
+
+func (c *Controller) WithToolResultCache(externalizer *ToolResultExternalizer, inlineByteLimit int) *Controller {
+	c.toolResults = externalizer
+	c.toolResultInlineByteLimit = inlineByteLimit
 	return c
 }
 
@@ -144,6 +152,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 	if c.mcpHost != nil {
 		toolSession, err = c.mcpHost.OpenAttempt(ctx, AttemptToolScope{
 			Definition: c.mcpDefinition, Attempt: attempt, DefaultTimeZone: execution.TimeZone,
+			UserID: execution.UserID, ChatID: execution.ChatID,
 			RemainingActions: execution.ActionLimit, Deadline: execution.DeadlineAt,
 		})
 		if err != nil {
@@ -658,7 +667,7 @@ func (c *Controller) executeDelegationAction(
 	if !ok {
 		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), fmt.Errorf("accepted unknown MCP Tool %q", action.Name))
 	}
-	request := ActionRequest{ActionID: action.ActionID, Input: action.Input, DefaultTimeZone: execution.TimeZone, Attempt: attempt}
+	request := c.actionRequest(execution, action)
 	var result ActionResult
 	var err error
 	if tracer != nil {
@@ -705,11 +714,12 @@ func (c *Controller) executeAction(
 	if err != nil {
 		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
 	}
-	request := ActionRequest{ActionID: action.ActionID, Input: action.Input, DefaultTimeZone: execution.TimeZone, Attempt: attempt}
+	request := c.actionRequest(execution, action)
 	options, err := c.actionTraceOptions(ctx, tracer, attempt, action)
 	if err != nil {
 		return c.handleRuntimeError(ctx, attempt, err)
 	}
+	options.PrepareResult = c.toolResultPreparer(execution, action, executor)
 	result, err := c.invokeActionExecutor(ctx, tracer, executor, action, request, options)
 	if err != nil {
 		return c.actionExecutionError(ctx, attempt, err)
@@ -778,11 +788,12 @@ func (c *Controller) executeParallelBatch(
 		if err != nil {
 			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
 		}
-		request := ActionRequest{ActionID: action.ActionID, Input: action.Input, DefaultTimeZone: execution.TimeZone, Attempt: attempt}
+		request := c.actionRequest(execution, action)
 		options, err := c.actionTraceOptions(ctx, tracer, attempt, action)
 		if err != nil {
 			return c.handleRuntimeError(ctx, attempt, err)
 		}
+		options.PrepareResult = c.toolResultPreparer(execution, action, executor)
 		prepared = append(prepared, preparedAction{action: action, executor: executor, request: request, options: options})
 	}
 
@@ -855,6 +866,46 @@ func (c *Controller) executeParallelBatch(
 	return nil
 }
 
+type ToolResultCacheEligibility interface {
+	CacheLongToolResults(agentcatalog.Reference) bool
+}
+
+func (c *Controller) actionRequest(execution Execution, action AcceptedAction) ActionRequest {
+	request := ActionRequest{
+		ActionID: action.ActionID, Input: action.Input, UserID: execution.UserID, ChatID: execution.ChatID,
+		DefaultTimeZone: execution.TimeZone, Attempt: execution.Attempt,
+	}
+	if reference, err := agentcatalog.ParseReference(execution.AgentConfigID); err == nil {
+		request.Definition = reference
+	}
+	return request
+}
+
+func (c *Controller) externalizeToolResult(ctx context.Context, execution Execution, action AcceptedAction, executor Action, result ActionResult) ActionResult {
+	if c.toolResults == nil || c.toolResultInlineByteLimit < 1 || result.Status != ActionSucceeded {
+		return result
+	}
+	reference, err := agentcatalog.ParseReference(execution.AgentConfigID)
+	if err != nil {
+		return result
+	}
+	eligibility, ok := executor.(ToolResultCacheEligibility)
+	if !ok || !eligibility.CacheLongToolResults(reference) {
+		return result
+	}
+	projected, _ := c.toolResults.Externalize(ctx, ToolResultScope{
+		UserID: execution.UserID, ChatID: execution.ChatID, RunID: execution.RunID,
+		ActionID: action.ActionID, ToolName: action.Name,
+	}, result, c.toolResultInlineByteLimit)
+	return projected
+}
+
+func (c *Controller) toolResultPreparer(execution Execution, action AcceptedAction, executor Action) func(context.Context, ActionResult) (ActionResult, error) {
+	return func(ctx context.Context, result ActionResult) (ActionResult, error) {
+		return c.externalizeToolResult(ctx, execution, action, executor, result), nil
+	}
+}
+
 func (c *Controller) resolveActionExecutor(session *MCPAttemptSession, name string) (Action, error) {
 	if session == nil {
 		executor, ok := c.registry.Resolve(name)
@@ -894,7 +945,11 @@ func (c *Controller) actionTraceOptions(ctx context.Context, tracer *agentobs.Tr
 
 func (c *Controller) invokeActionExecutor(ctx context.Context, tracer *agentobs.Tracer, executor Action, action AcceptedAction, request ActionRequest, options ActionTraceOptions) (ActionResult, error) {
 	if tracer == nil {
-		return executor.Execute(ctx, request)
+		result, err := executor.Execute(ctx, request)
+		if err == nil && options.PrepareResult != nil {
+			result, err = options.PrepareResult(ctx, result)
+		}
+		return result, err
 	}
 	return InvokeAgentAction(ctx, tracer, executor, action.ActionID, request, options)
 }

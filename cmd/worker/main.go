@@ -72,6 +72,13 @@ type workerConfig struct {
 	ReplayStagingS3                objectstore.S3Config
 	SourceS3                       objectstore.S3Config
 	ResearchWorkspaceS3            objectstore.S3Config
+	ToolResultRedisURL             string
+	ToolResultKeyPrefix            string
+	ToolResultCacheTTL             time.Duration
+	ToolResultInlineBytes          int
+	ToolResultPageBytes            int
+	ToolResultMaximumBytes         int
+	ToolResultOperationTimeout     time.Duration
 	SourcePurgeLease               time.Duration
 	SourcePurgePoll                time.Duration
 	QdrantURL                      string
@@ -303,6 +310,24 @@ func main() {
 	})
 
 	modelClient := models.NewBifrostClient(env("NANO_BIFROST_URL", "http://127.0.0.1:56666"), &http.Client{}, 32*1024)
+	toolResultStore, err := agent.NewRedisToolResultStore(agent.RedisToolResultStoreConfig{
+		URL: config.ToolResultRedisURL, KeyPrefix: config.ToolResultKeyPrefix,
+		OperationTimeout: config.ToolResultOperationTimeout, MaximumValueBytes: config.ToolResultMaximumBytes,
+	})
+	if err != nil {
+		slog.Error("Tool Result cache configuration invalid", "error", err)
+		os.Exit(1)
+	}
+	toolResultStore.WithMetrics(agent.NewToolResultCacheMetrics(metricsCatalog))
+	defer toolResultStore.Close()
+	if err := toolResultStore.CheckReady(ctx); err != nil {
+		slog.Warn("Tool Result cache unavailable; long read-only results will degrade to not_cached previews", "error", err)
+	}
+	go toolResultStore.ObserveRedisEvictions(ctx, 15*time.Second)
+	toolResultExternalizer := &agent.ToolResultExternalizer{
+		Store:  toolResultStore,
+		Policy: agent.ToolResultCachePolicy{TTL: config.ToolResultCacheTTL, MaximumValueBytes: config.ToolResultMaximumBytes},
+	}
 	traceBridge, err := otelbridge.New(otel.Tracer("nano-agent-observability"))
 	if err != nil {
 		slog.Error("Agent Trace telemetry bridge unavailable", "error", err)
@@ -468,6 +493,10 @@ func main() {
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
 	webSearchTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewWebSearchAction(searchProvider))
 	readSkillTool := agent.NewReadSkillAction(definitionCatalog, skillCatalog)
+	toolResultReader := agent.ToolResultReader{
+		Store: toolResultStore, MaximumPageBytes: config.ToolResultPageBytes,
+	}
+	readToolResultTool := agent.NewReadToolResultAction(toolResultReader)
 	researchURLTools := agent.NewVersionedResearchURLActions(researchURLReader, webReaderAdapter, webReaderAdapter)
 	readURLTool := agent.NewResearchDeduplicatingAction(db.Pool(), researchURLTools[0])
 	readDocumentPagesTool := researchURLTools[1]
@@ -479,7 +508,7 @@ func main() {
 	}
 	registryTools := []agent.Action{
 		calculateTool, currentTimeTool, rewriteTodoListTool, searchEvidenceTool, updateTodoStatusTool,
-		webSearchTool, readSkillTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool,
+		webSearchTool, readSkillTool, readToolResultTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool,
 	}
 	registryTools = append(registryTools, workspaceTools...)
 	registry, err := agent.NewActionRegistry(registryTools...)
@@ -495,6 +524,7 @@ func main() {
 		agent.MCPToolRegistration{Action: updateTodoStatusTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readSkillTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: readToolResultTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readURLTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readDocumentPagesTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: saveURLAsSourceTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
@@ -525,7 +555,8 @@ func main() {
 		os.Exit(1)
 	}
 	mcpToolHost.WithMetrics(taskMetrics)
-	controller := agent.NewMCPController(runtime, modelClient, registry, mcpToolHost, chatRoot).WithControllerMetrics(taskMetrics)
+	controller := agent.NewMCPController(runtime, modelClient, registry, mcpToolHost, chatRoot).
+		WithControllerMetrics(taskMetrics).WithToolResultCache(toolResultExternalizer, config.ToolResultInlineBytes)
 	researchPlanningRuntime, err := agent.NewResearchPlanningRuntime(db.Pool(), promptCatalog, skillCatalog)
 	if err != nil {
 		slog.Error("Research Planning Runtime invalid", "error", err)
@@ -536,12 +567,13 @@ func main() {
 		slog.Error("Research Runtime invalid", "error", err)
 		os.Exit(1)
 	}
+	researchRuntime.WithToolResultReader(toolResultReader)
 	researchPlanningController := agent.NewMCPController(
 		researchPlanningRuntime, modelClient, registry, mcpToolHost, researchPlannerRoot,
-	).WithControllerMetrics(taskMetrics)
+	).WithControllerMetrics(taskMetrics).WithToolResultCache(toolResultExternalizer, config.ToolResultInlineBytes)
 	researchController := agent.NewMCPController(
 		researchRuntime, modelClient, registry, mcpToolHost, deepResearchRoot,
-	).WithControllerMetrics(taskMetrics)
+	).WithControllerMetrics(taskMetrics).WithToolResultCache(toolResultExternalizer, config.ToolResultInlineBytes)
 	studioExecutor, err := agent.NewStudioDefinitionExecutor(db.Pool(), runtime, modelClient, registry, mcpToolHost, definitionCatalog, taskMetrics)
 	if err != nil {
 		slog.Error("Studio Executor invalid", "error", err)
@@ -795,7 +827,7 @@ func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@16"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@21"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}
@@ -832,6 +864,26 @@ func loadWorkerConfig() (workerConfig, error) {
 		return workerConfig{}, err
 	}
 	workspaceUseTLS, err := workerEnvBool("NANO_RESEARCH_WORKSPACE_S3_USE_TLS", false)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	toolResultCacheTTL, err := workerEnvDuration("NANO_TOOL_RESULT_CACHE_TTL", 30*time.Minute)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	toolResultOperationTimeout, err := workerEnvDuration("NANO_TOOL_RESULT_REDIS_OPERATION_TIMEOUT", 750*time.Millisecond)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	toolResultInlineBytes, err := workerEnvInt("NANO_TOOL_RESULT_INLINE_BYTES", 16*1024)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	toolResultPageBytes, err := workerEnvInt("NANO_TOOL_RESULT_PAGE_BYTES", 16*1024)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	toolResultMaximumBytes, err := workerEnvInt("NANO_TOOL_RESULT_MAXIMUM_BYTES", 2*1024*1024)
 	if err != nil {
 		return workerConfig{}, err
 	}
@@ -968,7 +1020,12 @@ func loadWorkerConfig() (workerConfig, error) {
 			Bucket:          env("NANO_RESEARCH_WORKSPACE_S3_BUCKET", "nano-research-workspaces"),
 			Region:          env("NANO_RESEARCH_WORKSPACE_S3_REGION", "us-east-1"), UseTLS: workspaceUseTLS,
 		},
-		SourcePurgeLease: sourcePurgeLease, SourcePurgePoll: sourcePurgePoll,
+		ToolResultRedisURL:  env("NANO_TOOL_RESULT_REDIS_URL", "redis://:nano-tool-results@127.0.0.1:56379/0"),
+		ToolResultKeyPrefix: env("NANO_TOOL_RESULT_REDIS_KEY_PREFIX", "nano:tool-result:v1:"),
+		ToolResultCacheTTL:  toolResultCacheTTL, ToolResultInlineBytes: toolResultInlineBytes,
+		ToolResultPageBytes: toolResultPageBytes, ToolResultMaximumBytes: toolResultMaximumBytes,
+		ToolResultOperationTimeout: toolResultOperationTimeout,
+		SourcePurgeLease:           sourcePurgeLease, SourcePurgePoll: sourcePurgePoll,
 		QdrantURL:                    env("NANO_QDRANT_URL", "http://127.0.0.1:56333"),
 		QdrantAPIKey:                 strings.TrimSpace(os.Getenv("NANO_QDRANT_API_KEY")),
 		QdrantCollection:             env("NANO_QDRANT_COLLECTION", "nano-source-evidence-gemini-2-768-v1"),
@@ -1014,6 +1071,9 @@ func loadWorkerConfig() (workerConfig, error) {
 		strings.TrimSpace(config.SourceS3.Bucket) == "" || strings.TrimSpace(config.ResearchWorkspaceS3.Endpoint) == "" ||
 		strings.TrimSpace(config.ResearchWorkspaceS3.AccessKeyID) == "" || strings.TrimSpace(config.ResearchWorkspaceS3.SecretAccessKey) == "" ||
 		strings.TrimSpace(config.ResearchWorkspaceS3.Bucket) == "" || config.SourcePurgeLease <= 0 || config.SourcePurgePoll <= 0 ||
+		strings.TrimSpace(config.ToolResultRedisURL) == "" || strings.TrimSpace(config.ToolResultKeyPrefix) == "" ||
+		config.ToolResultCacheTTL != 30*time.Minute || config.ToolResultInlineBytes < 512 || config.ToolResultPageBytes < 4 ||
+		config.ToolResultMaximumBytes < config.ToolResultInlineBytes || config.ToolResultOperationTimeout <= 0 ||
 		strings.TrimSpace(config.QdrantURL) == "" || strings.TrimSpace(config.QdrantCollection) == "" || config.QdrantDenseDimensions <= 0 ||
 		(config.RetrievalBootstrapMode != "development" && config.RetrievalBootstrapMode != "required") ||
 		strings.TrimSpace(config.RetrievalBootstrapConfigPath) == "" ||

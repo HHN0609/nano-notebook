@@ -38,6 +38,43 @@ func TestCatalogEveryMetricNameIsValid(t *testing.T) {
 	}
 }
 
+func TestToolResultCacheMetricsUseOnlyBoundedOperationalLabels(t *testing.T) {
+	reg := NewRegistry()
+	catalog := NewCatalog(reg)
+	catalog.ToolResultCacheOperations.WithLabelValues("read", "hit").Inc()
+	catalog.ToolResultCacheBytes.WithLabelValues("served").Add(1024)
+	catalog.ToolResultCacheDuration.WithLabelValues("read", "hit").Observe(0.01)
+	catalog.ToolResultCacheRedisEvictedKeys.Set(1)
+
+	want := map[string][]string{
+		"nano_tool_result_cache_operations_total":      {"operation", "outcome"},
+		"nano_tool_result_cache_bytes_total":           {"direction"},
+		"nano_tool_result_cache_duration_seconds":      {"operation", "outcome"},
+		"nano_tool_result_cache_redis_evictions_total": nil,
+	}
+	families, err := reg.Prometheus().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		labels, ok := want[family.GetName()]
+		if !ok || len(family.Metric) == 0 {
+			continue
+		}
+		got := make([]string, 0, len(family.Metric[0].Label))
+		for _, pair := range family.Metric[0].Label {
+			got = append(got, pair.GetName())
+		}
+		if len(got) != len(labels) {
+			t.Fatalf("metric %q labels=%v want=%v", family.GetName(), got, labels)
+		}
+		delete(want, family.GetName())
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing Tool Result cache metrics: %v", want)
+	}
+}
+
 func TestTraceAnalyticsPipelineMetricsUseOnlyBoundedOperationalLabels(t *testing.T) {
 	reg := NewRegistry()
 	catalog := NewCatalog(reg)

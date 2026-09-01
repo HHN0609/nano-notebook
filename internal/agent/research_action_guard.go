@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -38,6 +39,11 @@ func (a *researchDeduplicatingAction) ValidateInput(raw json.RawMessage) error {
 func (a *researchDeduplicatingAction) CrashReplaySafe() bool {
 	policy, ok := a.action.(CrashReplayPolicy)
 	return ok && policy.CrashReplaySafe()
+}
+
+func (a *researchDeduplicatingAction) CacheLongToolResults(definition agentcatalog.Reference) bool {
+	policy, ok := a.action.(ToolResultCacheEligibility)
+	return ok && policy.CacheLongToolResults(definition)
 }
 
 func (a *researchDeduplicatingAction) Execute(ctx context.Context, request ActionRequest) (ActionResult, error) {

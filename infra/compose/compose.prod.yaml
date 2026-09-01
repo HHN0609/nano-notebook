@@ -72,6 +72,7 @@ services:
       NANO_RESEARCH_WORKSPACE_S3_SECRET_ACCESS_KEY: nano-password
       NANO_RESEARCH_WORKSPACE_S3_BUCKET: nano-research-workspaces
       NANO_RESEARCH_WORKSPACE_S3_USE_TLS: "false"
+      NANO_TOOL_RESULT_REDIS_URL: redis://:nano-tool-results@tool-result-cache:6379/0
       NANO_QDRANT_COLLECTION: nano-source-evidence-gemini-2-768-v1
       NANO_QDRANT_DENSE_DIMENSIONS: "768"
       NANO_QDRANT_URL: http://qdrant:6333
@@ -93,12 +94,25 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      tool-result-cache:
+        condition: service_healthy
       minio-init:
         condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
       web-reader:
         condition: service_started
+    restart: unless-stopped
+
+  tool-result-cache:
+    image: redis:8.2-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--requirepass", "nano-tool-results", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    mem_limit: 320m
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a nano-tool-results ping 2>/dev/null | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     restart: unless-stopped
 
   collector:

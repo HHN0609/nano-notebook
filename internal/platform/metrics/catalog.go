@@ -32,13 +32,17 @@ type Catalog struct {
 	TaskEndToEnd      *prometheus.HistogramVec
 
 	// Errors and HTTP/SSE edge (PRD section 4.5 / 6.3)
-	ErrorTotal            *prometheus.CounterVec
-	RetrievalDegraded     *prometheus.CounterVec
-	HTTPRequests          *prometheus.CounterVec
-	HTTPRequestDuration   *prometheus.HistogramVec
-	SSEConnectionDuration *prometheus.HistogramVec
-	SSEEventsSent         *prometheus.CounterVec
-	LabelRejected         *prometheus.CounterVec
+	ErrorTotal                      *prometheus.CounterVec
+	RetrievalDegraded               *prometheus.CounterVec
+	HTTPRequests                    *prometheus.CounterVec
+	HTTPRequestDuration             *prometheus.HistogramVec
+	SSEConnectionDuration           *prometheus.HistogramVec
+	SSEEventsSent                   *prometheus.CounterVec
+	LabelRejected                   *prometheus.CounterVec
+	ToolResultCacheOperations       *prometheus.CounterVec
+	ToolResultCacheBytes            *prometheus.CounterVec
+	ToolResultCacheDuration         *prometheus.HistogramVec
+	ToolResultCacheRedisEvictedKeys prometheus.Gauge
 
 	// Runtime and leak surfaces (PRD section 4.6 / 6.4)
 	RunHubSubscribers                          prometheus.Gauge
@@ -121,6 +125,14 @@ func NewCatalog(reg *Registry) *Catalog {
 		"SSE stream connection lifetime.", []string{"stream", "close_reason"}, SSEConnectionDurationBuckets)
 	c.SSEEventsSent = mustCounterVec(reg, "nano_sse_events_sent_total",
 		"SSE events sent by stream and event type.", []string{"stream", "event"})
+	c.ToolResultCacheOperations = mustCounterVec(reg, "nano_tool_result_cache_operations_total",
+		"Ephemeral Tool Result cache operations by bounded operation and outcome.", []string{"operation", "outcome"})
+	c.ToolResultCacheBytes = mustCounterVec(reg, "nano_tool_result_cache_bytes_total",
+		"Complete Tool Result body bytes stored in or served from the ephemeral cache.", []string{"direction"})
+	c.ToolResultCacheDuration = mustHistogramVec(reg, "nano_tool_result_cache_duration_seconds",
+		"Ephemeral Tool Result cache operation latency.", []string{"operation", "outcome"}, HTTPDurationBuckets)
+	c.ToolResultCacheRedisEvictedKeys = mustGauge(reg, "nano_tool_result_cache_redis_evictions_total",
+		"Redis server evicted_keys sampled from INFO stats for the Tool Result cache instance.")
 
 	c.RunHubSubscribers = mustGauge(reg, "nano_runhub_subscribers",
 		"Open SSE run-hub subscriber channels across all Runs.")
