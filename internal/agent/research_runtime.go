@@ -17,6 +17,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
+	"github.com/huangxinxinyu/nano-notebook/internal/skillcatalog"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -37,6 +38,7 @@ type ResearchRuntime struct {
 	base      *PostgresRuntime
 	pool      *pgxpool.Pool
 	prompts   promptcatalog.Catalog
+	skills    skillcatalog.Catalog
 	workspace objectstore.Store
 }
 
@@ -56,6 +58,11 @@ func (*ResearchRuntime) PrepareDecisionResponse(_ context.Context, execution Exe
 func isSourceFirstResearchExecution(execution Execution) bool {
 	reference, err := agentcatalog.ParseReference(execution.AgentConfigID)
 	return err == nil && reference.Identity == "research.executor" && reference.Version >= 9
+}
+
+func isThresholdResearchExecution(execution Execution) bool {
+	reference, err := agentcatalog.ParseReference(execution.AgentConfigID)
+	return err == nil && reference.Identity == "research.executor" && reference.Version >= 10
 }
 
 func isResearchCompletionSignal(value string) bool {
@@ -84,7 +91,11 @@ func NewResearchRuntime(pool *pgxpool.Pool, prompts promptcatalog.Catalog, works
 	if len(workspace) == 1 {
 		workspaceStore = workspace[0]
 	}
-	return &ResearchRuntime{base: NewPostgresRuntime(pool, "", nil), pool: pool, prompts: prompts, workspace: workspaceStore}, nil
+	skills, err := skillcatalog.LoadEmbedded()
+	if err != nil {
+		return nil, err
+	}
+	return &ResearchRuntime{base: NewPostgresRuntime(pool, "", nil), pool: pool, prompts: prompts, skills: skills, workspace: workspaceStore}, nil
 }
 
 func (r *ResearchRuntime) Load(ctx context.Context, attempt Attempt) (Execution, error) {
@@ -120,7 +131,16 @@ func (r *ResearchRuntime) AppendCheckpoint(ctx context.Context, attempt Attempt,
 		return Checkpoint{}, err
 	}
 	if checkpoint.Kind == CheckpointActionResult {
-		if err := r.materializeCompletedStep(ctx, attempt, checkpoint.DecisionNo); err != nil {
+		threshold, err := r.isThresholdResearchRun(ctx, attempt.RunID)
+		if err != nil {
+			return Checkpoint{}, err
+		}
+		if threshold {
+			err = r.materializeCompletedResearchEvidence(ctx, attempt, checkpoint.DecisionNo)
+		} else {
+			err = r.materializeCompletedStep(ctx, attempt, checkpoint.DecisionNo)
+		}
+		if err != nil {
 			return Checkpoint{}, err
 		}
 	}
@@ -128,6 +148,10 @@ func (r *ResearchRuntime) AppendCheckpoint(ctx context.Context, attempt Attempt,
 }
 
 func (r *ResearchRuntime) BuildDecisionRequest(ctx context.Context, execution Execution, prefix CheckpointPrefix, definitions []models.ActionDefinition) (models.ModelRequest, error) {
+	return r.buildDecisionRequest(ctx, execution, prefix, definitions, nil, nil)
+}
+
+func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Execution, prefix CheckpointPrefix, definitions []models.ActionDefinition, archivalOverride map[int]researchArchivalCapsule, taskMemoryOverride []researchTaskMemory) (models.ModelRequest, error) {
 	if prefix.Final != nil {
 		return models.ModelRequest{}, errors.New("Research Final Draft does not require another decision")
 	}
@@ -158,6 +182,13 @@ func (r *ResearchRuntime) BuildDecisionRequest(ctx context.Context, execution Ex
 	}
 	system := strings.TrimSpace(executorPrompt.Content) + "\n\nFinal report requirements:\n" + strings.TrimSpace(reporterPrompt.Content)
 	system += "\n\n" + researchExecutionControlPrompt(execution.ActionBatchLimit)
+	workflow, err := researchWorkflowSkillPrompt(execution, r.skills)
+	if err != nil {
+		return models.ModelRequest{}, err
+	}
+	if workflow != "" {
+		system += "\n\nMandatory Research workflow Skill:\n" + workflow
+	}
 	if isSourceFirstResearchExecution(execution) {
 		projection, err := r.loadResearchSourceImportProjection(ctx, execution.RunID)
 		if err != nil {
@@ -186,7 +217,12 @@ func (r *ResearchRuntime) BuildDecisionRequest(ctx context.Context, execution Ex
 		{Role: models.RoleSystem, Content: system},
 		{Role: models.RoleUser, Content: "Original request:\n" + originalRequest + "\n\nAccepted Research Plan (immutable):\n" + planJSON},
 	}
-	memory, err := r.loadResearchMemory(ctx, sessionID, len(definitions) > 0)
+	var memory string
+	if isThresholdResearchExecution(execution) {
+		memory, err = r.loadResearchOperationalMemory(ctx, sessionID, len(definitions) > 0)
+	} else {
+		memory, err = r.loadResearchMemory(ctx, sessionID, len(definitions) > 0)
+	}
 	if err != nil {
 		return models.ModelRequest{}, err
 	}
@@ -200,7 +236,38 @@ func (r *ResearchRuntime) BuildDecisionRequest(ctx context.Context, execution Ex
 	if memory != "" {
 		messages = append(messages, models.ModelMessage{Role: models.RoleAssistant, Content: memory})
 	}
-	if includeExactResearchSuffix(definitions, duplicateSteps) {
+	if isThresholdResearchExecution(execution) {
+		projected, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
+			MessageID: execution.InputMessageID, Content: originalRequest,
+			Runs: []ChatLaneRun{{RunID: execution.RunID, Prefix: &prefix}},
+		}}}, nil)
+		if err != nil {
+			return models.ModelRequest{}, err
+		}
+		projectedTrajectory, err := researchTrajectoryWithoutTodoControl(projected[1:])
+		if err != nil {
+			return models.ModelRequest{}, err
+		}
+		archived := archivalOverride
+		if archived == nil {
+			archived, err = r.loadResearchArchivalCapsules(ctx, execution.RunID)
+			if err != nil {
+				return models.ModelRequest{}, err
+			}
+		}
+		memories := taskMemoryOverride
+		if memories == nil {
+			memories, err = r.loadResearchTaskMemories(ctx, execution.RunID, archived)
+			if err != nil {
+				return models.ModelRequest{}, err
+			}
+		}
+		trajectory, err := applyResearchTaskMemories(projectedTrajectory, archived, memories)
+		if err != nil {
+			return models.ModelRequest{}, err
+		}
+		messages = append(messages, FlattenContextUnits(trajectory)...)
+	} else if includeExactResearchSuffix(definitions, duplicateSteps) {
 		projected, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
 			MessageID: execution.InputMessageID, Content: originalRequest,
 			Runs: []ChatLaneRun{{RunID: execution.RunID, Prefix: &prefix}},
@@ -219,6 +286,17 @@ func (r *ResearchRuntime) BuildDecisionRequest(ctx context.Context, execution Ex
 		Model: execution.Model, Messages: messages, ActionDefinitions: cloneActionDefinitions(definitions),
 		InvocationPolicy: execution.ModelInvocation,
 	}, nil
+}
+
+func researchWorkflowSkillPrompt(execution Execution, skills skillcatalog.Catalog) (string, error) {
+	if !isThresholdResearchExecution(execution) {
+		return "", nil
+	}
+	skill, ok := skills.Resolve("skill.research-workflow", 1)
+	if !ok {
+		return "", errors.New("Research workflow Skill skill.research-workflow@1 is missing")
+	}
+	return strings.TrimSpace(skill.Body), nil
 }
 
 func includeExactResearchSuffix(definitions []models.ActionDefinition, duplicateSteps int) bool {
@@ -537,6 +615,49 @@ func (r *ResearchRuntime) resolvePrompt(reference string) (promptcatalog.PromptV
 	return prompt, nil
 }
 
+func (r *ResearchRuntime) isThresholdResearchRun(ctx context.Context, runID string) (bool, error) {
+	var identity string
+	var version int
+	if err := r.pool.QueryRow(ctx, `
+		select definition_identity,definition_version from agent_runs where id=$1
+	`, runID).Scan(&identity, &version); err != nil {
+		return false, err
+	}
+	return identity == "research.executor" && version >= 10, nil
+}
+
+func (r *ResearchRuntime) materializeCompletedResearchEvidence(ctx context.Context, attempt Attempt, decisionNo int) error {
+	prefix, err := r.base.LoadCheckpointPrefix(ctx, attempt)
+	if err != nil {
+		return err
+	}
+	var proposal *AcceptedProposal
+	for index := range prefix.Proposals {
+		if prefix.Proposals[index].DecisionNo == decisionNo {
+			proposal = &prefix.Proposals[index]
+			break
+		}
+	}
+	if proposal == nil || firstMissingResult(*proposal) >= 0 {
+		return nil
+	}
+	tx, err := r.base.workerTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var sessionID string
+	if err := tx.QueryRow(ctx, `select id from research_sessions where execution_run_id=$1 and status='running'`, attempt.RunID).Scan(&sessionID); err != nil {
+		return err
+	}
+	for _, action := range proposal.Actions {
+		if err := materializeResearchEvidence(ctx, tx, sessionID, attempt.RunID, action); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *ResearchRuntime) materializeCompletedStep(ctx context.Context, attempt Attempt, decisionNo int) error {
 	prefix, err := r.base.LoadCheckpointPrefix(ctx, attempt)
 	if err != nil {
@@ -776,39 +897,49 @@ func combineResearchRollup(previous string, parts []string) string {
 }
 
 func (r *ResearchRuntime) loadResearchMemory(ctx context.Context, sessionID string, includeDiscovered bool) (string, error) {
+	return r.loadResearchMemoryProjection(ctx, sessionID, includeDiscovered, true)
+}
+
+func (r *ResearchRuntime) loadResearchOperationalMemory(ctx context.Context, sessionID string, includeDiscovered bool) (string, error) {
+	return r.loadResearchMemoryProjection(ctx, sessionID, includeDiscovered, false)
+}
+
+func (r *ResearchRuntime) loadResearchMemoryProjection(ctx context.Context, sessionID string, includeDiscovered, includeLegacyArtifacts bool) (string, error) {
 	var builder strings.Builder
-	var rollup string
-	var rolledThrough int
-	if err := r.pool.QueryRow(ctx, `select content_markdown,last_decision_no from research_rollups where session_id=$1 order by version desc limit 1`, sessionID).Scan(&rollup, &rolledThrough); err == nil {
-		builder.WriteString("Research rollup:\n" + rollup + "\n\n")
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return "", err
-	}
-	rows, err := r.pool.Query(ctx, `select decision_no,content_markdown from research_step_capsules where session_id=$1 and decision_no>$2 order by decision_no desc limit 24`, sessionID, rolledThrough)
-	if err != nil {
-		return "", err
-	}
-	type capsule struct {
-		decision int
-		content  string
-	}
-	var capsules []capsule
-	for rows.Next() {
-		var item capsule
-		if err := rows.Scan(&item.decision, &item.content); err != nil {
+	if includeLegacyArtifacts {
+		var rollup string
+		var rolledThrough int
+		if err := r.pool.QueryRow(ctx, `select content_markdown,last_decision_no from research_rollups where session_id=$1 order by version desc limit 1`, sessionID).Scan(&rollup, &rolledThrough); err == nil {
+			builder.WriteString("Research rollup:\n" + rollup + "\n\n")
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return "", err
+		}
+		rows, err := r.pool.Query(ctx, `select decision_no,content_markdown from research_step_capsules where session_id=$1 and decision_no>$2 order by decision_no desc limit 24`, sessionID, rolledThrough)
+		if err != nil {
+			return "", err
+		}
+		type capsule struct {
+			decision int
+			content  string
+		}
+		var capsules []capsule
+		for rows.Next() {
+			var item capsule
+			if err := rows.Scan(&item.decision, &item.content); err != nil {
+				rows.Close()
+				return "", err
+			}
+			capsules = append(capsules, item)
+		}
+		if err := rows.Err(); err != nil {
 			rows.Close()
 			return "", err
 		}
-		capsules = append(capsules, item)
-	}
-	if err := rows.Err(); err != nil {
 		rows.Close()
-		return "", err
-	}
-	rows.Close()
-	sort.Slice(capsules, func(i, j int) bool { return capsules[i].decision < capsules[j].decision })
-	for _, item := range capsules {
-		fmt.Fprintf(&builder, "Step Capsule %d:\n%s\n\n", item.decision, item.content)
+		sort.Slice(capsules, func(i, j int) bool { return capsules[i].decision < capsules[j].decision })
+		for _, item := range capsules {
+			fmt.Fprintf(&builder, "Step Capsule %d:\n%s\n\n", item.decision, item.content)
+		}
 	}
 	evidenceRows, err := r.pool.Query(ctx, `select url,coalesce(final_url,''),title,status from research_evidence_ledger where session_id=$1 order by first_seen_at,url`, sessionID)
 	if err != nil {

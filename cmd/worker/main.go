@@ -39,6 +39,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceadmission"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourcemap"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprojection"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcepurge"
@@ -96,6 +97,9 @@ type workerConfig struct {
 	DocumentRenderDPI              int
 	DocumentRenderMaxPixelsPerPage int64
 	DocumentRenderMaxOutputBytes   int64
+	SourceMapParserURL             string
+	SourceMapParserServiceToken    string
+	SourceMapParserTimeout         time.Duration
 	WebReaderURL                   string
 	WebReaderServiceToken          string
 	WebReaderTimeout               time.Duration
@@ -441,6 +445,14 @@ func main() {
 		slog.Error("document renderer Adapter invalid", "error", err)
 		os.Exit(1)
 	}
+	sourceMapParser, err := sourcemap.NewHTTPAdapter(sourcemap.HTTPConfig{
+		Endpoint: config.SourceMapParserURL, ServiceToken: config.SourceMapParserServiceToken,
+		HTTPClient: &http.Client{Timeout: config.SourceMapParserTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+	})
+	if err != nil {
+		slog.Error("Source Map parser Adapter invalid", "error", err)
+		os.Exit(1)
+	}
 	researchPDFExtractor := documentreading.NewPDFExtractor(modelClient, documentreading.PDFExtractorConfig{
 		VisionModel: config.SourceVisionModel, VisionPromptVersion: config.SourceVisionPromptVersion,
 		MaxVisionPages: config.SourceMaxVisionPages,
@@ -466,6 +478,7 @@ func main() {
 	rewriteTodoListTool := agent.NewRewriteTodoListAction(runtime)
 	updateTodoStatusTool := agent.NewUpdateTodoStatusAction(runtime)
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
+	inspectSourceTool := agent.NewInspectSourceAction(agent.NewSourceInspectionService(db.Pool(), sourceObjects))
 	webSearchTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewWebSearchAction(searchProvider))
 	readSkillTool := agent.NewReadSkillAction(definitionCatalog, skillCatalog)
 	researchURLTools := agent.NewVersionedResearchURLActions(researchURLReader, webReaderAdapter, webReaderAdapter)
@@ -478,7 +491,7 @@ func main() {
 		os.Exit(1)
 	}
 	registryTools := []agent.Action{
-		calculateTool, currentTimeTool, rewriteTodoListTool, searchEvidenceTool, updateTodoStatusTool,
+		calculateTool, currentTimeTool, rewriteTodoListTool, inspectSourceTool, searchEvidenceTool, updateTodoStatusTool,
 		webSearchTool, readSkillTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool,
 	}
 	registryTools = append(registryTools, workspaceTools...)
@@ -491,6 +504,7 @@ func main() {
 		agent.MCPToolRegistration{Action: calculateTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: currentTimeTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: rewriteTodoListTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: inspectSourceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: updateTodoStatusTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
@@ -625,6 +639,15 @@ func main() {
 			RenderMaxOutputBytes: config.DocumentRenderMaxOutputBytes,
 		},
 	)
+	sourceMapMaterializer, err := sourcemap.NewMaterializer(
+		sourceMapParser, sourcemap.NewPostgresRepository(db.Pool()), sourceObjects,
+		sourcemap.Config{MaxPages: sourcemap.MaxParserPages, MaxOutputBytes: sourcemap.MaxParserOutput},
+	)
+	if err != nil {
+		slog.Error("Source Map Materializer invalid", "error", err)
+		os.Exit(1)
+	}
+	sourceProcessor.WithSourceMap(sourceMapMaterializer)
 	admissionProviderID := "not-configured"
 	if config.BraveSearchAPIKey != "" {
 		admissionProviderID = "brave"
@@ -795,7 +818,7 @@ func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@16"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@17"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}
@@ -880,6 +903,10 @@ func loadWorkerConfig() (workerConfig, error) {
 		return workerConfig{}, err
 	}
 	documentRenderTimeout, err := workerEnvDuration("NANO_DOCUMENT_RENDER_TIMEOUT", 100*time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	sourceMapParserTimeout, err := workerEnvDuration("NANO_SOURCE_MAP_PARSER_TIMEOUT", 120*time.Second)
 	if err != nil {
 		return workerConfig{}, err
 	}
@@ -987,6 +1014,9 @@ func loadWorkerConfig() (workerConfig, error) {
 		DocumentRenderTimeout:        documentRenderTimeout, DocumentRenderMaxPages: documentRenderMaxPages,
 		DocumentRenderDPI: documentRenderDPI, DocumentRenderMaxPixelsPerPage: int64(documentRenderMaxPixels),
 		DocumentRenderMaxOutputBytes: int64(documentRenderMaxOutput),
+		SourceMapParserURL:           strings.TrimRight(env("NANO_SOURCE_MAP_PARSER_URL", "http://127.0.0.1:8086"), "/"),
+		SourceMapParserServiceToken:  env("NANO_SOURCE_MAP_PARSER_SERVICE_TOKEN", "nano-local-source-map-parser-token"),
+		SourceMapParserTimeout:       sourceMapParserTimeout,
 		WebReaderURL:                 strings.TrimRight(env("NANO_WEB_READER_URL", "http://127.0.0.1:8085"), "/"),
 		WebReaderServiceToken:        env("NANO_WEB_READER_SERVICE_TOKEN", "nano-local-reader-token"),
 		WebReaderTimeout:             webReaderTimeout,
@@ -1026,6 +1056,8 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.DocumentRenderMaxPages < 1 || config.DocumentRenderMaxPages > 500 || config.DocumentRenderDPI < 72 || config.DocumentRenderDPI > 300 ||
 		config.DocumentRenderMaxPixelsPerPage < 1 || config.DocumentRenderMaxPixelsPerPage > 100_000_000 ||
 		config.DocumentRenderMaxOutputBytes < 1 || config.DocumentRenderMaxOutputBytes > 2<<30 ||
+		strings.TrimSpace(config.SourceMapParserURL) == "" || strings.TrimSpace(config.SourceMapParserServiceToken) == "" ||
+		config.SourceMapParserTimeout <= 0 || config.SourceMapParserTimeout > 5*time.Minute ||
 		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
 		(config.SourceAdmissionMode != sourceadmission.ModeShadow && config.SourceAdmissionMode != sourceadmission.ModeEnforcement) ||
 		config.SourceAdmissionQueryTimeout <= 0 || config.SourceAdmissionQueryTimeout > config.HTTPTimeout ||

@@ -7,7 +7,20 @@ import (
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/skillcatalog"
 )
+
+func TestResearchWorkflowSkillIsMandatoryOnlyForThresholdRuntime(t *testing.T) {
+	catalog := skillcatalog.MustLoadEmbedded()
+	guidance, err := researchWorkflowSkillPrompt(Execution{AgentConfigID: "research.executor@10"}, catalog)
+	if err != nil || !strings.Contains(guidance, "rewrite_todo_list") || !strings.Contains(guidance, "navigation only") {
+		t.Fatalf("guidance=%q err=%v", guidance, err)
+	}
+	legacy, err := researchWorkflowSkillPrompt(Execution{AgentConfigID: "research.executor@9"}, catalog)
+	if err != nil || legacy != "" {
+		t.Fatalf("legacy guidance=%q err=%v", legacy, err)
+	}
+}
 
 func TestBuildResearchRoutingDirectivePreventsRepeatedDiscoveryAndReads(t *testing.T) {
 	directive := buildResearchRoutingDirective(41, 5, 1,

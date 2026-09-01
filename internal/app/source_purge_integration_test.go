@@ -24,6 +24,7 @@ func TestSourcePurgeProcessorDeletesCustodyBeforeCompleting(t *testing.T) {
 	const objectKey = "sources/src_purge/original/3333333333333333333333333333333333333333333333333333333333333333"
 	const artifactKey = "sources/src_purge/evidence/evr_purge/normalized.json"
 	const viewerKey = "sources/src_purge/evidence/evr_purge/viewer/page-000001.png"
+	const sourceMapKey = "sources/src_purge/evidence/evr_purge/source-map/smap_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
 	if err := objects.Put(context.Background(), objectKey, []byte("purge me")); err != nil {
 		t.Fatal(err)
 	}
@@ -31,6 +32,9 @@ func TestSourcePurgeProcessorDeletesCustodyBeforeCompleting(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := objects.Put(context.Background(), viewerKey, []byte("rendered purge me")); err != nil {
+		t.Fatal(err)
+	}
+	if err := objects.Put(context.Background(), sourceMapKey, []byte("Source Map purge me")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := api.db.Pool().Exec(context.Background(), `
@@ -46,6 +50,19 @@ func TestSourcePurgeProcessorDeletesCustodyBeforeCompleting(t *testing.T) {
 			revision_id,source_id,notebook_id,ordinal,width,height,media_type,byte_size,content_sha256,filename,object_key,render_config_id
 		) values('evr_purge','src_purge',$1,1,1,1,'image/png',17,$2,'page-000001.png',$3,'pdfium-v1')
 	`, notebookID, strings.Repeat("d", 64), viewerKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_maps(
+			id,source_id,notebook_id,revision_id,original_sha256,artifact_object_key,
+			artifact_sha256,artifact_bytes,parser_identity,parser_version,parser_policy_id,
+			navigation_kind,confidence,page_count,entry_count
+		) values(
+			'smap_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','src_purge',$1,'evr_purge',$2,$3,
+			$4,19,'pymupdf4llm','1.28.2','pdf-structure-no-ocr-v1',
+			'inferred_sections','medium',1,1
+		)
+	`, notebookID, strings.Repeat("3", 64), sourceMapKey, strings.Repeat("4", 64)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := api.db.Pool().Exec(context.Background(), `

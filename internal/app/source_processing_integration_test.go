@@ -1,12 +1,15 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -25,6 +28,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourcemap"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprojection"
 	"github.com/jackc/pgx/v5"
@@ -280,6 +284,248 @@ func TestPDFSourceProcessorPublishesCoordinateEvidenceAndReady(t *testing.T) {
 	if state != source.StateReady || coordinateKind != "pdf_region" {
 		t.Fatalf("state=%q coordinate=%q", state, coordinateKind)
 	}
+}
+
+func TestPDFSourceProcessorPersistsImmutableSourceMapBeforeReady(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-map-processing@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-map-processing")
+	ownerID := sourceTestUserID(t, api, "source-map-processing@example.com")
+	payload := evidenceTestPDF("Source Map pipeline evidence.")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_map", "srcjob_processing_map", source.FormatPDF, payload)
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	digest := sha256.Sum256(payload)
+	parser := sourceMapParserStub{result: sourcemap.ParseResult{Document: sourcemap.Document{
+		SchemaVersion: 1, SourceID: "src_processing_map", InputSHA256: hex.EncodeToString(digest[:]),
+		ParserIdentity: sourcemap.ParserIdentity, ParserVersion: "1.28.2", ParserPolicyID: sourcemap.ParserPolicyNoOCR,
+		PageCount: 1, Outline: []sourcemap.OutlineEntry{{Level: 1, Title: "Source Map", Page: 1}},
+		Pages: []sourcemap.Page{{Ordinal: 1, Width: 612, Height: 792, Blocks: []sourcemap.Block{{
+			ReadingOrder: 0, Kind: "heading", Text: "Source Map", HeadingLevel: 1,
+			BBox: sourcemap.BBox{X0: 72, Y0: 72, X1: 300, Y1: 100},
+		}}}},
+	}, CanonicalJSON: []byte(`{"parser":"source-map"}`), SHA256: strings.Repeat("b", 64)}}
+	materializer, err := sourcemap.NewMaterializer(parser, sourcemap.NewPostgresRepository(api.db.Pool()), objects, sourcemap.Config{MaxPages: 500, MaxOutputBytes: 16 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := evidenceViewerPNG(t, 64, 32)
+	processor := sourceprocessing.NewProcessorWithExtractorTraceAndRenderer(
+		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api),
+		sourceprocessing.NewNativeExtractor(nil, sourceprocessing.NativeExtractorConfig{}), fixedDocumentRenderer{page: page}, nil,
+		sourceprocessing.Config{ExtractionConfigID: "extract-map-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+			RenderConfigID: "pdfium-v1", RenderMaxPages: 10, RenderDPI: 144, RenderMaxPixelsPerPage: 1_000_000, RenderMaxOutputBytes: 1 << 20},
+	).WithSourceMap(materializer)
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatalf("ProcessLease: %v", err)
+	}
+	var state source.State
+	var mapID, revisionID, mapObjectKey, artifactHash, navigation, confidence string
+	var artifactBytes, pageCount, entryCount int
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select source.state,m.id,m.revision_id,m.artifact_object_key,m.artifact_sha256,
+			m.artifact_bytes,m.navigation_kind,m.confidence,m.page_count,m.entry_count
+		from source_sources source join source_maps m on m.source_id=source.id
+		where source.id='src_processing_map'
+	`).Scan(&state, &mapID, &revisionID, &mapObjectKey, &artifactHash, &artifactBytes, &navigation, &confidence, &pageCount, &entryCount); err != nil {
+		t.Fatal(err)
+	}
+	mapPayload, err := objects.Get(context.Background(), mapObjectKey, 16<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapDigest := sha256.Sum256(mapPayload)
+	if state != source.StateReady || !strings.HasPrefix(mapID, "smap_") || revisionID == "" ||
+		artifactHash != hex.EncodeToString(mapDigest[:]) || artifactBytes != len(mapPayload) ||
+		navigation != "embedded_outline" || confidence != "high" || pageCount != 1 || entryCount != 1 ||
+		strings.Contains(mapObjectKey, "Source Map pipeline evidence") {
+		t.Fatalf("state/map=%q %q %q %q %d %q %q %d %d", state, mapID, mapObjectKey, artifactHash, artifactBytes, navigation, confidence, pageCount, entryCount)
+	}
+}
+
+func TestPDFSourceProcessorParserFailurePersistsPageSamplesAndKeepsSourceReady(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-map-fallback@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-map-fallback")
+	ownerID := sourceTestUserID(t, api, "source-map-fallback@example.com")
+	payload := evidenceTestPDF("Beginning evidence.", "Middle evidence.", "Ending evidence.")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_map_fallback", "srcjob_processing_map_fallback", source.FormatPDF, payload)
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	materializer, err := sourcemap.NewMaterializer(sourceMapParserStub{err: errors.New("parser unavailable")},
+		sourcemap.NewPostgresRepository(api.db.Pool()), objects, sourcemap.Config{MaxPages: 500, MaxOutputBytes: 16 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := evidenceViewerPNG(t, 64, 32)
+	processor := sourceprocessing.NewProcessorWithExtractorTraceAndRenderer(
+		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api),
+		sourceprocessing.NewNativeExtractor(nil, sourceprocessing.NativeExtractorConfig{}),
+		fixedDocumentRenderer{pages: [][]byte{page, page, page}}, nil,
+		sourceprocessing.Config{ExtractionConfigID: "extract-map-fallback-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+			RenderConfigID: "pdfium-v1", RenderMaxPages: 10, RenderDPI: 144, RenderMaxPixelsPerPage: 1_000_000, RenderMaxOutputBytes: 1 << 20},
+	).WithSourceMap(materializer)
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatalf("ProcessLease: %v", err)
+	}
+	var state source.State
+	var revisionID, objectKeyMap, artifactSHA string
+	var artifactBytes int
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select source.state,m.revision_id,m.artifact_object_key,m.artifact_sha256,m.artifact_bytes
+		from source_sources source join source_maps m on m.source_id=source.id
+		where source.id='src_processing_map_fallback'
+	`).Scan(&state, &revisionID, &objectKeyMap, &artifactSHA, &artifactBytes); err != nil {
+		t.Fatal(err)
+	}
+	mapPayload, err := objects.Get(context.Background(), objectKeyMap, 16<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := sourcemap.DecodeArtifact(mapPayload, sourcemap.ArtifactIdentity{
+		SourceID: "src_processing_map_fallback", RevisionID: revisionID, SHA256: artifactSHA, Bytes: artifactBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != source.StateReady || decoded.NavigationKind != sourcemap.NavigationPageSamples || decoded.Confidence != sourcemap.ConfidenceLow ||
+		decoded.PageCount != 3 || len(decoded.Entries) != 3 || decoded.ParserVersion != "unavailable" ||
+		len(decoded.Warnings) != 1 || !strings.Contains(decoded.Warnings[0], "parser_unavailable") {
+		t.Fatalf("state=%s fallback=%+v", state, decoded)
+	}
+}
+
+func TestPDFSourceProcessorWithLiveSidecarPersistsParsedSourceMap(t *testing.T) {
+	parserURL := strings.TrimSpace(os.Getenv("NANO_TEST_SOURCE_MAP_PARSER_URL"))
+	parserToken := strings.TrimSpace(os.Getenv("NANO_TEST_SOURCE_MAP_PARSER_TOKEN"))
+	if parserURL == "" || parserToken == "" {
+		t.Skip("live Source Map parser URL and token are required")
+	}
+	api := newTestAPI(t)
+	owner := api.register(t, "source-map-live-sidecar@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-map-live-sidecar")
+	ownerID := sourceTestUserID(t, api, "source-map-live-sidecar@example.com")
+	payload := evidenceTestPDFWithOutline("Live PyMuPDF4LLM parser evidence.")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_live_map", "srcjob_processing_live_map", source.FormatPDF, payload)
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	parser, err := sourcemap.NewHTTPAdapter(sourcemap.HTTPConfig{
+		Endpoint: parserURL, ServiceToken: parserToken, HTTPClient: &http.Client{Timeout: 30 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	materializer, err := sourcemap.NewMaterializer(parser, sourcemap.NewPostgresRepository(api.db.Pool()), objects,
+		sourcemap.Config{MaxPages: 500, MaxOutputBytes: 16 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := evidenceViewerPNG(t, 64, 32)
+	processor := sourceprocessing.NewProcessorWithExtractorTraceAndRenderer(
+		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api),
+		sourceprocessing.NewNativeExtractor(nil, sourceprocessing.NativeExtractorConfig{}), fixedDocumentRenderer{page: page}, nil,
+		sourceprocessing.Config{ExtractionConfigID: "extract-live-map-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+			RenderConfigID: "pdfium-v1", RenderMaxPages: 10, RenderDPI: 144, RenderMaxPixelsPerPage: 1_000_000, RenderMaxOutputBytes: 1 << 20},
+	).WithSourceMap(materializer)
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatalf("ProcessLease with live parser: %v", err)
+	}
+	var state source.State
+	var parserIdentity, parserVersion, navigation, objectKeyMap string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select source.state,m.parser_identity,m.parser_version,m.navigation_kind,m.artifact_object_key
+		from source_sources source join source_maps m on m.source_id=source.id
+		where source.id='src_processing_live_map'
+	`).Scan(&state, &parserIdentity, &parserVersion, &navigation, &objectKeyMap); err != nil {
+		t.Fatal(err)
+	}
+	mapPayload, err := objects.Get(context.Background(), objectKeyMap, 16<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != source.StateReady || parserIdentity != sourcemap.ParserIdentity || parserVersion != "1.28.2" ||
+		navigation != string(sourcemap.NavigationEmbeddedOutline) || !bytes.Contains(mapPayload, []byte("Live PyMuPDF4LLM parser evidence")) {
+		t.Fatalf("state/parser/navigation=%s %s@%s %s map=%s", state, parserIdentity, parserVersion, navigation, mapPayload)
+	}
+}
+
+func evidenceTestPDFWithOutline(text string) []byte {
+	return evidenceTestPDFWithOutlineAtPage([]string{text}, "Abstract", 1)
+}
+
+func evidenceTestPDFWithOutlineAtPage(pageTexts []string, title string, outlinePage int) []byte {
+	if len(pageTexts) == 0 || outlinePage < 1 || outlinePage > len(pageTexts) {
+		panic("invalid outlined PDF fixture")
+	}
+	outlineObject := 4 + 2*len(pageTexts)
+	outlineItemObject := outlineObject + 1
+	objects := make([]string, outlineItemObject)
+	objects[0] = fmt.Sprintf("<< /Type /Catalog /Pages 2 0 R /Outlines %d 0 R /PageMode /UseOutlines >>", outlineObject)
+	kids := make([]string, 0, len(pageTexts))
+	for index := range pageTexts {
+		kids = append(kids, fmt.Sprintf("%d 0 R", 4+index*2))
+	}
+	objects[1] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), len(pageTexts))
+	objects[2] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+	for index, text := range pageTexts {
+		pageObject := 4 + index*2
+		contentObject := pageObject + 1
+		escaped := strings.NewReplacer("\\", "\\\\", "(", "\\(", ")", "\\)").Replace(text)
+		content := ""
+		if escaped != "" {
+			content = "BT /F1 12 Tf 72 720 Td (" + escaped + ") Tj ET"
+		}
+		objects[pageObject-1] = fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", contentObject)
+		objects[contentObject-1] = fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content)
+	}
+	title = strings.NewReplacer("\\", "\\\\", "(", "\\(", ")", "\\)").Replace(title)
+	objects[outlineObject-1] = fmt.Sprintf("<< /Type /Outlines /First %d 0 R /Last %d 0 R /Count 1 >>", outlineItemObject, outlineItemObject)
+	objects[outlineItemObject-1] = fmt.Sprintf("<< /Title (%s) /Parent %d 0 R /Dest [%d 0 R /Fit] >>",
+		title, outlineObject, 4+(outlinePage-1)*2)
+	var document bytes.Buffer
+	document.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objects)+1)
+	for index, object := range objects {
+		offsets[index+1] = document.Len()
+		fmt.Fprintf(&document, "%d 0 obj\n%s\nendobj\n", index+1, object)
+	}
+	xref := document.Len()
+	fmt.Fprintf(&document, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for index := 1; index < len(offsets); index++ {
+		fmt.Fprintf(&document, "%010d 00000 n \n", offsets[index])
+	}
+	fmt.Fprintf(&document, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
+	return document.Bytes()
+}
+
+type sourceMapParserStub struct {
+	result sourcemap.ParseResult
+	err    error
+}
+
+func (s sourceMapParserStub) ParsePDF(context.Context, sourcemap.ParseRequest, []byte) (sourcemap.ParseResult, error) {
+	return s.result, s.err
 }
 
 func TestPDFSourceProcessorCallsVisionOnlyForNativeTextlessPages(t *testing.T) {

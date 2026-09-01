@@ -40,7 +40,11 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	if config.WebReaderURL != "http://127.0.0.1:8085" {
 		t.Fatalf("Web Reader URL default=%q", config.WebReaderURL)
 	}
-	if config.AgentRelease.String() != "nano.default@16" {
+	if config.SourceMapParserURL != "http://127.0.0.1:8086" || config.SourceMapParserTimeout != 120*time.Second ||
+		config.SourceMapParserServiceToken != "nano-local-source-map-parser-token" {
+		t.Fatalf("Source Map parser defaults=%q/%s/%q", config.SourceMapParserURL, config.SourceMapParserTimeout, config.SourceMapParserServiceToken)
+	}
+	if config.AgentRelease.String() != "nano.default@17" {
 		t.Fatalf("Agent release default=%q", config.AgentRelease)
 	}
 }
@@ -231,6 +235,9 @@ func TestLoadWorkerConfigIncludesKafkaTraceAndPurgeSettings(t *testing.T) {
 	t.Setenv("NANO_DOCUMENT_RENDER_DPI", "144")
 	t.Setenv("NANO_DOCUMENT_RENDER_MAX_PIXELS_PER_PAGE", "3000000")
 	t.Setenv("NANO_DOCUMENT_RENDER_MAX_OUTPUT_BYTES", "4194304")
+	t.Setenv("NANO_SOURCE_MAP_PARSER_URL", "http://source-map-parser.internal:8086/")
+	t.Setenv("NANO_SOURCE_MAP_PARSER_SERVICE_TOKEN", "source-map-parser-secret")
+	t.Setenv("NANO_SOURCE_MAP_PARSER_TIMEOUT", "95s")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_BYTES", "1048576")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_RUNES", "200000")
 	t.Setenv("NANO_SOURCE_ADMISSION_MODE", "enforcement")
@@ -289,6 +296,8 @@ func TestLoadWorkerConfigIncludesKafkaTraceAndPurgeSettings(t *testing.T) {
 		config.DocumentRenderConfigID != "pdfium-lo-v7" || config.DocumentRenderTimeout != 70*time.Second ||
 		config.DocumentRenderMaxPages != 25 || config.DocumentRenderDPI != 144 || config.DocumentRenderMaxPixelsPerPage != 3_000_000 ||
 		config.DocumentRenderMaxOutputBytes != 4<<20 ||
+		config.SourceMapParserURL != "http://source-map-parser.internal:8086" || config.SourceMapParserServiceToken != "source-map-parser-secret" ||
+		config.SourceMapParserTimeout != 95*time.Second ||
 		config.SourceProcessingMaxBytes != 1048576 || config.SourceProcessingMaxRunes != 200000 ||
 		config.SourceAdmissionMode != sourceadmission.ModeEnforcement || config.SourceAdmissionQueryTimeout != 3*time.Second ||
 		config.AgentInteractiveConcurrency != 6 || config.SourceProcessingConcurrency != 4 ||

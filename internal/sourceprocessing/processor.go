@@ -18,6 +18,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceadmission"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourcemap"
 	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -96,11 +97,16 @@ type Processor struct {
 	renderer   documentrender.Adapter
 	traceSink  TraceSink
 	admission  admissionService
+	sourceMap  sourceMapMaterializer
 	config     Config
 }
 
 type admissionService interface {
 	Qualify(context.Context, sourcejobs.Lease, source.Source, string, normalize.Artifact) (sourceadmission.Qualification, error)
+}
+
+type sourceMapMaterializer interface {
+	Materialize(context.Context, sourcemap.MaterializeRequest) (sourcemap.Record, error)
 }
 
 func NewProcessor(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, config Config) *Processor {
@@ -128,6 +134,13 @@ func NewProcessorWithExtractorTraceAndRenderer(pool *pgxpool.Pool, queue queue, 
 func (p *Processor) WithAdmission(service admissionService) *Processor {
 	if p != nil {
 		p.admission = service
+	}
+	return p
+}
+
+func (p *Processor) WithSourceMap(materializer sourceMapMaterializer) *Processor {
+	if p != nil {
+		p.sourceMap = materializer
 	}
 	return p
 }
@@ -201,6 +214,14 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (r
 			return err
 		}
 		item.State = source.StateSegmenting
+	}
+	if item.Format == source.FormatPDF && p.sourceMap != nil {
+		if _, err := p.sourceMap.Materialize(ctx, sourcemap.MaterializeRequest{
+			SourceID: item.ID, NotebookID: item.NotebookID, RevisionID: revisionID,
+			OriginalSHA256: item.ContentSHA256, Payload: payload, Normalized: artifact,
+		}); err != nil {
+			return err
+		}
 	}
 	command := ProjectionCommand{Lease: lease, RevisionID: revisionID, Artifact: artifact}
 	if item.State == source.StateSegmenting {

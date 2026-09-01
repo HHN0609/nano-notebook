@@ -3,9 +3,12 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,12 +20,14 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/researchsource"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourcemap"
 	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 )
 
@@ -826,19 +831,27 @@ func completeResearchPDFEvidence(
 
 func TestResearchPDFImportReadyExtendsRunScopeAndReturnsPageAwareEvidence(t *testing.T) {
 	api := newTestAPI(t)
-	claimed, _, _, notebookID := admitResearchExecutionForSourceImport(t, api, "research-pdf-ready@example.com")
+	claimed, _, _, notebookID := admitResearchExecutionForRelease(t, api, "research-pdf-ready@example.com", "nano.default@17")
 	installReadyEvidenceSetFixture(t, api, notebookID, "", "", "", "")
+	const unitText = "The authoritative launch date is 20 July."
+	pageTexts := []string{"Orientation page one.", "Prior work.", "Methods.", "Results.", "Discussion.", "Limitations.", unitText}
+	pdfPayload := evidenceTestPDFWithOutlineAtPage(pageTexts, "Abstract", 7)
+	objects := objectstore.NewMemoryStore()
 	service := researchsource.NewService(api.db.Pool(), &importPDFAcquirer{contents: map[string]webreader.Content{
 		"https://example.com/ready.pdf": {
 			MediaType: webreader.MediaTypePDF, FinalURL: "https://example.com/ready.pdf",
-			PDF: researchNativePDF("Page seven contains the authoritative launch date."),
+			PDF: pdfPayload,
 		},
-	}}, objectstore.NewMemoryStore())
+	}}, objects)
 	imported, err := service.ImportResearchPDF(context.Background(), agent.ResearchSourceImportRequest{
 		URL: "https://example.com/ready.pdf", ActionID: "decision:1/action:0", Attempt: attemptFromClaim(claimed),
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := agent.NewSourceInspectionService(api.db.Pool(), objects).
+		InspectSource(context.Background(), attemptFromClaim(claimed), imported.SourceID); !errors.Is(err, agent.ErrSourceNotInspectable) {
+		t.Fatalf("processing Source inspection err=%v", err)
 	}
 	workspaceActions, err := agent.NewResearchWorkspaceActions(api.db.Pool(), objectstore.NewMemoryStore())
 	if err != nil {
@@ -850,7 +863,7 @@ func TestResearchPDFImportReadyExtendsRunScopeAndReturnsPageAwareEvidence(t *tes
 		}
 		_, err = action.Execute(context.Background(), agent.ActionRequest{
 			ActionID: "decision:2/action:0", Attempt: attemptFromClaim(claimed),
-			Definition: agentcatalog.MustParseReference("research.executor@9"),
+			Definition: agentcatalog.MustParseReference("research.executor@10"),
 			Input:      json.RawMessage(`{"title":"Report","section_paths":["sections/report.md"]}`),
 		})
 	}
@@ -877,13 +890,46 @@ func TestResearchPDFImportReadyExtendsRunScopeAndReturnsPageAwareEvidence(t *tes
 		}
 	}
 	const revisionID = "evr_research_pdf_ready"
-	const unitText = "The authoritative launch date is 20 July."
 	if _, err := api.db.Pool().Exec(context.Background(), `
 		insert into source_evidence_revisions(
 			id,source_id,notebook_id,revision_no,extraction_config_id,artifact_schema_version,
 			artifact_object_key,artifact_sha256,status
 		) values($1,$2,$3,1,'extract-pdf-v1','nano.normalized-source.v1',$4,$5,'building')
 	`, revisionID, imported.SourceID, notebookID, "sources/"+imported.SourceID+"/evidence/"+revisionID, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	originalDigest := sha256.Sum256(pdfPayload)
+	parserPages := make([]sourcemap.Page, 7)
+	for index := range parserPages {
+		parserPages[index] = sourcemap.Page{Ordinal: index + 1, Width: 612, Height: 792, Blocks: []sourcemap.Block{{
+			ReadingOrder: 0, Kind: "paragraph", Text: "Parser orientation page.",
+			BBox: sourcemap.BBox{X0: 72, Y0: 72, X1: 300, Y1: 100},
+		}}}
+	}
+	var mapParser sourcemap.Adapter = sourceMapParserStub{result: sourcemap.ParseResult{
+		Document: sourcemap.Document{
+			SchemaVersion: 1, SourceID: imported.SourceID, InputSHA256: hex.EncodeToString(originalDigest[:]),
+			ParserIdentity: sourcemap.ParserIdentity, ParserVersion: "1.28.2", ParserPolicyID: sourcemap.ParserPolicyNoOCR,
+			PageCount: 7, Outline: []sourcemap.OutlineEntry{{Level: 1, Title: "Abstract", Page: 7}}, Pages: parserPages,
+		}, CanonicalJSON: []byte(`{"parser":"fixture"}`), SHA256: strings.Repeat("e", 64),
+	}}
+	if parserURL, parserToken := strings.TrimSpace(os.Getenv("NANO_TEST_SOURCE_MAP_PARSER_URL")), strings.TrimSpace(os.Getenv("NANO_TEST_SOURCE_MAP_PARSER_TOKEN")); parserURL != "" && parserToken != "" {
+		mapParser, err = sourcemap.NewHTTPAdapter(sourcemap.HTTPConfig{
+			Endpoint: parserURL, ServiceToken: parserToken, HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	mapMaterializer, err := sourcemap.NewMaterializer(mapParser, sourcemap.NewPostgresRepository(api.db.Pool()), objects, sourcemap.Config{MaxPages: 500, MaxOutputBytes: 16 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mapMaterializer.Materialize(context.Background(), sourcemap.MaterializeRequest{
+		SourceID: imported.SourceID, NotebookID: notebookID, RevisionID: revisionID,
+		OriginalSHA256: hex.EncodeToString(originalDigest[:]), Payload: pdfPayload,
+		Normalized: normalize.Artifact{SourceID: imported.SourceID, Format: "pdf"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := api.db.Pool().Exec(context.Background(), `
@@ -924,6 +970,86 @@ func TestResearchPDFImportReadyExtendsRunScopeAndReturnsPageAwareEvidence(t *tes
 	if err != nil || !ok || replayed.RunID != claimed.RunID {
 		t.Fatalf("replayed=%+v ok=%t err=%v", replayed, ok, err)
 	}
+	inspection, err := agent.NewSourceInspectionService(api.db.Pool(), objects).
+		InspectSource(context.Background(), attemptFromClaim(replayed), imported.SourceID)
+	if err != nil || len(inspection) > agent.InspectSourceMaxResultBytes ||
+		!strings.Contains(string(inspection), unitText) || !strings.Contains(string(inspection), `"evidence_eligibility":"navigation_only_use_search_evidence_for_claims"`) ||
+		strings.Contains(string(inspection), "Parser orientation page") {
+		t.Fatalf("inspection=%s err=%v", inspection, err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_sources(
+			id,notebook_id,input_kind,format,title,media_type,byte_size,content_sha256,original_object_key,state
+		) values(
+			'src_ready_not_pinned',$1,'file','pdf','Unselected Ready PDF','application/pdf',4,$2,
+			'sources/src_ready_not_pinned/original','ready'
+		)
+	`, notebookID, strings.Repeat("c", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_evidence_revisions(
+			id,source_id,notebook_id,revision_no,extraction_config_id,artifact_schema_version,
+			artifact_object_key,artifact_sha256,status,activated_at
+		) values(
+			'evr_ready_not_pinned','src_ready_not_pinned',$1,1,'extract-pdf-v1','nano.normalized-source.v1',
+			'sources/src_ready_not_pinned/evidence/evr_ready_not_pinned',$2,'active',now()
+		)
+	`, notebookID, strings.Repeat("d", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into retrieval_source_index_builds(
+			revision_id,index_version_id,source_id,notebook_id,expected_points,projection_sha256,status,verified_at
+		) values(
+			'evr_ready_not_pinned','riv_pin_active','src_ready_not_pinned',$1,1,$2,'verified',now()
+		)
+	`, notebookID, strings.Repeat("e", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.NewSourceInspectionService(api.db.Pool(), objects).
+		InspectSource(context.Background(), attemptFromClaim(replayed), "src_ready_not_pinned"); !errors.Is(err, agent.ErrSourceNotInspectable) {
+		t.Fatalf("unselected Source inspection err=%v", err)
+	}
+	searchQuery := "launch date"
+	if os.Getenv("NANO_QWEN_INSPECT_SOURCE_SMOKE") == "1" {
+		temperature := 0.0
+		bifrostURL := strings.TrimSpace(os.Getenv("NANO_BIFROST_URL"))
+		if bifrostURL == "" {
+			bifrostURL = "http://127.0.0.1:56666"
+		}
+		model := models.NewBifrostClient(bifrostURL, &http.Client{Timeout: 2 * time.Minute}, 1024)
+		outcome, modelErr := model.Decide(context.Background(), models.ModelRequest{
+			Model: "aliyun/qwen-plus",
+			Messages: []models.ModelMessage{
+				{Role: models.RoleSystem, Content: "You are executing a Research plan. The user message is a navigation-only inspect_source result. Form one focused evidence question about a concrete claim visible in its representative preview, then call search_evidence exactly once. Do not treat inspection as citable evidence."},
+				{Role: models.RoleUser, Content: string(inspection)},
+			},
+			ActionDefinitions: []models.ActionDefinition{{
+				Name: "search_evidence", Description: "Retrieve citable original Evidence Units for one focused Research question.",
+				InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":2048},"purpose":{"type":"string","minLength":1,"maxLength":1024}},"required":["query","purpose"],"additionalProperties":false}`),
+			}},
+			RequiredActionName: "search_evidence",
+			InvocationPolicy:   models.ModelInvocationPolicy{Temperature: &temperature, MaxOutputTokens: 1024, Timeout: 2 * time.Minute, EnableThinking: true},
+		})
+		if modelErr != nil || outcome.ModelDecision.Proposal == nil || len(outcome.ModelDecision.Proposal.Actions) != 1 || outcome.ModelDecision.Proposal.Actions[0].Name != "search_evidence" {
+			t.Fatalf("live inspection question outcome=%+v err=%v", outcome, modelErr)
+		}
+		var focused struct {
+			Query   string `json:"query"`
+			Purpose string `json:"purpose"`
+		}
+		if err := json.Unmarshal(outcome.ModelDecision.Proposal.Actions[0].Input, &focused); err != nil {
+			t.Fatal(err)
+		}
+		focused.Query, focused.Purpose = strings.TrimSpace(focused.Query), strings.TrimSpace(focused.Purpose)
+		semanticQuery := strings.ToLower(focused.Query)
+		if focused.Query == "" || focused.Purpose == "" ||
+			!(strings.Contains(semanticQuery, "launch") || strings.Contains(semanticQuery, "date") || strings.Contains(semanticQuery, "july") || strings.Contains(semanticQuery, "20") || strings.Contains(semanticQuery, "日期") || strings.Contains(semanticQuery, "7月")) {
+			t.Fatalf("live model did not form a focused question from inspection: %+v", focused)
+		}
+		searchQuery = focused.Query
+	}
 	chunks, err := retrieval.BuildChunks("riv_pin_active", revisionID, []retrieval.Unit{{
 		ID: "unit_research_pdf_ready", Ordinal: 0, Kind: "paragraph", Text: unitText,
 	}}, retrieval.ChunkConfig{MaxRunes: 512, OverlapRunes: 64, PreserveHeadingContext: true})
@@ -932,7 +1058,7 @@ func TestResearchPDFImportReadyExtendsRunScopeAndReturnsPageAwareEvidence(t *tes
 	}
 	vectors := &evidenceVectorSearchStub{candidateID: chunks[0].ID}
 	result, err := agent.NewEvidenceSearchService(api.db.Pool(), vectors, &evidenceModelsStub{}).
-		SearchEvidence(context.Background(), attemptFromClaim(replayed), "launch date", "cite the imported PDF")
+		SearchEvidence(context.Background(), attemptFromClaim(replayed), searchQuery, "cite the imported PDF")
 	if err != nil || len(result.Candidates) != 1 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -971,13 +1097,17 @@ func TestResearchPDFImportReadyExtendsRunScopeAndReturnsPageAwareEvidence(t *tes
 }
 
 func admitResearchExecutionForSourceImport(t *testing.T, api *testAPI, email string) (jobs.ClaimedJob, string, string, string) {
+	return admitResearchExecutionForRelease(t, api, email, "nano.default@16")
+}
+
+func admitResearchExecutionForRelease(t *testing.T, api *testAPI, email, release string) (jobs.ClaimedJob, string, string, string) {
 	t.Helper()
 	catalog, err := agentcatalog.LoadEmbedded()
 	if err != nil {
 		t.Fatal(err)
 	}
 	api.server = app.NewServer(app.Config{
-		CookieSecure: false, AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@16"),
+		CookieSecure: false, AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference(release),
 	}, api.db)
 	api.handler = api.server.Handler()
 	sessionCookie, csrfCookie := api.registerWithCSRF(t, email)

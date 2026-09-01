@@ -80,7 +80,8 @@ func (r *PostgresRuntime) observeAgentStatus(ctx context.Context, execution Exec
 func loadTodoScopePrefixes(ctx context.Context, tx pgx.Tx, currentRunID, inputMessageID string, current *CheckpointPrefix) ([]CheckpointPrefix, error) {
 	rows, err := tx.Query(ctx, `
 		with current_run as (
-			select coalesce(r.chat_id,product.chat_id) chat_id,r.created_at,r.id
+			select coalesce(r.chat_id,product.chat_id) chat_id,r.created_at,r.id,
+				r.runtime_kind current_runtime_kind,r.executor_identity current_executor_identity
 			from agent_runs r left join chat_runs product on product.root_agent_run_id=r.id
 			where r.id=$1
 		)
@@ -90,7 +91,13 @@ func loadTodoScopePrefixes(ctx context.Context, tx pgx.Tx, currentRunID, inputMe
 		cross join current_run current
 		where coalesce(r.input_message_id,product.input_message_id)=$2
 		  and coalesce(r.chat_id,product.chat_id)=current.chat_id
-		  and ((r.runtime_kind='legacy_role' and r.agent_role='leader') or (r.runtime_kind='configured' and r.executor_identity='chat_leader'))
+		  and (
+			(current.current_runtime_kind='configured' and current.current_executor_identity='research_root'
+			  and r.id=current.id and r.runtime_kind='configured' and r.executor_identity='research_root')
+			or ((current.current_runtime_kind<>'configured' or current.current_executor_identity<>'research_root')
+			  and ((r.runtime_kind='legacy_role' and r.agent_role='leader')
+			    or (r.runtime_kind='configured' and r.executor_identity='chat_leader')))
+		  )
 		  and (r.created_at,r.id)<=(current.created_at,current.id)
 		order by r.created_at,r.id
 	`, currentRunID, inputMessageID)

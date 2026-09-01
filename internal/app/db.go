@@ -683,6 +683,41 @@ create table if not exists source_viewer_artifacts (
 	unique (revision_id, filename)
 );
 
+create table if not exists source_maps (
+	id text primary key check (id ~ '^smap_[0-9a-f]{32}$'),
+	source_id text not null references source_sources(id) on delete cascade,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	revision_id text not null references source_evidence_revisions(id) on delete cascade,
+	original_sha256 text not null check (original_sha256 ~ '^[0-9a-f]{64}$'),
+	artifact_object_key text not null unique check (char_length(artifact_object_key) between 1 and 1024),
+	artifact_sha256 text not null check (artifact_sha256 ~ '^[0-9a-f]{64}$'),
+	artifact_bytes integer not null check (artifact_bytes between 1 and 16777216),
+	parser_identity text not null check (char_length(parser_identity) between 1 and 128),
+	parser_version text not null check (char_length(parser_version) between 1 and 64),
+	parser_policy_id text not null check (char_length(parser_policy_id) between 1 and 160),
+	navigation_kind text not null check (navigation_kind in ('embedded_outline','inferred_sections','page_samples')),
+	confidence text not null check (confidence in ('high','medium','low')),
+	page_count integer not null check (page_count between 1 and 500),
+	entry_count integer not null check (entry_count between 1 and 4096),
+	created_at timestamptz not null default now(),
+	unique (revision_id,parser_policy_id)
+);
+
+create or replace function nano_reject_source_map_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+	raise exception 'Source Map artifacts are immutable';
+end
+$$;
+
+drop trigger if exists source_maps_immutable on source_maps;
+-- Source Maps are append-only during normal operation. Source lifecycle purge
+-- is the sole deletion path and relies on the parent foreign-key cascade.
+create trigger source_maps_immutable before update on source_maps
+	for each row execute function nano_reject_source_map_mutation();
+
 alter table source_viewer_artifacts drop constraint if exists source_viewer_artifacts_filename_check;
 alter table source_viewer_artifacts add constraint source_viewer_artifacts_filename_check
 	check (filename ~ '^(page|slide)-[0-9]{6}\.png$');
@@ -1426,6 +1461,64 @@ create table if not exists research_rollups (
 	primary key (session_id,version)
 );
 
+create table if not exists research_archival_capsules (
+	id text primary key check (id ~ '^rcap_[0-9a-f]{64}$'),
+	session_id text not null references research_sessions(id) on delete cascade,
+	run_id text not null references agent_runs(id) on delete cascade,
+	decision_no integer not null check (decision_no > 0),
+	start_checkpoint_seq integer not null check (start_checkpoint_seq > 0),
+	end_checkpoint_seq integer not null check (end_checkpoint_seq >= start_checkpoint_seq),
+	source_checkpoint_sha256 text not null check (source_checkpoint_sha256 ~ '^[0-9a-f]{64}$'),
+	capsule_json jsonb not null check (jsonb_typeof(capsule_json)='object'),
+	capsule_sha256 text not null check (capsule_sha256 ~ '^[0-9a-f]{64}$'),
+	capsule_bytes integer not null check (capsule_bytes between 1 and 8192),
+	summarizer_model text not null check (char_length(summarizer_model) between 1 and 255),
+	prompt_version text not null check (char_length(prompt_version) between 1 and 255),
+	model_context_policy_identity text not null,
+	model_context_policy_version integer not null check (model_context_policy_version > 0),
+	model_context_policy_sha256 text not null check (model_context_policy_sha256 ~ '^[0-9a-f]{64}$'),
+	created_at timestamptz not null default now(),
+	unique (run_id,decision_no)
+);
+
+create table if not exists research_task_memories (
+	id text primary key check (id ~ '^rmem_[0-9a-f]{64}$'),
+	session_id text not null references research_sessions(id) on delete cascade,
+	run_id text not null references agent_runs(id) on delete cascade,
+	first_decision_no integer not null check (first_decision_no > 0),
+	last_decision_no integer not null check (last_decision_no >= first_decision_no),
+	start_checkpoint_seq integer not null check (start_checkpoint_seq > 0),
+	end_checkpoint_seq integer not null check (end_checkpoint_seq >= start_checkpoint_seq),
+	source_capsules_sha256 text not null check (source_capsules_sha256 ~ '^[0-9a-f]{64}$'),
+	memory_json jsonb not null check (jsonb_typeof(memory_json)='object'),
+	memory_sha256 text not null check (memory_sha256 ~ '^[0-9a-f]{64}$'),
+	memory_bytes integer not null check (memory_bytes between 1 and 32768),
+	summarizer_model text not null check (char_length(summarizer_model) between 1 and 255),
+	prompt_version text not null check (char_length(prompt_version) between 1 and 255),
+	model_context_policy_identity text not null,
+	model_context_policy_version integer not null check (model_context_policy_version > 0),
+	model_context_policy_sha256 text not null check (model_context_policy_sha256 ~ '^[0-9a-f]{64}$'),
+	created_at timestamptz not null default now(),
+	unique (run_id,start_checkpoint_seq,end_checkpoint_seq,model_context_policy_identity,model_context_policy_version)
+);
+
+create table if not exists research_compaction_failures (
+	id text primary key check (id ~ '^rcfail_[0-9a-f]{64}$'),
+	session_id text not null references research_sessions(id) on delete cascade,
+	run_id text not null references agent_runs(id) on delete cascade,
+	attempt_no integer not null check (attempt_no > 0),
+	layer text not null check (layer in ('archival','task_memory')),
+	reason_code text not null check (reason_code ~ '^[a-z][a-z0-9_]{2,63}$'),
+	start_checkpoint_seq integer not null check (start_checkpoint_seq >= 0),
+	end_checkpoint_seq integer not null check (end_checkpoint_seq >= start_checkpoint_seq),
+	before_tokens integer not null check (before_tokens > 0),
+	after_tokens integer not null check (after_tokens >= 0),
+	model_context_policy_identity text not null,
+	model_context_policy_version integer not null check (model_context_policy_version > 0),
+	model_context_policy_sha256 text not null check (model_context_policy_sha256 ~ '^[0-9a-f]{64}$'),
+	created_at timestamptz not null default now()
+);
+
 create or replace function nano_reject_research_artifact_mutation()
 returns trigger
 language plpgsql
@@ -1446,6 +1539,12 @@ create trigger research_step_capsules_immutable before update or delete on resea
 	for each row execute function nano_reject_research_artifact_mutation();
 drop trigger if exists research_rollups_immutable on research_rollups;
 create trigger research_rollups_immutable before update or delete on research_rollups
+	for each row execute function nano_reject_research_artifact_mutation();
+drop trigger if exists research_archival_capsules_immutable on research_archival_capsules;
+create trigger research_archival_capsules_immutable before update on research_archival_capsules
+	for each row execute function nano_reject_research_artifact_mutation();
+drop trigger if exists research_task_memories_immutable on research_task_memories;
+create trigger research_task_memories_immutable before update on research_task_memories
 	for each row execute function nano_reject_research_artifact_mutation();
 
 create table if not exists agent_run_results (
@@ -2381,6 +2480,7 @@ alter table source_evidence_coverage enable row level security;
 alter table source_evidence_coverage_gaps enable row level security;
 alter table source_evidence_units enable row level security;
 alter table source_viewer_artifacts enable row level security;
+alter table source_maps enable row level security;
 alter table retrieval_index_versions enable row level security;
 alter table retrieval_eval_runs enable row level security;
 alter table retrieval_source_index_builds enable row level security;
@@ -2400,6 +2500,9 @@ alter table research_evidence_ledger enable row level security;
 alter table research_source_imports enable row level security;
 alter table research_step_capsules enable row level security;
 alter table research_rollups enable row level security;
+alter table research_archival_capsules enable row level security;
+alter table research_task_memories enable row level security;
+alter table research_compaction_failures enable row level security;
 alter table agent_trees enable row level security;
 alter table agent_run_results enable row level security;
 alter table studio_outputs enable row level security;
@@ -2464,6 +2567,7 @@ grant select, insert, update, delete on
 	agent_jobs
 to nano_app;
 grant select on agent_context_compactions to nano_app;
+grant select on source_maps to nano_app;
 grant select, insert, update, delete on source_discovery_sessions, source_discovery_candidates, source_discovery_jobs to nano_app;
 grant select(parent_run_id,child_run_id,state,completed_at,consumed_at,error_code) on agent_run_delegations to nano_app;
 grant update(state,error_code,completed_at,updated_at) on agent_run_delegations to nano_app;
@@ -2504,6 +2608,7 @@ grant insert, update on chat_runs,agent_trees to nano_worker;
 grant select, insert, update on research_sessions,research_evidence_ledger to nano_worker;
 grant select, insert, update, delete on research_source_imports to nano_worker;
 grant select, insert on research_plan_versions,research_report_versions,research_step_capsules,research_rollups to nano_worker;
+grant select, insert on research_archival_capsules,research_task_memories,research_compaction_failures to nano_worker;
 grant select, insert, update on studio_outputs to nano_worker;
 grant select, insert, update, delete on
 	agent_run_grounding_plans,
@@ -2519,6 +2624,7 @@ grant select, insert, update, delete on source_purge_jobs to nano_worker;
 grant select, insert, update, delete on source_evidence_revisions, source_evidence_coverage,
 	source_evidence_coverage_gaps, source_evidence_units, source_viewer_artifacts to nano_worker;
 grant select, insert on source_admission_reports to nano_worker;
+grant select, insert on source_maps to nano_worker;
 grant select on source_admission_reviews to nano_worker;
 grant select, insert, update, delete on retrieval_index_versions, retrieval_eval_runs to nano_worker;
 grant select, insert, update, delete on retrieval_source_index_builds to nano_worker;
@@ -3011,6 +3117,9 @@ create policy source_evidence_units_app on source_evidence_units
 drop policy if exists source_viewer_artifacts_app on source_viewer_artifacts;
 create policy source_viewer_artifacts_app on source_viewer_artifacts
 	for select to nano_app using (nano_has_notebook_capability(notebook_id, 'source.read'));
+drop policy if exists source_maps_app_read on source_maps;
+create policy source_maps_app_read on source_maps
+	for select to nano_app using (nano_has_notebook_capability(notebook_id, 'source.read'));
 drop policy if exists source_evidence_coverage_app on source_evidence_coverage;
 create policy source_evidence_coverage_app on source_evidence_coverage
 	for select to nano_app using (
@@ -3036,6 +3145,8 @@ drop policy if exists source_evidence_units_worker on source_evidence_units;
 create policy source_evidence_units_worker on source_evidence_units for all to nano_worker using (true) with check (true);
 drop policy if exists source_viewer_artifacts_worker on source_viewer_artifacts;
 create policy source_viewer_artifacts_worker on source_viewer_artifacts for all to nano_worker using (true) with check (true);
+drop policy if exists source_maps_worker on source_maps;
+create policy source_maps_worker on source_maps for all to nano_worker using (true) with check (true);
 
 drop policy if exists retrieval_index_versions_worker on retrieval_index_versions;
 create policy retrieval_index_versions_worker on retrieval_index_versions for all to nano_worker using (true) with check (true);
@@ -3302,6 +3413,16 @@ create policy research_rollups_private on research_rollups
 	));
 drop policy if exists research_rollups_worker on research_rollups;
 create policy research_rollups_worker on research_rollups
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists research_archival_capsules_worker on research_archival_capsules;
+create policy research_archival_capsules_worker on research_archival_capsules
+	for all to nano_worker using (true) with check (true);
+drop policy if exists research_task_memories_worker on research_task_memories;
+create policy research_task_memories_worker on research_task_memories
+	for all to nano_worker using (true) with check (true);
+drop policy if exists research_compaction_failures_worker on research_compaction_failures;
+create policy research_compaction_failures_worker on research_compaction_failures
 	for all to nano_worker using (true) with check (true);
 
 drop policy if exists studio_outputs_app_read on studio_outputs;

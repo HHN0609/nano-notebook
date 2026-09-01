@@ -17,6 +17,8 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.deep-research-executor":                "research_execution_text.v1",
 		"agent.deep-research-step-compactor":          "research_step_capsule_text.v1",
 		"agent.deep-research-rollup":                  "research_rollup_text.v1",
+		"agent.deep-research-archival-compactor":      "nano.research-capsules.v1",
+		"agent.deep-research-task-memory-compactor":   "nano.research-task-memory.v1",
 		"agent.deep-research-reporter":                "research_report_text.v1",
 		"agent.chat-composer-bare":                    "final_draft_text.v1",
 		"agent.chat-composer-grounded":                "grounded_final_draft_text.v1",
@@ -27,7 +29,7 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
-	const extraVersions = 9 // chat composer upgrades plus final deep Research planner/executor/reporter upgrades, alongside their @1s
+	const extraVersions = 14 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
 	if got := len(catalog.Versions()); got != len(want)+extraVersions {
 		t.Fatalf("versions=%d want=%d", got, len(want)+extraVersions)
 	}
@@ -91,6 +93,57 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		if strings.Contains(strings.ToLower(reporterV3.Content), forbidden) {
 			t.Fatalf("reporter v3 exposes internal acceptance scaffolding %q: %s", forbidden, reporterV3.Content)
 		}
+	}
+}
+
+func TestResearchCompactorV2PromptsExposeExactOutputFields(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archival, ok := catalog.Resolve("agent.deep-research-archival-compactor", 2)
+	if !ok {
+		t.Fatal("missing archival compactor v2")
+	}
+	for _, field := range []string{"schema_version", "decision_no", "start_checkpoint_seq", "end_checkpoint_seq", "objective_advanced", "conclusions", "decisions", "constraints", "durable_refs", "contradictions", "verification", "follow_up"} {
+		if !strings.Contains(archival.Content, `"`+field+`"`) {
+			t.Fatalf("archival v2 missing exact field %q", field)
+		}
+	}
+	memory, ok := catalog.Resolve("agent.deep-research-task-memory-compactor", 2)
+	if !ok {
+		t.Fatal("missing task memory compactor v2")
+	}
+	for _, field := range []string{"schema_version", "first_decision_no", "last_decision_no", "start_checkpoint_seq", "end_checkpoint_seq", "goal", "phase", "conclusions", "decisions", "constraints", "durable_refs", "contradictions", "failed_paths", "verification", "report_state", "follow_up"} {
+		if !strings.Contains(memory.Content, `"`+field+`"`) {
+			t.Fatalf("task memory v2 missing exact field %q", field)
+		}
+	}
+}
+
+func TestResearchCompactorV3PromptsExposeNonEmptyRequiredText(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	archival, ok := catalog.Resolve("agent.deep-research-archival-compactor", 3)
+	if !ok || !strings.Contains(archival.Content, `"objective_advanced"`) || !strings.Contains(archival.Content, "must be a non-empty") {
+		t.Fatalf("archival v3 prompt=%+v ok=%v", archival, ok)
+	}
+	memory, ok := catalog.Resolve("agent.deep-research-task-memory-compactor", 3)
+	if !ok || !strings.Contains(memory.Content, `"goal"`) || !strings.Contains(memory.Content, `"phase"`) || !strings.Contains(memory.Content, "must both be non-empty") {
+		t.Fatalf("task memory v3 prompt=%+v ok=%v", memory, ok)
+	}
+}
+
+func TestResearchTaskMemoryV4DerivesExactRangeInsteadOfCopyingExample(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory, ok := catalog.Resolve("agent.deep-research-task-memory-compactor", 4)
+	if !ok || !strings.Contains(memory.Content, "first input Step") || !strings.Contains(memory.Content, "last input Step") || !strings.Contains(memory.Content, "Do not copy") {
+		t.Fatalf("task memory v4 prompt=%+v ok=%v", memory, ok)
 	}
 }
 
