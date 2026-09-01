@@ -24,6 +24,38 @@ This design covers only PDF persistence and retrieval admission. Context
 compaction, Capsule compression, and removal of periodic Research rollups are
 specified separately.
 
+The separate
+[`inspect_source` Tool design](2026-08-31-research-source-inspection-notes.md)
+defines how a Research model can orient itself within a Ready Source without
+placing the complete paper in context or coupling overview behavior to
+`search_evidence`.
+
+The local Source inspection acceptance now exercises the permanent Source
+path with a real seven-page PDF and the live network-isolated Source Map
+sidecar. The same bounded inspection projection is then used by a live Qwen
+tool decision to form a focused `search_evidence` query; only the latter result
+is treated as citable PDF evidence.
+
+## Research TODO skill note
+
+Research keeps the existing checkpoint-backed TODO list and ephemeral Agent
+Status projection. The Research-specific workflow skill now teaches the
+executor to turn the accepted Research Plan into concise, verifiable TODO
+items and update them only at meaningful phase boundaries.
+
+The TODO list is a control surface, not an evidence store. It may track
+research questions, Source-import readiness, evidence gaps, section drafting,
+and citation verification. It must not contain PDF excerpts, accumulated URL
+lists, search-result summaries, or report prose. Those remain in permanent
+Sources, `search_evidence` results, and the Research workspace.
+
+This skill supplies model guidance only. The Harness remains authoritative for
+Source lifecycle state, final-report waiting, evidence eligibility, citation
+validation, context accounting, and compaction. Loading the skill cannot add
+Tool permissions or make pending evidence searchable. The skill is
+automatically required and system-injected for `research.executor@10`; it does
+not spend a model Action to load.
+
 ## Decision
 
 Replace model-visible remote PDF reading with an explicit Source import path:

@@ -22,6 +22,19 @@ func TestEmbeddedCatalogContainsGrillMe(t *testing.T) {
 	}
 }
 
+func TestEmbeddedCatalogContainsResearchWorkflow(t *testing.T) {
+	catalog := MustLoadEmbedded()
+	skill, ok := catalog.Resolve("skill.research-workflow", 1)
+	if !ok {
+		t.Fatal("missing skill.research-workflow@1")
+	}
+	for _, required := range []string{"rewrite_todo_list", "update_todo_status", "Evidence", "TODO"} {
+		if !strings.Contains(skill.Body, required) {
+			t.Fatalf("Research workflow skill is missing %q", required)
+		}
+	}
+}
+
 func TestCanonicalSHA256NormalizesSkillContent(t *testing.T) {
 	left := SkillVersion{Identity: "skill.test", Version: 2, Name: "Test Skill", Description: "Useful test skill", Body: "alpha\r\nbeta"}
 	right := SkillVersion{Identity: "skill.test", Version: 2, Name: "Test Skill", Description: "Useful test skill", Body: "alpha\nbeta\n"}

@@ -1,25 +1,26 @@
 {
   "identity": "research.executor",
-  "version": 14,
+  "version": 11,
   "executor": "research_root",
   "model_policy": "agent.deep-research-default@4",
   "prompts": {
     "executor": "agent.deep-research-executor@5",
-    "archival_compactor": "agent.deep-research-archival-compactor@3",
-    "task_memory_compactor": "agent.deep-research-task-memory-compactor@4",
+    "archival_compactor": "agent.deep-research-archival-compactor@2",
+    "task_memory_compactor": "agent.deep-research-task-memory-compactor@2",
     "reporter": "agent.deep-research-reporter@3"
   },
   "contracts": {
     "input": "research.plan-result@1",
     "result": "research.report-result@1"
   },
-  "skills": ["skill.research-workflow@1"],
+  "skills": [
+    "skill.research-workflow@1"
+  ],
   "tools": [
     "assemble_research_report",
     "inspect_source",
     "list_research_files",
     "read_research_file",
-    "read_tool_result",
     "read_url",
     "rewrite_todo_list",
     "save_url_as_source",

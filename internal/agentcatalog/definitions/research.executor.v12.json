@@ -1,12 +1,12 @@
 {
   "identity": "research.executor",
-  "version": 14,
+  "version": 12,
   "executor": "research_root",
   "model_policy": "agent.deep-research-default@4",
   "prompts": {
     "executor": "agent.deep-research-executor@5",
     "archival_compactor": "agent.deep-research-archival-compactor@3",
-    "task_memory_compactor": "agent.deep-research-task-memory-compactor@4",
+    "task_memory_compactor": "agent.deep-research-task-memory-compactor@3",
     "reporter": "agent.deep-research-reporter@3"
   },
   "contracts": {
@@ -19,7 +19,6 @@
     "inspect_source",
     "list_research_files",
     "read_research_file",
-    "read_tool_result",
     "read_url",
     "rewrite_todo_list",
     "save_url_as_source",

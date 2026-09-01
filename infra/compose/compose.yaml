@@ -297,6 +297,32 @@ services:
       timeout: 3s
       retries: 20
 
+  source-map-parser:
+    build:
+      context: ../../services/source-map-parser
+      dockerfile: Dockerfile
+    environment:
+      NANO_SOURCE_MAP_PARSER_SERVICE_TOKEN: nano-local-source-map-parser-token
+    ports:
+      - "127.0.0.1:8086:8086"
+    networks:
+      - source-map-private
+    read_only: true
+    tmpfs:
+      - /tmp:size=268435456,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 1g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8086/health/live', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
   web-reader:
     build:
       context: ../..
@@ -409,3 +435,9 @@ volumes:
   qdrant-data:
   prometheus-data:
   grafana-data:
+
+networks:
+  source-map-private:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"

@@ -837,6 +837,25 @@ func (s *Store) Remove(ctx context.Context, id, purgeID string) (PurgeIntent, er
 		return PurgeIntent{}, err
 	}
 	rows.Close()
+	rows, err = s.db.Query(ctx, `
+		select artifact_object_key from source_maps where source_id=$1 order by revision_id,parser_policy_id
+	`, current.ID)
+	if err != nil {
+		return PurgeIntent{}, err
+	}
+	for rows.Next() {
+		var objectKey string
+		if err := rows.Scan(&objectKey); err != nil {
+			rows.Close()
+			return PurgeIntent{}, err
+		}
+		objectKeys = append(objectKeys, objectKey)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return PurgeIntent{}, err
+	}
+	rows.Close()
 	type projectionScope struct {
 		NotebookID     string `json:"notebook_id"`
 		SourceID       string `json:"source_id"`

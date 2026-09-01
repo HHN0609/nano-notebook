@@ -157,6 +157,7 @@ func NanoToolCapabilities() map[string]agentcatalog.ToolCapability {
 		"assemble_research_report": {Scheduling: agentcatalog.ToolOrderedSync},
 		"calculate":                {Scheduling: agentcatalog.ToolParallel},
 		"current_time":             {Scheduling: agentcatalog.ToolParallel},
+		"inspect_source":           {Scheduling: agentcatalog.ToolParallel},
 		"list_research_files":      {Scheduling: agentcatalog.ToolParallel},
 		"read_research_file":       {Scheduling: agentcatalog.ToolParallel},
 		"read_tool_result":         {Scheduling: agentcatalog.ToolParallel},
@@ -226,15 +227,20 @@ func ResearchPlannerExecutorCapability() agentcatalog.ExecutorCapability {
 
 func ResearchRootExecutorCapability() agentcatalog.ExecutorCapability {
 	return agentcatalog.ExecutorCapability{
-		PromptPurposes: map[string]bool{"executor": true, "step_compactor": true, "rollup": true, "reporter": true},
+		PromptPurposes: map[string]bool{
+			"executor": true, "step_compactor": true, "rollup": true, "archival_compactor": true,
+			"task_memory_compactor": true, "reporter": true,
+		},
 		Contracts: map[agentcatalog.Reference]bool{
 			agentcatalog.MustParseReference("research.plan-result@1"):   true,
 			agentcatalog.MustParseReference("research.report-result@1"): true,
 		},
+		Skills: map[agentcatalog.Reference]bool{agentcatalog.MustParseReference("skill.research-workflow@1"): true},
 		Tools: map[string]bool{
 			"assemble_research_report": true, "list_research_files": true, "read_research_file": true,
-			"read_document_pages": true, "read_tool_result": true, "read_url": true, "save_url_as_source": true,
-			"search_evidence": true, "web_search": true, "write_research_file": true,
+			"inspect_source": true, "read_document_pages": true, "read_tool_result": true, "read_url": true, "save_url_as_source": true,
+			"rewrite_todo_list": true, "search_evidence": true, "update_todo_status": true,
+			"web_search": true, "write_research_file": true,
 		},
 		MaxLimits: agentcatalog.Limits{
 			ModelCalls: 120, Actions: 100, ActionBatch: 6, ContextBytes: 8388608, ResultBytes: 33554432, Attempts: 5,
