@@ -321,20 +321,30 @@ func (s *EvidenceSearchService) reloadCandidates(ctx context.Context, scope pinn
 	defer func() { _ = tx.Rollback(ctx) }()
 	for _, evidence := range scope.Evidence {
 		rows, err := tx.Query(ctx, `
-			select id, ordinal, kind, text_content
+			select id, ordinal, kind, text_content,coordinate_json
 			from source_evidence_units where revision_id=$1 and source_id=$2 and notebook_id=$3 order by ordinal
 		`, evidence.RevisionID, evidence.SourceID, scope.NotebookID)
 		if err != nil {
 			return nil, err
 		}
 		units := make([]retrieval.Unit, 0)
+		coordinates := make(map[string]retrieval.EvidenceCoordinate)
 		for rows.Next() {
 			var unit retrieval.Unit
-			if err := rows.Scan(&unit.ID, &unit.Ordinal, &unit.Kind, &unit.Text); err != nil {
+			var coordinateJSON []byte
+			if err := rows.Scan(&unit.ID, &unit.Ordinal, &unit.Kind, &unit.Text, &coordinateJSON); err != nil {
 				rows.Close()
 				return nil, err
 			}
 			units = append(units, unit)
+			if len(coordinateJSON) > 0 {
+				var coordinate retrieval.EvidenceCoordinate
+				if json.Unmarshal(coordinateJSON, &coordinate) != nil || strings.TrimSpace(coordinate.Kind) == "" {
+					rows.Close()
+					return nil, fmt.Errorf("%w: invalid Evidence coordinate", retrieval.ErrRetrievalUnavailable)
+				}
+				coordinates[unit.ID] = coordinate
+			}
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -352,6 +362,7 @@ func (s *EvidenceSearchService) reloadCandidates(ctx context.Context, scope pinn
 			result = append(result, retrieval.EvidenceCandidate{
 				ID: chunk.ID, SourceID: evidence.SourceID, RevisionID: evidence.RevisionID,
 				SourceTitle: evidence.Title, Preview: chunk.Text, UnitRefs: append([]retrieval.UnitRef(nil), chunk.UnitRefs...),
+				Coordinates: evidenceCoordinatesForRefs(chunk.UnitRefs, coordinates),
 			})
 		}
 	}
@@ -359,6 +370,23 @@ func (s *EvidenceSearchService) reloadCandidates(ctx context.Context, scope pinn
 		return nil, err
 	}
 	return result, nil
+}
+
+func evidenceCoordinatesForRefs(refs []retrieval.UnitRef, byUnit map[string]retrieval.EvidenceCoordinate) []retrieval.EvidenceCoordinate {
+	result := make([]retrieval.EvidenceCoordinate, 0)
+	seen := make(map[retrieval.EvidenceCoordinate]struct{})
+	for _, ref := range refs {
+		coordinate, ok := byUnit[ref.UnitID]
+		if !ok {
+			continue
+		}
+		if _, duplicate := seen[coordinate]; duplicate {
+			continue
+		}
+		seen[coordinate] = struct{}{}
+		result = append(result, coordinate)
+	}
+	return result
 }
 
 func (s *EvidenceSearchService) workerTx(ctx context.Context) (pgx.Tx, error) {

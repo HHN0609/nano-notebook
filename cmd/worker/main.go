@@ -33,6 +33,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
+	"github.com/huangxinxinyu/nano-notebook/internal/researchsource"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 	"github.com/huangxinxinyu/nano-notebook/internal/skillcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceadmission"
@@ -465,15 +466,16 @@ func main() {
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
 	webSearchTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewWebSearchAction(searchProvider))
 	readSkillTool := agent.NewReadSkillAction(definitionCatalog, skillCatalog)
-	researchURLTools := agent.NewResearchURLActions(researchURLReader, webReaderAdapter)
+	researchURLTools := agent.NewVersionedResearchURLActions(researchURLReader, webReaderAdapter, webReaderAdapter)
 	readURLTool := agent.NewResearchDeduplicatingAction(db.Pool(), researchURLTools[0])
 	readDocumentPagesTool := researchURLTools[1]
+	saveURLAsSourceTool := agent.NewSaveURLAsSourceAction(researchsource.NewService(db.Pool(), webReaderAdapter, sourceObjects))
 	workspaceTools, err := agent.NewResearchWorkspaceActions(db.Pool(), workspaceObjects)
 	if err != nil {
 		slog.Error("Research workspace Tools invalid", "error", err)
 		os.Exit(1)
 	}
-	registryTools := []agent.Action{calculateTool, currentTimeTool, searchEvidenceTool, webSearchTool, readSkillTool, readURLTool, readDocumentPagesTool}
+	registryTools := []agent.Action{calculateTool, currentTimeTool, searchEvidenceTool, webSearchTool, readSkillTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool}
 	registryTools = append(registryTools, workspaceTools...)
 	registry, err := agent.NewActionRegistry(registryTools...)
 	if err != nil {
@@ -488,6 +490,7 @@ func main() {
 		agent.MCPToolRegistration{Action: readSkillTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readURLTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readDocumentPagesTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: saveURLAsSourceTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 	}
 	for _, workspaceTool := range workspaceTools {
 		scheduling := agentcatalog.ToolParallel
@@ -636,7 +639,7 @@ func main() {
 	sourceProcessor.WithAdmission(admissionService)
 	sourceProcessingService := sourceprocessing.NewServiceWithConcurrency(
 		sourceQueue, sourceProcessor, config.SourceProcessingHeartbeat, config.SourceProcessingPoll, config.SourceProcessingConcurrency,
-	)
+	).WithPostgresNotifications(db.Pool())
 	sourceProcessingDone := make(chan error, 1)
 	go func() { sourceProcessingDone <- sourceProcessingService.Run(ctx) }()
 	discoveryQueue := sourcediscovery.NewQueue(db.Pool(), config.SourceDiscoveryLease)
@@ -785,7 +788,7 @@ func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@14"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@15"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}

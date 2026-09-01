@@ -127,6 +127,97 @@ type searchEvidenceModelOutput struct {
 	OmittedCount  int                       `json:"omitted_count"`
 }
 
+type sourceFirstSearchEvidenceModelItem struct {
+	SourceID           string                         `json:"source_id"`
+	SourceTitle        string                         `json:"source_title"`
+	EvidenceRevisionID string                         `json:"evidence_revision_id"`
+	ChunkID            string                         `json:"chunk_id"`
+	Preview            string                         `json:"preview"`
+	PreviewTruncated   bool                           `json:"preview_truncated,omitempty"`
+	EvidenceRanges     []retrieval.UnitRef            `json:"evidence_ranges"`
+	Coordinates        []retrieval.EvidenceCoordinate `json:"coordinates,omitempty"`
+}
+
+type sourceFirstSearchEvidenceModelOutput struct {
+	CompleteEmpty bool                                 `json:"complete_empty"`
+	Degraded      bool                                 `json:"degraded"`
+	Degradations  []string                             `json:"degradations"`
+	Evidence      []sourceFirstSearchEvidenceModelItem `json:"evidence"`
+	Truncated     bool                                 `json:"truncated"`
+	OmittedCount  int                                  `json:"omitted_count"`
+}
+
+func buildSourceFirstSearchEvidenceModelOutput(manifest searchEvidenceResult, candidates []retrieval.EvidenceCandidate, byteLimit int) (json.RawMessage, error) {
+	if manifest.Legacy || manifest.ResultVersion != SearchEvidenceResultVersion || byteLimit < 1 {
+		return nil, errors.New("invalid source-first search evidence model projection")
+	}
+	byID := make(map[string]retrieval.EvidenceCandidate, len(candidates))
+	for _, candidate := range candidates {
+		byID[candidate.ID] = candidate
+	}
+	items := make([]sourceFirstSearchEvidenceModelItem, 0, len(manifest.Evidence))
+	for _, reference := range manifest.Evidence {
+		candidate, ok := byID[reference.ChunkID]
+		if !ok || candidate.SourceID != reference.SourceID || candidate.RevisionID != reference.EvidenceRevisionID {
+			return nil, fmt.Errorf("%w: source-first search evidence manifest no longer resolves", ErrGroundingInvalid)
+		}
+		items = append(items, sourceFirstSearchEvidenceModelItem{
+			SourceID: candidate.SourceID, SourceTitle: candidate.SourceTitle,
+			EvidenceRevisionID: candidate.RevisionID, ChunkID: candidate.ID, Preview: candidate.Preview,
+			EvidenceRanges: append([]retrieval.UnitRef(nil), candidate.UnitRefs...),
+			Coordinates:    append([]retrieval.EvidenceCoordinate(nil), candidate.Coordinates...),
+		})
+	}
+	encode := func(projected []sourceFirstSearchEvidenceModelItem, truncated bool, omitted int) (json.RawMessage, error) {
+		return json.Marshal(sourceFirstSearchEvidenceModelOutput{
+			CompleteEmpty: manifest.CompleteEmpty, Degraded: manifest.Degraded,
+			Degradations: append([]string(nil), manifest.Degradations...), Evidence: projected,
+			Truncated: truncated, OmittedCount: omitted,
+		})
+	}
+	for keep := len(items); keep >= 1; keep-- {
+		encoded, err := encode(append([]sourceFirstSearchEvidenceModelItem(nil), items[:keep]...), keep != len(items), len(items)-keep)
+		if err != nil {
+			return nil, err
+		}
+		if len(encoded) <= byteLimit {
+			return encoded, nil
+		}
+	}
+	if len(items) > 0 {
+		preview := []rune(items[0].Preview)
+		low, high := 0, len(preview)-1
+		var best json.RawMessage
+		for low <= high {
+			middle := low + (high-low)/2
+			item := items[0]
+			item.Preview = string(preview[:middle+1])
+			item.PreviewTruncated = true
+			encoded, err := encode([]sourceFirstSearchEvidenceModelItem{item}, true, len(items)-1)
+			if err != nil {
+				return nil, err
+			}
+			if len(encoded) <= byteLimit {
+				best = encoded
+				low = middle + 1
+			} else {
+				high = middle - 1
+			}
+		}
+		if len(best) > 0 {
+			return best, nil
+		}
+	}
+	encoded, err := encode([]sourceFirstSearchEvidenceModelItem{}, len(items) > 0, len(items))
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > byteLimit {
+		return nil, errors.New("source-first search evidence model projection byte limit is too small")
+	}
+	return encoded, nil
+}
+
 func buildSearchEvidenceModelOutput(manifest searchEvidenceResult, candidates []retrieval.EvidenceCandidate, byteLimit int) (json.RawMessage, error) {
 	if manifest.Legacy || manifest.ResultVersion != SearchEvidenceResultVersion || byteLimit < 1 {
 		return nil, errors.New("invalid search evidence model projection")

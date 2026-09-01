@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
@@ -41,14 +42,20 @@ type ResearchRuntime struct {
 
 func (*ResearchRuntime) InvalidModelResponseRetryLimit() int { return 5 }
 
-func (*ResearchRuntime) PrepareDecisionResponse(_ context.Context, _ Execution, prefix CheckpointPrefix, decision models.ModelDecision) (models.ModelDecision, error) {
-	if decision.Final == nil || !isResearchCompletionSignal(decision.Final.Text) {
+func (*ResearchRuntime) PrepareDecisionResponse(_ context.Context, execution Execution, prefix CheckpointPrefix, decision models.ModelDecision) (models.ModelDecision, error) {
+	sourceFirst := isSourceFirstResearchExecution(execution)
+	if decision.Final == nil || (!sourceFirst && !isResearchCompletionSignal(decision.Final.Text)) {
 		return decision, nil
 	}
-	if hasAssembledResearchReport(prefix) {
+	if (!sourceFirst && hasAssembledResearchReport(prefix)) || (sourceFirst && hasAssembledResearchReportAfterImports(prefix)) {
 		return decision, nil
 	}
 	return models.ModelDecision{}, errors.New("Research completion signal has no assembled report; return a complete report or assemble the workspace first")
+}
+
+func isSourceFirstResearchExecution(execution Execution) bool {
+	reference, err := agentcatalog.ParseReference(execution.AgentConfigID)
+	return err == nil && reference.Identity == "research.executor" && reference.Version >= 9
 }
 
 func isResearchCompletionSignal(value string) bool {
@@ -151,6 +158,15 @@ func (r *ResearchRuntime) BuildDecisionRequest(ctx context.Context, execution Ex
 	}
 	system := strings.TrimSpace(executorPrompt.Content) + "\n\nFinal report requirements:\n" + strings.TrimSpace(reporterPrompt.Content)
 	system += "\n\n" + researchExecutionControlPrompt(execution.ActionBatchLimit)
+	if isSourceFirstResearchExecution(execution) {
+		projection, err := r.loadResearchSourceImportProjection(ctx, execution.RunID)
+		if err != nil {
+			return models.ModelRequest{}, err
+		}
+		if projection != "" {
+			system += "\n\n" + projection
+		}
+	}
 	duplicateSteps := consecutiveResearchDuplicateSteps(prefix)
 	if duplicateSteps > 0 {
 		unreadURLs, err := r.loadUnreadResearchURLs(ctx, sessionID, researchRecoveryCandidateLimit(execution.ActionBatchLimit))
@@ -594,6 +610,10 @@ func buildResearchStepCapsule(proposal AcceptedProposal) string {
 		case "read_url":
 			var output readURLOutput
 			if json.Unmarshal(action.Result.Output, &output) == nil {
+				if isResearchPDFImportRequired(output) {
+					fmt.Fprintf(&builder, "- Outcome: `%s`\n- PDF candidate: %s\n- Evidence status: source import required; no PDF body was retained.\n", output.Outcome, output.FinalURL)
+					continue
+				}
 				fmt.Fprintf(&builder, "- Source: [%s](%s)\n- Reader: `%s`; words: %d; truncated: %t\n\n### Retained evidence\n\n%s\n", output.Title, output.FinalURL, output.Engine, output.WordCount, output.Truncated, compactMarkdownByParagraph(output.Markdown, researchCapsuleMarkdownLimit))
 				continue
 			}
@@ -672,6 +692,22 @@ func materializeResearchEvidence(ctx context.Context, tx pgx.Tx, sessionID, runI
 		}
 		var output readURLOutput
 		if err := json.Unmarshal(action.Result.Output, &output); err != nil {
+			return err
+		}
+		if isResearchPDFImportRequired(output) {
+			requestedURL := input.URL
+			if strings.TrimSpace(output.RequestedURL) != "" {
+				requestedURL = output.RequestedURL
+			}
+			_, err := tx.Exec(ctx, `
+				insert into research_evidence_ledger(session_id,url,final_url,status,media_type)
+				values($1,$2,$3,'discovered',$4)
+				on conflict(session_id,url) do update set
+					final_url=excluded.final_url,
+					media_type=excluded.media_type,
+					status=case when research_evidence_ledger.status='read' then 'read' else 'discovered' end,
+					last_seen_at=now()
+			`, sessionID, requestedURL, output.FinalURL, output.MediaType)
 			return err
 		}
 		digest := sha256.Sum256([]byte(output.Markdown))
@@ -955,8 +991,79 @@ func sanitizeResearchReportLinks(ctx context.Context, tx pgx.Tx, sessionID, repo
 	if err := rows.Err(); err != nil {
 		return "", nil, err
 	}
+	var runID string
+	if err := tx.QueryRow(ctx, `select execution_run_id from research_sessions where id=$1`, sessionID).Scan(&runID); err != nil {
+		return "", nil, err
+	}
+	checkpoints, err := loadRunCheckpoints(ctx, tx, runID)
+	if err != nil {
+		return "", nil, err
+	}
+	prefix, err := LoadCheckpointPrefix(ctx, checkpoints)
+	if err != nil {
+		return "", nil, err
+	}
+	for reference := range searchedResearchSourceEvidence(prefix) {
+		sourceRows, err := tx.Query(ctx, `
+			select imported.requested_url,coalesce(imported.final_url_identity,''),
+				coalesce(source.origin_url,''),coalesce(source.final_url,'')
+			from research_source_imports imported
+			join source_sources source on source.id=imported.source_id and source.state='ready'
+			join agent_run_evidence_set evidence on evidence.run_id=imported.run_id
+				and evidence.source_id=source.id and evidence.evidence_revision_id=$3
+			join source_evidence_revisions revision on revision.id=evidence.evidence_revision_id
+				and revision.source_id=source.id and revision.status='active'
+			join retrieval_source_index_builds build on build.revision_id=revision.id
+				and build.source_id=source.id and build.index_version_id=evidence.index_version_id and build.status='verified'
+			where imported.session_id=$1 and source.id=$2
+		`, sessionID, reference.SourceID, reference.RevisionID)
+		if err != nil {
+			return "", nil, err
+		}
+		for sourceRows.Next() {
+			var requestedURL, finalIdentity, originURL, finalURL string
+			if err := sourceRows.Scan(&requestedURL, &finalIdentity, &originURL, &finalURL); err != nil {
+				sourceRows.Close()
+				return "", nil, err
+			}
+			for _, candidate := range []string{requestedURL, finalIdentity, originURL, finalURL} {
+				if candidate != "" {
+					eligible[candidate] = true
+				}
+			}
+		}
+		if err := sourceRows.Err(); err != nil {
+			sourceRows.Close()
+			return "", nil, err
+		}
+		sourceRows.Close()
+	}
 	rewritten, removed := rewriteResearchReportLinks(report, eligible)
 	return rewritten, removed, nil
+}
+
+type researchSourceEvidenceReference struct {
+	SourceID   string
+	RevisionID string
+}
+
+func searchedResearchSourceEvidence(prefix CheckpointPrefix) map[researchSourceEvidenceReference]struct{} {
+	result := make(map[researchSourceEvidenceReference]struct{})
+	for _, proposal := range prefix.Proposals {
+		for _, action := range proposal.Actions {
+			if action.Name != "search_evidence" || action.Result == nil || action.Result.Status != ActionSucceeded {
+				continue
+			}
+			manifest, err := decodeSearchEvidenceResult(action.Result.Output)
+			if err != nil {
+				continue
+			}
+			for _, evidence := range manifest.Evidence {
+				result[researchSourceEvidenceReference{SourceID: evidence.SourceID, RevisionID: evidence.EvidenceRevisionID}] = struct{}{}
+			}
+		}
+	}
+	return result
 }
 
 func rewriteResearchReportLinks(report string, eligible map[string]bool) (string, []string) {

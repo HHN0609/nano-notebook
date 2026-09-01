@@ -62,5 +62,8 @@ func projectSearchEvidenceForModel(execution Execution, raw json.RawMessage, can
 	if result.Legacy {
 		return buildLegacySearchEvidenceModelOutput(result, limit)
 	}
+	if isSourceFirstResearchExecution(execution) {
+		return buildSourceFirstSearchEvidenceModelOutput(result, candidates, limit)
+	}
 	return buildSearchEvidenceModelOutput(result, candidates, limit)
 }

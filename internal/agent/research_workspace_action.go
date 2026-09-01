@@ -306,8 +306,9 @@ func (a *listResearchFilesAction) Execute(ctx context.Context, request ActionReq
 }
 
 type assembleResearchReportAction struct {
-	store objectstore.Store
-	index researchWorkspaceIndex
+	store   objectstore.Store
+	index   researchWorkspaceIndex
+	barrier researchSourceImportBarrier
 }
 
 type assembleResearchReportInput struct {
@@ -315,8 +316,12 @@ type assembleResearchReportInput struct {
 	SectionPaths []string `json:"section_paths"`
 }
 
-func newAssembleResearchReportAction(store objectstore.Store, index researchWorkspaceIndex) Action {
-	return &assembleResearchReportAction{store: store, index: index}
+func newAssembleResearchReportAction(store objectstore.Store, index researchWorkspaceIndex, barriers ...researchSourceImportBarrier) Action {
+	var barrier researchSourceImportBarrier
+	if len(barriers) > 0 {
+		barrier = barriers[0]
+	}
+	return &assembleResearchReportAction{store: store, index: index, barrier: barrier}
 }
 
 func (*assembleResearchReportAction) CrashReplaySafe() bool { return true }
@@ -345,6 +350,15 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 	}
 	if a == nil || a.store == nil || a.index == nil {
 		return ActionResult{Status: ActionDomainError, ErrorCode: "research_workspace_unavailable"}, nil
+	}
+	if a.barrier != nil {
+		waiting, err := a.barrier.WaitIfPending(ctx, request)
+		if err != nil {
+			return ActionResult{}, err
+		}
+		if waiting {
+			return ActionResult{}, ErrLeaseLost
+		}
 	}
 	snapshot, err := a.index.Snapshot(ctx, request.Attempt.RunID)
 	if err != nil {
@@ -480,6 +494,21 @@ func hasAssembledResearchReport(prefix CheckpointPrefix) bool {
 	return ok
 }
 
+func hasAssembledResearchReportAfterImports(prefix CheckpointPrefix) bool {
+	assembledAfterLatestImport := false
+	for _, proposal := range prefix.Proposals {
+		for _, action := range proposal.Actions {
+			if action.Name == "save_url_as_source" && action.Result != nil && action.Result.Status == ActionSucceeded {
+				assembledAfterLatestImport = false
+			}
+			if action.Name == "assemble_research_report" && action.Result != nil && action.Result.Status == ActionSucceeded {
+				assembledAfterLatestImport = true
+			}
+		}
+	}
+	return assembledAfterLatestImport && hasAssembledResearchReport(prefix)
+}
+
 func NewResearchWorkspaceActions(pool *pgxpool.Pool, store objectstore.Store) ([]Action, error) {
 	if pool == nil || store == nil {
 		return nil, errors.New("Research workspace requires PostgreSQL and object storage")
@@ -489,6 +518,6 @@ func NewResearchWorkspaceActions(pool *pgxpool.Pool, store objectstore.Store) ([
 		newWriteResearchFileAction(store),
 		newReadResearchFileAction(store, index),
 		newListResearchFilesAction(index),
-		newAssembleResearchReportAction(store, index),
+		newAssembleResearchReportAction(store, index, postgresResearchSourceImportBarrier{pool: pool}),
 	}, nil
 }

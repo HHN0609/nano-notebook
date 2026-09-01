@@ -3,11 +3,24 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 )
+
+type researchImportBarrierStub struct {
+	waiting bool
+	err     error
+	calls   int
+}
+
+func (s *researchImportBarrierStub) WaitIfPending(context.Context, ActionRequest) (bool, error) {
+	s.calls++
+	return s.waiting, s.err
+}
 
 type researchWorkspaceIndexStub struct {
 	snapshot researchWorkspaceSnapshot
@@ -135,6 +148,26 @@ func TestLoadAssembledResearchReportUsesAcceptedAssemblyResult(t *testing.T) {
 	}
 	if got, ok, err := loadAssembledResearchReport(ctx, store, CheckpointPrefix{}); err != nil || ok || got != "" {
 		t.Fatalf("fallback report=%q ok=%v err=%v", got, ok, err)
+	}
+}
+
+func TestAssembleResearchReportYieldsAttemptWhilePDFImportsArePending(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore()
+	section := mustWorkspaceObject(t, ctx, store, "run_research", "decision:1/action:0", "sections/choice.md", "## Choice\n\nWait for the source.")
+	barrier := &researchImportBarrierStub{waiting: true}
+	action := newAssembleResearchReportAction(store, researchWorkspaceIndexStub{snapshot: researchWorkspaceSnapshot{Files: map[string]researchWorkspaceFile{
+		section.Path: section,
+	}}}, barrier)
+
+	result, err := action.Execute(ctx, ActionRequest{
+		ActionID:   "decision:2/action:0",
+		Attempt:    Attempt{RunID: "run_research", JobID: "job_research", AttemptNo: 2, LeaseToken: "lease"},
+		Definition: agentcatalog.Reference{Identity: "research.executor", Version: 9},
+		Input:      json.RawMessage(`{"title":"Decision","section_paths":["sections/choice.md"]}`),
+	})
+	if !errors.Is(err, ErrLeaseLost) || result.Status != "" || barrier.calls != 1 || store.Len() != 1 {
+		t.Fatalf("result=%+v err=%v calls=%d objects=%d", result, err, barrier.calls, store.Len())
 	}
 }
 

@@ -416,6 +416,11 @@ create unique index if not exists source_sources_notebook_final_url_identity_idx
 	on source_sources(notebook_id, final_url_identity)
 	where input_kind='url' and final_url_identity is not null;
 
+create unique index if not exists source_sources_notebook_url_pdf_hash_idx
+	on source_sources(notebook_id, content_sha256)
+	where input_kind='url' and format='pdf'
+		and original_object_key like 'sources/notebooks/%/content/%/original.pdf';
+
 create table if not exists source_upload_intents (
 	id text primary key,
 	source_id text not null unique,
@@ -1361,6 +1366,32 @@ create table if not exists research_evidence_ledger (
 	last_seen_at timestamptz not null default now(),
 	primary key (session_id,url)
 );
+
+create table if not exists research_source_imports (
+	session_id text not null references research_sessions(id) on delete cascade,
+	run_id text not null references agent_runs(id) on delete cascade,
+	action_id text not null check (char_length(action_id) between 1 and 255),
+	requested_url text not null check (char_length(requested_url) between 1 and 4096),
+	final_url_identity text check (final_url_identity is null or char_length(final_url_identity) between 1 and 4096),
+	source_id text references source_sources(id) on delete set null,
+	processing_job_id text references source_processing_jobs(id) on delete set null,
+	barrier_observed_attempt_no integer check (barrier_observed_attempt_no is null or barrier_observed_attempt_no > 0),
+	retrieval_error_code text check (retrieval_error_code is null or retrieval_error_code ~ '^[a-z][a-z0-9_]{2,63}$'),
+	created_at timestamptz not null default now(),
+	unique (run_id, action_id)
+);
+
+alter table research_source_imports add column if not exists barrier_observed_attempt_no integer
+	check (barrier_observed_attempt_no is null or barrier_observed_attempt_no > 0);
+alter table research_source_imports add column if not exists retrieval_error_code text
+	check (retrieval_error_code is null or retrieval_error_code ~ '^[a-z][a-z0-9_]{2,63}$');
+
+create index if not exists research_source_imports_session_created_idx
+	on research_source_imports(session_id,created_at,action_id);
+
+create index if not exists research_source_imports_source_idx
+	on research_source_imports(source_id)
+	where source_id is not null;
 
 alter table research_evidence_ledger add column if not exists media_type text
 	check (media_type is null or media_type in ('text/html','application/pdf'));
@@ -2366,6 +2397,7 @@ alter table research_sessions enable row level security;
 alter table research_plan_versions enable row level security;
 alter table research_report_versions enable row level security;
 alter table research_evidence_ledger enable row level security;
+alter table research_source_imports enable row level security;
 alter table research_step_capsules enable row level security;
 alter table research_rollups enable row level security;
 alter table agent_trees enable row level security;
@@ -2470,6 +2502,7 @@ grant insert on agent_run_evidence_set to nano_worker;
 grant select, insert on agent_run_results to nano_worker;
 grant insert, update on chat_runs,agent_trees to nano_worker;
 grant select, insert, update on research_sessions,research_evidence_ledger to nano_worker;
+grant select, insert, update, delete on research_source_imports to nano_worker;
 grant select, insert on research_plan_versions,research_report_versions,research_step_capsules,research_rollups to nano_worker;
 grant select, insert, update on studio_outputs to nano_worker;
 grant select, insert, update, delete on
@@ -2479,7 +2512,7 @@ grant select, insert, update, delete on
 	agent_draft_source_references,
 	chat_citations
 to nano_worker;
-grant select, update, delete on source_sources to nano_worker;
+grant select, insert, update, delete on source_sources to nano_worker;
 grant select, update on source_upload_intents to nano_worker;
 grant select, insert, update, delete on source_processing_jobs to nano_worker;
 grant select, insert, update, delete on source_purge_jobs to nano_worker;
@@ -2860,6 +2893,11 @@ create policy source_sources_worker on source_sources
 	for select to nano_worker
 	using (true);
 
+drop policy if exists source_sources_worker_insert on source_sources;
+create policy source_sources_worker_insert on source_sources
+	for insert to nano_worker
+	with check (true);
+
 drop policy if exists source_sources_worker_update on source_sources;
 create policy source_sources_worker_update on source_sources
 	for update to nano_worker
@@ -3234,6 +3272,16 @@ create policy research_evidence_ledger_private on research_evidence_ledger
 	));
 drop policy if exists research_evidence_ledger_worker on research_evidence_ledger;
 create policy research_evidence_ledger_worker on research_evidence_ledger
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists research_source_imports_private on research_source_imports;
+create policy research_source_imports_private on research_source_imports
+	for select to nano_app using (exists (
+		select 1 from research_sessions session where session.id=research_source_imports.session_id
+		  and session.user_id=nullif(current_setting('app.principal_id', true), '')
+	));
+drop policy if exists research_source_imports_worker on research_source_imports;
+create policy research_source_imports_worker on research_source_imports
 	for all to nano_worker using (true) with check (true);
 
 drop policy if exists research_step_capsules_private on research_step_capsules;

@@ -12,8 +12,9 @@ import (
 const ResearchReadURLMaxChars = 120_000
 
 type readURLAction struct {
-	reader     researchURLReader
-	htmlReader webreader.Adapter
+	reader      researchURLReader
+	htmlReader  webreader.Adapter
+	sourceFirst webreader.Acquirer
 }
 
 type researchURLReader interface {
@@ -28,6 +29,8 @@ type readURLInput struct {
 }
 
 type readURLOutput struct {
+	Outcome        string `json:"outcome,omitempty"`
+	RequestedURL   string `json:"requested_url,omitempty"`
 	Title          string `json:"title"`
 	FinalURL       string `json:"final_url"`
 	Markdown       string `json:"markdown"`
@@ -37,6 +40,11 @@ type readURLOutput struct {
 	MediaType      string `json:"media_type,omitempty"`
 	PageCount      int    `json:"page_count,omitempty"`
 	DocumentHandle string `json:"document_handle,omitempty"`
+}
+
+func isResearchPDFImportRequired(output readURLOutput) bool {
+	return output.Outcome == "pdf_requires_source_import" &&
+		output.MediaType == webreader.MediaTypePDF && output.Markdown == ""
 }
 
 func NewReadURLAction(reader webreader.Adapter) Action {
@@ -49,6 +57,13 @@ func NewResearchURLActions(reader *ResearchURLContentReader, legacyHTML ...webre
 		htmlReader = legacyHTML[0]
 	}
 	return []Action{&readURLAction{reader: reader, htmlReader: htmlReader}, &readDocumentPagesAction{reader: reader}}
+}
+
+func NewVersionedResearchURLActions(reader *ResearchURLContentReader, legacyHTML webreader.Adapter, sourceFirst webreader.Acquirer) []Action {
+	return []Action{
+		&readURLAction{reader: reader, htmlReader: legacyHTML, sourceFirst: sourceFirst},
+		&readDocumentPagesAction{reader: reader},
+	}
 }
 
 func (*readURLAction) CrashReplaySafe() bool { return true }
@@ -74,7 +89,13 @@ func (a *readURLAction) Execute(ctx context.Context, request ActionRequest) (Act
 	if err := ctx.Err(); err != nil {
 		return ActionResult{}, err
 	}
-	if a == nil || a.reader == nil {
+	if a == nil {
+		return ActionResult{Status: ActionDomainError, ErrorCode: "read_url_unavailable"}, nil
+	}
+	if request.Definition.Identity == "research.executor" && request.Definition.Version >= 9 {
+		return a.executeSourceFirst(ctx, request, input)
+	}
+	if a.reader == nil {
 		return ActionResult{Status: ActionDomainError, ErrorCode: "read_url_unavailable"}, nil
 	}
 	reader := a.reader
@@ -94,6 +115,48 @@ func (a *readURLAction) Execute(ctx context.Context, request ActionRequest) (Act
 		Title: read.Title, FinalURL: read.FinalURL, Markdown: read.Markdown,
 		Engine: read.Engine, WordCount: read.WordCount, Truncated: read.Truncated,
 		MediaType: read.MediaType, PageCount: read.PageCount, DocumentHandle: read.DocumentHandle,
+	})
+	if err != nil {
+		return ActionResult{}, err
+	}
+	return ActionResult{Status: ActionSucceeded, Output: payload}, nil
+}
+
+func (a *readURLAction) executeSourceFirst(ctx context.Context, request ActionRequest, input readURLInput) (ActionResult, error) {
+	if a.sourceFirst == nil {
+		return ActionResult{Status: ActionDomainError, ErrorCode: "read_url_unavailable"}, nil
+	}
+	content, err := a.sourceFirst.Acquire(ctx, webreader.Request{
+		URL: input.URL, Format: webreader.FormatMarkdown, MaxChars: ResearchReadURLMaxChars,
+	})
+	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return ActionResult{}, contextErr
+		}
+		return ActionResult{Status: ActionDomainError, ErrorCode: classifyReadURLError(err)}, nil
+	}
+	if content.MediaType == webreader.MediaTypePDF {
+		payload, err := json.Marshal(struct {
+			Outcome      string `json:"outcome"`
+			RequestedURL string `json:"requested_url"`
+			FinalURL     string `json:"final_url"`
+			MediaType    string `json:"media_type"`
+		}{
+			Outcome: "pdf_requires_source_import", RequestedURL: input.URL,
+			FinalURL: content.FinalURL, MediaType: webreader.MediaTypePDF,
+		})
+		if err != nil {
+			return ActionResult{}, err
+		}
+		return ActionResult{Status: ActionSucceeded, Output: payload}, nil
+	}
+	if content.MediaType != webreader.MediaTypeHTML {
+		return ActionResult{Status: ActionDomainError, ErrorCode: "read_url_response_invalid"}, nil
+	}
+	payload, err := json.Marshal(readURLOutput{
+		Title: content.Page.Title, FinalURL: content.Page.FinalURL, Markdown: content.Page.Content,
+		Engine: content.Page.Engine, WordCount: content.Page.WordCount, Truncated: content.Page.Truncated,
+		MediaType: webreader.MediaTypeHTML,
 	})
 	if err != nil {
 		return ActionResult{}, err

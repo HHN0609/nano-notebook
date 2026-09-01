@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
@@ -19,14 +20,19 @@ import (
 type evidenceVectorSearchStub struct {
 	candidateID string
 	scopes      []qdrantstore.Scope
+	mu          sync.Mutex
 }
 
 func (s *evidenceVectorSearchStub) SearchDense(_ context.Context, _ []float32, scope qdrantstore.Scope, _ int) ([]retrieval.Candidate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.scopes = append(s.scopes, scope)
 	return []retrieval.Candidate{{ID: s.candidateID, Score: 0.9}}, nil
 }
 
 func (s *evidenceVectorSearchStub) SearchSparse(_ context.Context, _ retrieval.SparseVector, scope qdrantstore.Scope, _ int) ([]retrieval.Candidate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.scopes = append(s.scopes, scope)
 	return []retrieval.Candidate{{ID: s.candidateID, Score: 4.2}}, nil
 }

@@ -74,27 +74,31 @@ func (q *Queue) Claim(ctx context.Context) (Lease, bool, error) {
 		set state='failed', updated_at=$1
 		from exhausted e
 		where s.id=e.source_id
-		returning s.notebook_id
+	returning s.id,s.notebook_id
 	`, now)
 	if err != nil {
 		return Lease{}, false, err
 	}
-	exhaustedNotebookIDs := make([]string, 0)
+	type exhaustedSource struct{ sourceID, notebookID string }
+	exhaustedSources := make([]exhaustedSource, 0)
 	for exhaustedRows.Next() {
-		var notebookID string
-		if err := exhaustedRows.Scan(&notebookID); err != nil {
+		var item exhaustedSource
+		if err := exhaustedRows.Scan(&item.sourceID, &item.notebookID); err != nil {
 			exhaustedRows.Close()
 			return Lease{}, false, err
 		}
-		exhaustedNotebookIDs = append(exhaustedNotebookIDs, notebookID)
+		exhaustedSources = append(exhaustedSources, item)
 	}
 	if err := exhaustedRows.Err(); err != nil {
 		exhaustedRows.Close()
 		return Lease{}, false, err
 	}
 	exhaustedRows.Close()
-	for _, notebookID := range exhaustedNotebookIDs {
-		if err := realtime.NotifyNotebookSources(ctx, tx, notebookID); err != nil {
+	for _, item := range exhaustedSources {
+		if err := agent.WakeResearchSourceImportWaitersInTx(ctx, tx, item.sourceID); err != nil {
+			return Lease{}, false, err
+		}
+		if err := realtime.NotifyNotebookSources(ctx, tx, item.notebookID); err != nil {
 			return Lease{}, false, err
 		}
 	}
@@ -235,19 +239,22 @@ func (q *Queue) HoldForReview(ctx context.Context, jobID, leaseToken string) err
 	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
 		return err
 	}
-	var notebookID string
+	var sourceID, notebookID string
 	err = tx.QueryRow(ctx, `
 		update source_processing_jobs j
 		set status='succeeded',lease_token=null,lease_expires_at=null,last_error_code=null,updated_at=now()
 		from source_sources s
 		where j.id=$1 and j.lease_token=$2::uuid and j.status='running' and j.lease_expires_at > now()
 			and s.id=j.source_id and s.state='qualifying'
-		returning j.notebook_id
-	`, jobID, leaseToken).Scan(&notebookID)
+		returning j.source_id,j.notebook_id
+	`, jobID, leaseToken).Scan(&sourceID, &notebookID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrLeaseLost
 	}
 	if err != nil {
+		return err
+	}
+	if err := agent.WakeResearchSourceImportWaitersInTx(ctx, tx, sourceID); err != nil {
 		return err
 	}
 	if err := realtime.NotifyNotebookSources(ctx, tx, notebookID); err != nil {
@@ -363,6 +370,12 @@ func (q *Queue) CompleteEvidence(ctx context.Context, jobID, leaseToken, revisio
 	`, jobID, now); err != nil {
 		return err
 	}
+	if err := agent.AttachResearchSourceEvidenceInTx(ctx, tx, sourceID, revisionID); err != nil {
+		return err
+	}
+	if err := agent.WakeResearchSourceImportWaitersInTx(ctx, tx, sourceID); err != nil {
+		return err
+	}
 	if err := realtime.NotifyNotebookSources(ctx, tx, notebookID); err != nil {
 		return err
 	}
@@ -439,7 +452,16 @@ func (q *Queue) finish(ctx context.Context, jobID, leaseToken string, succeeded 
 	`, jobID, nextJob, persistedError); err != nil {
 		return err
 	}
-	if !succeeded && inputKind == "url" && discoveryUserID != nil {
+	if err := agent.WakeResearchSourceImportWaitersInTx(ctx, tx, sourceID); err != nil {
+		return err
+	}
+	researchImported := false
+	if !succeeded {
+		if err := tx.QueryRow(ctx, `select exists(select 1 from research_source_imports where source_id=$1)`, sourceID).Scan(&researchImported); err != nil {
+			return err
+		}
+	}
+	if !succeeded && inputKind == "url" && discoveryUserID != nil && !researchImported {
 		if err := purgeDiscoveredURLSource(ctx, tx, sourceID, notebookID, *discoveryUserID, originalObjectKey); err != nil {
 			return err
 		}

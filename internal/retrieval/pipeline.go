@@ -39,7 +39,21 @@ type EvidenceCandidate struct {
 	SourceTitle string
 	Preview     string
 	UnitRefs    []UnitRef
+	Coordinates []EvidenceCoordinate
 	RerankScore float64
+}
+
+type EvidenceCoordinate struct {
+	Kind    string  `json:"kind"`
+	Page    int     `json:"page,omitempty"`
+	Slide   int     `json:"slide,omitempty"`
+	Block   int     `json:"block,omitempty"`
+	StartMS int64   `json:"start_ms,omitempty"`
+	EndMS   int64   `json:"end_ms,omitempty"`
+	X       float64 `json:"x,omitempty"`
+	Y       float64 `json:"y,omitempty"`
+	Width   float64 `json:"width,omitempty"`
+	Height  float64 `json:"height,omitempty"`
 }
 
 type SearchResult struct {

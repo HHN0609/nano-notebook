@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -151,6 +152,26 @@ func TestRewriteResearchReportLinksDowngradesUnreadCitationWithoutDroppingReport
 	}
 }
 
+func TestSearchedResearchSourceEvidenceRequiresSuccessfulSearchManifest(t *testing.T) {
+	succeeded := &ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{
+		"result_version":2,"complete_empty":false,"degraded":false,"degradations":[],
+		"evidence":[{"chunk_id":"chunk_pdf","source_id":"src_pdf","evidence_revision_id":"evr_pdf"}]
+	}`)}
+	failed := &ActionResult{Status: ActionDomainError, ErrorCode: "retrieval_unavailable"}
+	prefix := CheckpointPrefix{Proposals: []AcceptedProposal{{Actions: []AcceptedAction{
+		{Name: "search_evidence", Result: succeeded},
+		{Name: "search_evidence", Result: failed},
+		{Name: "read_url", Result: succeeded},
+	}}}}
+	references := searchedResearchSourceEvidence(prefix)
+	if len(references) != 1 {
+		t.Fatalf("references=%+v", references)
+	}
+	if _, ok := references[researchSourceEvidenceReference{SourceID: "src_pdf", RevisionID: "evr_pdf"}]; !ok {
+		t.Fatalf("searched PDF authority missing: %+v", references)
+	}
+}
+
 func TestResearchExecutionControlPromptCarriesPinnedBatchContract(t *testing.T) {
 	got := researchExecutionControlPrompt(6)
 	for _, required := range []string{"at most 6 tool calls", "one to three queries", "exactly one URL"} {
@@ -182,6 +203,37 @@ func TestResearchFinalProjectionHidesDiscoveredOnlyLedgerURLs(t *testing.T) {
 	}
 }
 
+func TestResearchPDFImportRequiredResultIsDiscoveryMetadataNotReadEvidence(t *testing.T) {
+	output := readURLOutput{
+		Outcome:      "pdf_requires_source_import",
+		RequestedURL: "https://example.com/paper",
+		FinalURL:     "https://cdn.example.com/paper.pdf",
+		MediaType:    "application/pdf",
+	}
+	if !isResearchPDFImportRequired(output) {
+		t.Fatal("source-first PDF result was eligible for read-evidence materialization")
+	}
+	if isResearchPDFImportRequired(readURLOutput{FinalURL: output.FinalURL, Markdown: "verified HTML body"}) {
+		t.Fatal("ordinary read_url output was classified as a PDF import requirement")
+	}
+}
+
+func TestResearchPDFImportRequiredCapsuleDoesNotClaimRetainedEvidence(t *testing.T) {
+	payload := json.RawMessage(`{"outcome":"pdf_requires_source_import","requested_url":"https://example.com/paper","final_url":"https://cdn.example.com/paper.pdf","media_type":"application/pdf"}`)
+	capsule := buildResearchStepCapsule(AcceptedProposal{DecisionNo: 1, Actions: []AcceptedAction{{
+		ActionID: "action_pdf", Name: "read_url", Input: json.RawMessage(`{"url":"https://example.com/paper"}`),
+		Result: &ActionResult{Status: ActionSucceeded, Output: payload},
+	}}})
+	if strings.Contains(capsule, "Retained evidence") || strings.Contains(capsule, "words:") {
+		t.Fatalf("PDF import requirement was represented as read evidence:\n%s", capsule)
+	}
+	for _, required := range []string{"pdf_requires_source_import", "https://cdn.example.com/paper.pdf"} {
+		if !strings.Contains(capsule, required) {
+			t.Fatalf("capsule missing %q:\n%s", required, capsule)
+		}
+	}
+}
+
 func TestResearchCompletionSignalRequiresAssembledArtifact(t *testing.T) {
 	for _, value := range []string{"Final", "done.", "已完成！"} {
 		if !isResearchCompletionSignal(value) {
@@ -191,6 +243,58 @@ func TestResearchCompletionSignalRequiresAssembledArtifact(t *testing.T) {
 	for _, value := range []string{"# Decision\n\nAdopt checkpointed sections.", "完成情况：建议采用分段写作。"} {
 		if isResearchCompletionSignal(value) {
 			t.Fatalf("complete report %q was rejected as a signal", value)
+		}
+	}
+}
+
+func TestSourceFirstResearchRejectsEveryFinalUntilReportAssemblyCheckpoint(t *testing.T) {
+	runtime := &ResearchRuntime{}
+	decision := models.ModelDecision{Final: &models.FinalDraft{Text: "# Decision\n\nUse the durable Source pipeline."}}
+	if _, err := runtime.PrepareDecisionResponse(context.Background(), Execution{AgentConfigID: "research.executor@9"}, CheckpointPrefix{}, decision); err == nil {
+		t.Fatal("v9 accepted a full Final that bypassed the Source import barrier")
+	}
+	if got, err := runtime.PrepareDecisionResponse(context.Background(), Execution{AgentConfigID: "research.executor@8"}, CheckpointPrefix{}, decision); err != nil || got.Final == nil {
+		t.Fatalf("legacy full Final changed: got=%+v err=%v", got, err)
+	}
+}
+
+func TestSourceFirstResearchRequiresAssemblyAfterLatestImport(t *testing.T) {
+	succeeded := &ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"ok":true}`)}
+	assembled := &ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"path":"report.md","object_key":"research-workspaces/run/a/report.md","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bytes":10}`)}
+	prefix := CheckpointPrefix{Proposals: []AcceptedProposal{
+		{DecisionNo: 1, Actions: []AcceptedAction{{Name: "assemble_research_report", Result: assembled}}},
+		{DecisionNo: 2, Actions: []AcceptedAction{{Name: "save_url_as_source", Result: succeeded}}},
+	}}
+	if hasAssembledResearchReportAfterImports(prefix) {
+		t.Fatal("assembly before the latest import was accepted")
+	}
+	prefix.Proposals = append(prefix.Proposals, AcceptedProposal{DecisionNo: 3, Actions: []AcceptedAction{{Name: "assemble_research_report", Result: assembled}}})
+	if !hasAssembledResearchReportAfterImports(prefix) {
+		t.Fatal("assembly after the latest import was rejected")
+	}
+}
+
+func TestResearchSourceImportProjectionContainsOnlyLifecycleState(t *testing.T) {
+	projection := formatResearchSourceImportProjection([]researchSourceImportState{
+		{SourceID: "src_pending", SourceState: "normalizing", JobStatus: "running"},
+		{SourceID: "src_ready", SourceState: "ready", JobStatus: "succeeded", Searchable: true},
+		{SourceID: "src_failed", SourceState: "failed", JobStatus: "failed", ErrorCode: "extraction_invalid"},
+		{SourceID: "src_review", SourceState: "qualifying", JobStatus: "succeeded"},
+	})
+	for _, required := range []string{
+		"Pending Source Imports:",
+		"src_pending: processing, not searchable",
+		"src_ready: ready, searchable",
+		"src_failed: failed, extraction_invalid, not searchable",
+		"src_review: review_required, not searchable",
+	} {
+		if !strings.Contains(projection, required) {
+			t.Fatalf("projection missing %q:\n%s", required, projection)
+		}
+	}
+	for _, forbidden := range []string{"worker log", "%PDF", "https://"} {
+		if strings.Contains(projection, forbidden) {
+			t.Fatalf("projection leaked %q:\n%s", forbidden, projection)
 		}
 	}
 }

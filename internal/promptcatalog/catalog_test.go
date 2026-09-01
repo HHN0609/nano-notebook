@@ -27,7 +27,7 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
-	const extraVersions = 6 // chat composer upgrades plus final deep Research planner/executor/reporter upgrades, alongside their @1s
+	const extraVersions = 7 // chat composer upgrades plus final deep Research planner/executor/reporter upgrades, alongside their @1s
 	if got := len(catalog.Versions()); got != len(want)+extraVersions {
 		t.Fatalf("versions=%d want=%d", got, len(want)+extraVersions)
 	}
@@ -66,6 +66,14 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 	executorV4, ok := catalog.Resolve("agent.deep-research-executor", 4)
 	if !ok || executorV4.Contract != "research_execution_text.v1" || !strings.Contains(executorV4.Content, "review_present=false") || !strings.Contains(executorV4.Content, "never use numbered placeholders") {
 		t.Fatalf("executor v4 prompt=%+v ok=%v", executorV4, ok)
+	}
+	executorV5, ok := catalog.Resolve("agent.deep-research-executor", 5)
+	if !ok || executorV5.Contract != "research_execution_text.v1" ||
+		!strings.Contains(executorV5.Content, "save_url_as_source") ||
+		!strings.Contains(executorV5.Content, "PDF facts are unavailable") ||
+		!strings.Contains(executorV5.Content, "search_evidence") ||
+		!strings.Contains(executorV5.Content, "assemble_research_report") {
+		t.Fatalf("executor v5 prompt=%+v ok=%v", executorV5, ok)
 	}
 	reporterV3, ok := catalog.Resolve("agent.deep-research-reporter", 3)
 	if !ok || reporterV3.Contract != "research_report_text.v1" || !strings.Contains(reporterV3.Content, "not verified in this run") || !strings.Contains(reporterV3.Content, "Organize the report around the Member's decision") {

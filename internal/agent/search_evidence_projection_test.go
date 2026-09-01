@@ -85,6 +85,36 @@ func TestBuildSearchEvidenceModelOutputTruncatesTheTopPreviewBeforeDroppingAllEv
 	}
 }
 
+func TestSourceFirstSearchEvidenceProjectionCarriesRevisionChunkRangeAndPDFPage(t *testing.T) {
+	manifest := searchEvidenceResult{
+		ResultVersion: SearchEvidenceResultVersion,
+		Evidence:      []searchEvidenceReference{{ChunkID: "chunk_pdf", SourceID: "src_pdf", EvidenceRevisionID: "evr_pdf"}},
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, err := projectSearchEvidenceForModel(Execution{
+		AgentConfigID: "research.executor@9", ActionResultByteLimit: 8 * 1024,
+	}, raw, []retrieval.EvidenceCandidate{{
+		ID: "chunk_pdf", SourceID: "src_pdf", RevisionID: "evr_pdf", SourceTitle: "Paper", Preview: "Page-aware evidence.",
+		UnitRefs:    []retrieval.UnitRef{{UnitID: "unit_pdf", StartRune: 0, EndRune: 20}},
+		Coordinates: []retrieval.EvidenceCoordinate{{Kind: "pdf_region", Page: 7, X: 72, Y: 700, Width: 180, Height: 14}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range [][]byte{
+		[]byte(`"source_id":"src_pdf"`), []byte(`"evidence_revision_id":"evr_pdf"`),
+		[]byte(`"chunk_id":"chunk_pdf"`), []byte(`"unit_id":"unit_pdf"`),
+		[]byte(`"kind":"pdf_region"`), []byte(`"page":7`), []byte("Page-aware evidence."),
+	} {
+		if !bytes.Contains(projected, required) {
+			t.Fatalf("source-first projection missing %s: %s", required, projected)
+		}
+	}
+}
+
 func TestDecodeSearchEvidenceResultAcceptsLegacyExpandedCheckpoint(t *testing.T) {
 	decoded, err := decodeSearchEvidenceResult(json.RawMessage(`{
 		"complete_empty":false,"degraded":false,"degradations":[],

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -84,6 +85,61 @@ func TestPinnedPreV8ResearchDefinitionKeepsHTMLOnlyReadURLPath(t *testing.T) {
 	var output map[string]json.RawMessage
 	if json.Unmarshal(result.Output, &output) != nil || output["media_type"] != nil || output["document_handle"] != nil {
 		t.Fatalf("legacy output=%s", result.Output)
+	}
+}
+
+func TestPinnedV9ResearchReadURLRedirectsPDFToPermanentSourceImportWithoutBodyOrHandle(t *testing.T) {
+	pdf := researchTextPDF("This body must never enter the v9 read_url result.")
+	acquirer := &acquiringStub{content: webreader.Content{
+		MediaType: webreader.MediaTypePDF, FinalURL: "https://cdn.example.com/paper.pdf", PDF: pdf,
+	}}
+	v8Reader := NewResearchURLContentReader(acquirer, nil, nil, nil, ResearchURLReaderConfig{})
+	action := NewVersionedResearchURLActions(v8Reader, &webReaderStub{}, acquirer)[0]
+
+	result, err := action.Execute(context.Background(), ActionRequest{
+		Definition: agentcatalog.MustParseReference("research.executor@9"),
+		Input:      json.RawMessage(`{"url":"https://example.com/paper"}`),
+	})
+	if err != nil || result.Status != ActionSucceeded {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	var output map[string]json.RawMessage
+	if json.Unmarshal(result.Output, &output) != nil || string(output["outcome"]) != `"pdf_requires_source_import"` ||
+		string(output["requested_url"]) != `"https://example.com/paper"` ||
+		string(output["final_url"]) != `"https://cdn.example.com/paper.pdf"` ||
+		string(output["media_type"]) != `"application/pdf"` {
+		t.Fatalf("output=%s", result.Output)
+	}
+	for _, forbidden := range [][]byte{
+		[]byte("This body must never"), []byte("nano-pdf-page"), []byte(`"markdown"`),
+		[]byte(`"document_handle"`), []byte(`"page_count"`), []byte(`"pdf"`),
+	} {
+		if bytes.Contains(result.Output, forbidden) {
+			t.Fatalf("v9 read_url leaked %q: %s", forbidden, result.Output)
+		}
+	}
+}
+
+func TestPinnedV9ResearchReadURLKeepsBoundedHTMLBehavior(t *testing.T) {
+	acquirer := &acquiringStub{content: webreader.Content{
+		MediaType: webreader.MediaTypeHTML,
+		Page: webreader.Page{
+			Title: "HTML evidence", FinalURL: "https://example.com/article", Content: "# HTML\n\nBounded evidence.",
+			Engine: "lightweight", WordCount: 3,
+		},
+	}}
+	action := NewVersionedResearchURLActions(nil, &webReaderStub{}, acquirer)[0]
+	result, err := action.Execute(context.Background(), ActionRequest{
+		Definition: agentcatalog.MustParseReference("research.executor@9"),
+		Input:      json.RawMessage(`{"url":"https://example.com/article"}`),
+	})
+	if err != nil || result.Status != ActionSucceeded || acquirer.calls != 1 {
+		t.Fatalf("result=%+v calls=%d err=%v", result, acquirer.calls, err)
+	}
+	var output readURLOutput
+	if json.Unmarshal(result.Output, &output) != nil || output.Markdown != "# HTML\n\nBounded evidence." ||
+		output.MediaType != webreader.MediaTypeHTML || output.FinalURL != "https://example.com/article" {
+		t.Fatalf("output=%s", result.Output)
 	}
 }
 
