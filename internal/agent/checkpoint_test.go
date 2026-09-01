@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
@@ -237,6 +238,58 @@ func TestActionResultAndFinalDraftCheckpointsEncodeTypedPayloads(t *testing.T) {
 	}
 	if final.IdentityKey != "decision:3/final" || final.Kind != CheckpointFinalDraft || final.DecisionNo != 3 || final.ActionIndex != nil || final.ActionID != "" || string(final.Payload) != `{"text":"Final answer."}` || final.PayloadSHA256 == "" {
 		t.Fatalf("final checkpoint = %+v", final)
+	}
+}
+
+func TestActionResultCheckpointV2RoundTripsSafeStructuredDomainError(t *testing.T) {
+	proposal, err := NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{{
+		Name: "update_todo_status", Input: json.RawMessage(`{"revision":1,"updates":[{"id":"todo_9","status":"completed"}]}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := NewActionResultCheckpoint(1, 0, "decision:1/action:0", ActionResult{
+		Status: ActionDomainError,
+		Error: &ActionError{
+			Kind: "domain", Code: "todo_item_not_found", Message: "The TODO item does not exist.",
+			Suggestion: "Use an item ID from the current Agent Status.", Retryable: true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PayloadVersion != 2 {
+		t.Fatalf("payload version = %d, want 2", result.PayloadVersion)
+	}
+	want := `{"action_id":"decision:1/action:0","status":"domain_error","error":{"kind":"domain","code":"todo_item_not_found","message":"The TODO item does not exist.","suggestion":"Use an item ID from the current Agent Status.","retryable":true}}`
+	if string(result.Payload) != want {
+		t.Fatalf("payload = %s, want %s", result.Payload, want)
+	}
+	prefix, err := LoadCheckpointPrefix(context.Background(), []Checkpoint{
+		{SequenceNo: 1, PendingCheckpoint: proposal, CreatedAt: time.Date(2026, 8, 31, 7, 20, 1, 0, time.UTC)},
+		{SequenceNo: 2, PendingCheckpoint: result},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := prefix.Proposals[0].Actions[0].Result
+	if got == nil || got.Error == nil || got.Error.Code != "todo_item_not_found" || got.ErrorCode != "" || !got.Error.Retryable {
+		t.Fatalf("round-tripped result = %#v", got)
+	}
+}
+
+func TestActionResultCheckpointRejectsUnsafeStructuredDomainError(t *testing.T) {
+	tests := []ActionError{
+		{Kind: "", Code: "todo_failed", Message: "safe", Retryable: true},
+		{Kind: "domain", Code: "BAD CODE", Message: "safe", Retryable: true},
+		{Kind: "domain", Code: "todo_failed", Message: "", Retryable: true},
+		{Kind: "domain", Code: "todo_failed", Message: strings.Repeat("x", 513), Retryable: true},
+		{Kind: "domain", Code: "todo_failed", Message: "safe", Suggestion: strings.Repeat("x", 513), Retryable: true},
+	}
+	for _, detail := range tests {
+		if _, err := NewActionResultCheckpoint(1, 0, "decision:1/action:0", ActionResult{Status: ActionDomainError, Error: &detail}); err == nil {
+			t.Fatalf("unsafe detail accepted: %#v", detail)
+		}
 	}
 }
 

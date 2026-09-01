@@ -5,8 +5,8 @@ import "github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
 var productionPromptCatalog = promptcatalog.MustLoadEmbedded()
 
 var (
-	BareSystemPrompt     = mustPromptContent("agent.chat-composer-bare", 2)
-	GroundedSystemPrompt = mustPromptContent("agent.chat-composer-grounded", 3)
+	BareSystemPrompt     = mustPromptContent("agent.chat-composer-bare", 3)
+	GroundedSystemPrompt = mustPromptContent("agent.chat-composer-grounded", 4)
 )
 
 func mustPromptContent(identity string, version int) string {
@@ -27,7 +27,7 @@ func promptTraceRef(identity string, version int) PromptVersionRef {
 
 func composerPromptTraceRef(promptVersion string) PromptVersionRef {
 	if promptVersion == GroundedPromptVersion {
-		return promptTraceRef("agent.chat-composer-grounded", 3)
+		return promptTraceRef("agent.chat-composer-grounded", 4)
 	}
-	return promptTraceRef("agent.chat-composer-bare", 2)
+	return promptTraceRef("agent.chat-composer-bare", 3)
 }

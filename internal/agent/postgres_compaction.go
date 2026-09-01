@@ -75,6 +75,10 @@ func (r *PostgresRuntime) prepareDecisionRequest(
 	systemPrompt := r.contextSystemPrompt(execution)
 	request := buildProjectedRequest(execution, systemPrompt, projected, definitions)
 	request.InvocationPolicy = execution.ModelInvocation
+	request, err = r.FinalizeDecisionRequest(ctx, execution, prefix, request)
+	if err != nil {
+		return models.ModelRequest{}, err
+	}
 	before, err := EstimateModelRequestTokens(request)
 	if err != nil {
 		return models.ModelRequest{}, err
@@ -157,6 +161,10 @@ func (r *PostgresRuntime) prepareDecisionRequest(
 	}
 	afterRequest := buildProjectedRequest(execution, systemPrompt, candidateUnits, definitions)
 	afterRequest.InvocationPolicy = execution.ModelInvocation
+	afterRequest, err = r.FinalizeDecisionRequest(ctx, execution, prefix, afterRequest)
+	if err != nil {
+		return models.ModelRequest{}, err
+	}
 	after, err := EstimateModelRequestTokens(afterRequest)
 	if err != nil {
 		return models.ModelRequest{}, err
@@ -178,6 +186,10 @@ func (r *PostgresRuntime) prepareDecisionRequest(
 	}
 	acceptedRequest := buildProjectedRequest(execution, systemPrompt, acceptedUnits, definitions)
 	acceptedRequest.InvocationPolicy = execution.ModelInvocation
+	acceptedRequest, err = r.FinalizeDecisionRequest(ctx, execution, prefix, acceptedRequest)
+	if err != nil {
+		return models.ModelRequest{}, err
+	}
 	acceptedCount, err := EstimateModelRequestTokens(acceptedRequest)
 	if err != nil || acceptedCount.Tokens > execution.ModelContext.Budgets.SafeInputTokens {
 		return models.ModelRequest{}, ErrContextBudgetExceeded
@@ -379,6 +391,7 @@ func attachContextTelemetry(request *models.ModelRequest, execution Execution, u
 			exactSuffixTokens += unitTokens
 		}
 	}
+	statusTelemetry := request.ContextTelemetry
 	request.ContextTelemetry = models.ModelContextTelemetry{
 		ProviderCapabilityIdentity: execution.ModelContext.Capability.Reference().String(),
 		ContextPolicyIdentity:      execution.ModelContext.Policy.Reference().String(),
@@ -393,6 +406,15 @@ func attachContextTelemetry(request *models.ModelRequest, execution Execution, u
 		InputTokens:                count.Tokens,
 		InputTokenSource:           string(count.Source),
 		ExactSuffixTokens:          exactSuffixTokens,
+		AgentStatusInjected:        statusTelemetry.AgentStatusInjected,
+		AgentStatusBytes:           statusTelemetry.AgentStatusBytes,
+		AgentStatusTokens:          statusTelemetry.AgentStatusTokens,
+		TodoRevision:               statusTelemetry.TodoRevision,
+		TodoPendingCount:           statusTelemetry.TodoPendingCount,
+		TodoInProgressCount:        statusTelemetry.TodoInProgressCount,
+		TodoCompletedCount:         statusTelemetry.TodoCompletedCount,
+		TodoCancelledCount:         statusTelemetry.TodoCancelledCount,
+		MaxToolInputRepeatCount:    statusTelemetry.MaxToolInputRepeatCount,
 	}
 	if compaction != nil {
 		request.ContextTelemetry.CompactionID = compaction.ID

@@ -163,7 +163,9 @@ func NanoToolCapabilities() map[string]agentcatalog.ToolCapability {
 		"read_skill":               {Scheduling: agentcatalog.ToolParallel},
 		"read_url":                 {Scheduling: agentcatalog.ToolParallel},
 		"save_url_as_source":       {Scheduling: agentcatalog.ToolOrderedSync},
+		"rewrite_todo_list":        {Scheduling: agentcatalog.ToolOrderedSync},
 		"search_evidence":          {Scheduling: agentcatalog.ToolParallel},
+		"update_todo_status":       {Scheduling: agentcatalog.ToolOrderedSync},
 		"web_search":               {Scheduling: agentcatalog.ToolOrderedSync},
 		"write_research_file":      {Scheduling: agentcatalog.ToolOrderedSync},
 	}
@@ -180,11 +182,12 @@ func ChatLeaderExecutorCapability() agentcatalog.ExecutorCapability {
 			agentcatalog.MustParseReference("chat.answer@1"): true,
 		},
 		Tools: map[string]bool{
-			"calculate": true, "current_time": true, "search_evidence": true,
+			"calculate": true, "current_time": true, "rewrite_todo_list": true,
+			"search_evidence": true, "update_todo_status": true,
 		},
 		ChildExecutors: map[string]bool{"research": true},
 		MaxLimits: agentcatalog.Limits{
-			ModelCalls: 5, Actions: 8, ActionBatch: 4, ContextBytes: 65536, ResultBytes: 65536, Attempts: 3,
+			ModelCalls: 17, ActionDecisions: 4, Actions: 8, PlanMutations: 12, ActionBatch: 4, ContextBytes: 65536, ResultBytes: 65536, Attempts: 3,
 		},
 		MaxChildren: 1, MemberVisible: true, CanPublish: true,
 	}

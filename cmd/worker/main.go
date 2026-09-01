@@ -463,6 +463,8 @@ func main() {
 	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient).WithMetrics(taskMetrics)
 	calculateTool := agent.NewCalculateAction()
 	currentTimeTool := agent.NewCurrentTimeAction(nil)
+	rewriteTodoListTool := agent.NewRewriteTodoListAction(runtime)
+	updateTodoStatusTool := agent.NewUpdateTodoStatusAction(runtime)
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
 	webSearchTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewWebSearchAction(searchProvider))
 	readSkillTool := agent.NewReadSkillAction(definitionCatalog, skillCatalog)
@@ -475,7 +477,10 @@ func main() {
 		slog.Error("Research workspace Tools invalid", "error", err)
 		os.Exit(1)
 	}
-	registryTools := []agent.Action{calculateTool, currentTimeTool, searchEvidenceTool, webSearchTool, readSkillTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool}
+	registryTools := []agent.Action{
+		calculateTool, currentTimeTool, rewriteTodoListTool, searchEvidenceTool, updateTodoStatusTool,
+		webSearchTool, readSkillTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool,
+	}
 	registryTools = append(registryTools, workspaceTools...)
 	registry, err := agent.NewActionRegistry(registryTools...)
 	if err != nil {
@@ -485,7 +490,9 @@ func main() {
 	mcpToolRegistrations := []agent.MCPToolRegistration{
 		agent.MCPToolRegistration{Action: calculateTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: currentTimeTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: rewriteTodoListTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: updateTodoStatusTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readSkillTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readURLTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
@@ -788,7 +795,7 @@ func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@15"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@16"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}

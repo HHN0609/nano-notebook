@@ -23,6 +23,7 @@ type Execution struct {
 	ActionDecisionLimit    int
 	FinalDecisionLimit     int
 	ActionLimit            int
+	PlanMutationLimit      int
 	ActionBatchLimit       int
 	ActionResultByteLimit  int
 	ActionResultsByteLimit int

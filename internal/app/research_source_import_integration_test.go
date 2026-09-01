@@ -977,7 +977,7 @@ func admitResearchExecutionForSourceImport(t *testing.T, api *testAPI, email str
 		t.Fatal(err)
 	}
 	api.server = app.NewServer(app.Config{
-		CookieSecure: false, AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@15"),
+		CookieSecure: false, AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@16"),
 	}, api.db)
 	api.handler = api.server.Handler()
 	sessionCookie, csrfCookie := api.registerWithCSRF(t, email)

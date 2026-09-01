@@ -27,6 +27,7 @@ type PostgresRuntime struct {
 	replayStager ReplayStager
 	grounder     *GroundingService
 	metrics      *TaskMetricsRecorder
+	now          func() time.Time
 }
 
 type RuntimeOption func(*PostgresRuntime)
@@ -36,6 +37,14 @@ type RuntimeOption func(*PostgresRuntime)
 func WithTaskMetrics(recorder *TaskMetricsRecorder) RuntimeOption {
 	return func(runtime *PostgresRuntime) {
 		runtime.metrics = recorder
+	}
+}
+
+func WithRuntimeClock(now func() time.Time) RuntimeOption {
+	return func(runtime *PostgresRuntime) {
+		if now != nil {
+			runtime.now = now
+		}
 	}
 }
 
@@ -126,6 +135,7 @@ func NewPostgresRuntime(pool *pgxpool.Pool, systemPrompt string, newMessageID fu
 	runtime := &PostgresRuntime{
 		pool: pool, systemPrompt: systemPrompt, newMessageID: newMessageID,
 		commit: func(ctx context.Context, tx pgx.Tx) error { return tx.Commit(ctx) },
+		now:    time.Now,
 	}
 	for _, option := range options {
 		option(runtime)
@@ -144,9 +154,10 @@ const executionSelectFrom = `
 		coalesce(r.agent_config_id,r.definition_identity||'@'||r.definition_version::text),
 		coalesce(r.time_zone,r.parent_context_manifest->>'time_zone','UTC'),
 		coalesce(r.deadline_at,tree.absolute_deadline),
-		coalesce(r.action_decision_limit,greatest(0,(definition.limits->>'model_calls')::integer-1)),
+		coalesce(r.action_decision_limit,coalesce(nullif((definition.limits->>'action_decisions')::integer,0),greatest(0,(definition.limits->>'model_calls')::integer-1))),
 		coalesce(r.final_decision_limit,1),
 		coalesce(r.action_limit,(definition.limits->>'actions')::integer),
+		coalesce(nullif((definition.limits->>'plan_mutations')::integer,0),0),
 		coalesce(r.action_batch_limit,(definition.limits->>'action_batch')::integer),
 		coalesce(r.action_result_byte_limit,(definition.limits->>'result_bytes')::integer),
 		coalesce(r.action_results_byte_limit,(definition.limits->>'result_bytes')::integer),
@@ -211,7 +222,7 @@ func (r *PostgresRuntime) loadExecutionRow(ctx context.Context, tx pgx.Tx, where
 		&execution.RunID, &execution.ChatID, &execution.UserID, &execution.InputMessageID, &execution.Model,
 		&execution.PromptVersion, &execution.AgentConfigID, &execution.TimeZone, &execution.DeadlineAt,
 		&execution.ActionDecisionLimit, &execution.FinalDecisionLimit,
-		&execution.ActionLimit, &execution.ActionBatchLimit,
+		&execution.ActionLimit, &execution.PlanMutationLimit, &execution.ActionBatchLimit,
 		&execution.ActionResultByteLimit, &execution.ActionResultsByteLimit,
 		&execution.SelectedSourceCount,
 		&execution.MemberRole, &execution.ExistingChildCount,

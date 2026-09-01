@@ -50,6 +50,37 @@ func TestModelAdapterRecordsNormalizedMetadataWithoutContent(t *testing.T) {
 	}
 }
 
+func TestModelAdapterRecordsAgentStatusTelemetryWithoutTodoContent(t *testing.T) {
+	tracer, exporter, ctx := instrumentationTestTracer(t)
+	model := outcomeModelFunc(func(context.Context, models.ModelRequest) (models.ModelOutcome, error) {
+		return models.ModelOutcome{
+			ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: "done"}},
+			Metadata:      models.ModelCallMetadata{RequestedModel: "model", ResultKind: models.ModelResultFinalDraft},
+		}, nil
+	})
+	request := models.ModelRequest{
+		Model: "model", ContextTelemetry: models.ModelContextTelemetry{
+			ProviderCapabilityIdentity: "provider@1", ContextPolicyIdentity: "policy@1",
+			AgentStatusInjected: true, AgentStatusBytes: 321, AgentStatusTokens: 81, TodoRevision: 4,
+			TodoPendingCount: 1, TodoInProgressCount: 1, TodoCompletedCount: 2, TodoCancelledCount: 3,
+			MaxToolInputRepeatCount: 5,
+		},
+	}
+	if _, err := InvokeDecisionModel(ctx, tracer, model, request, 1); err != nil {
+		t.Fatal(err)
+	}
+	records := exporter.Records()
+	start := records[len(records)-2]
+	if !boolRecordAttribute(start, TraceKeyAgentStatusInjected) ||
+		int64Attribute(start, TraceKeyAgentStatusBytes) != 321 ||
+		int64Attribute(start, TraceKeyAgentStatusTokens) != 81 ||
+		int64Attribute(start, TraceKeyTodoRevision) != 4 ||
+		int64Attribute(start, TraceKeyTodoCompletedCount) != 2 ||
+		int64Attribute(start, TraceKeyMaxToolInputRepeatCount) != 5 {
+		t.Fatalf("Agent Status Trace attributes = %+v", start.Attributes)
+	}
+}
+
 func TestModelRequestHashIncludesInvocationPolicy(t *testing.T) {
 	request := models.ModelRequest{
 		Model: "aliyun/qwen-plus", Messages: []models.ModelMessage{{Role: models.RoleUser, Content: "private prompt"}},

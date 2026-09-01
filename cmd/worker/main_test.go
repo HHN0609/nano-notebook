@@ -40,7 +40,7 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	if config.WebReaderURL != "http://127.0.0.1:8085" {
 		t.Fatalf("Web Reader URL default=%q", config.WebReaderURL)
 	}
-	if config.AgentRelease.String() != "nano.default@15" {
+	if config.AgentRelease.String() != "nano.default@16" {
 		t.Fatalf("Agent release default=%q", config.AgentRelease)
 	}
 }

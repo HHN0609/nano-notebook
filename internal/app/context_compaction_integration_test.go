@@ -19,6 +19,7 @@ func TestThresholdCompactionPersistsSummaryWithoutRewritingHistory(t *testing.T)
 	ctx := context.Background()
 	modelCalls := 0
 	var compactedMessages []models.ModelMessage
+	var compactionInput []models.ModelMessage
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Messages []models.ModelMessage `json:"messages"`
@@ -29,6 +30,7 @@ func TestThresholdCompactionPersistsSummaryWithoutRewritingHistory(t *testing.T)
 		modelCalls++
 		content := "first final"
 		if strings.Contains(request.Messages[0].Content, "Summarize the supplied older Agent context") {
+			compactionInput = append([]models.ModelMessage(nil), request.Messages...)
 			content = "The first request established the durable prior goal."
 		} else if modelCalls > 1 {
 			content = "second final"
@@ -84,10 +86,19 @@ func TestThresholdCompactionPersistsSummaryWithoutRewritingHistory(t *testing.T)
 		t.Fatal(err)
 	}
 
-	if len(compactedMessages) != 3 || compactedMessages[1].Role != models.RoleUser ||
+	if len(compactedMessages) != 4 || compactedMessages[1].Role != models.RoleUser ||
 		!strings.HasPrefix(compactedMessages[1].Content, "<summary>") ||
-		compactedMessages[2].Content != "continue from the first request" {
+		compactedMessages[2].Content != "continue from the first request" ||
+		!isAgentStatusMessage(string(compactedMessages[3].Role), compactedMessages[3].Content) {
 		t.Fatalf("compacted model context=%+v", compactedMessages)
+	}
+	if len(compactionInput) < 2 {
+		t.Fatalf("compaction input=%+v", compactionInput)
+	}
+	for _, message := range compactionInput {
+		if strings.Contains(message.Content, "<agent_status") {
+			t.Fatalf("ephemeral Agent Status entered compaction input=%+v", compactionInput)
+		}
 	}
 	var compactions, beforeTokens, afterTokens int
 	var trigger, summarizedThrough, suffixStart string
@@ -215,7 +226,7 @@ func TestNextRunReceivesCompleteCrossRunToolHistoryOnce(t *testing.T) {
 	if err := controller.Execute(ctx, attemptFromClaim(secondClaim)); err != nil {
 		t.Fatal(err)
 	}
-	wantRoles := []string{"system", "user", "assistant", "tool", "assistant", "tool", "assistant", "user"}
+	wantRoles := []string{"system", "user", "assistant", "tool", "assistant", "tool", "assistant", "user", "user"}
 	if len(secondRunContext) != len(wantRoles) {
 		t.Fatalf("second Run context=%+v", secondRunContext)
 	}
@@ -226,7 +237,8 @@ func TestNextRunReceivesCompleteCrossRunToolHistoryOnce(t *testing.T) {
 	}
 	if secondRunContext[2].ToolCalls[0].ID != "decision:1/action:0" || secondRunContext[3].ToolCallID != "decision:1/action:0" ||
 		secondRunContext[4].ToolCalls[0].ID != "decision:2/action:0" || secondRunContext[5].ToolCallID != "decision:2/action:0" ||
-		secondRunContext[6].Content != "first final" || secondRunContext[7].Content != "what happened next?" {
+		secondRunContext[6].Content != "first final" || secondRunContext[7].Content != "what happened next?" ||
+		!isAgentStatusMessage(secondRunContext[8].Role, secondRunContext[8].Content) {
 		t.Fatalf("cross-Run causal context=%+v", secondRunContext)
 	}
 	finalCount := 0
@@ -298,9 +310,9 @@ func TestLaterRunClosesCancelledPartialBatchBeforeModelCall(t *testing.T) {
 	if err := controller.Execute(ctx, attemptFromClaim(secondClaim)); err != nil {
 		t.Fatal(err)
 	}
-	if len(projected) != 5 || projected[2].Role != "assistant" || projected[3].Role != "tool" ||
+	if len(projected) != 6 || projected[2].Role != "assistant" || projected[3].Role != "tool" ||
 		projected[3].ToolCallID != "decision:1/action:0" || !strings.Contains(projected[3].Content, agent.ErrorActionInterrupted) ||
-		projected[4].Content != "continue safely" {
+		projected[4].Content != "continue safely" || !isAgentStatusMessage(projected[5].Role, projected[5].Content) {
 		t.Fatalf("reconciled context=%+v", projected)
 	}
 	var resultCount int

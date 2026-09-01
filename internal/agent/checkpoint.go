@@ -80,6 +80,7 @@ type actionResultCheckpointPayload struct {
 	Status    ActionResultStatus `json:"status"`
 	Output    json.RawMessage    `json:"output,omitempty"`
 	ErrorCode string             `json:"error_code,omitempty"`
+	Error     *ActionError       `json:"error,omitempty"`
 }
 
 func NewActionResultCheckpoint(decisionNo, actionIndex int, actionID string, result ActionResult) (PendingCheckpoint, error) {
@@ -90,7 +91,7 @@ func NewActionResultCheckpoint(decisionNo, actionIndex int, actionID string, res
 	if err := result.Validate(); err != nil {
 		return PendingCheckpoint{}, err
 	}
-	payload := actionResultCheckpointPayload{ActionID: actionID, Status: result.Status, ErrorCode: result.ErrorCode}
+	payload := actionResultCheckpointPayload{ActionID: actionID, Status: result.Status, ErrorCode: result.ErrorCode, Error: result.Error}
 	if result.Status == ActionSucceeded {
 		output, err := CanonicalJSONObject(result.Output)
 		if err != nil {
@@ -103,13 +104,17 @@ func NewActionResultCheckpoint(decisionNo, actionIndex int, actionID string, res
 		return PendingCheckpoint{}, err
 	}
 	index := actionIndex
+	payloadVersion := 1
+	if result.Error != nil {
+		payloadVersion = 2
+	}
 	return PendingCheckpoint{
 		IdentityKey:    actionID,
 		Kind:           CheckpointActionResult,
 		DecisionNo:     decisionNo,
 		ActionIndex:    &index,
 		ActionID:       actionID,
-		PayloadVersion: 1,
+		PayloadVersion: payloadVersion,
 		Payload:        encoded,
 		PayloadSHA256:  hashPayload(encoded),
 	}, nil

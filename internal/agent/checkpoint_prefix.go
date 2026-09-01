@@ -101,10 +101,13 @@ func LoadCheckpointPrefix(ctx context.Context, checkpoints []Checkpoint) (Checkp
 				return CheckpointPrefix{}, invalidCheckpoint("Action Result is out of order")
 			}
 			var payload actionResultCheckpointPayload
-			if err := json.Unmarshal(checkpoint.Payload, &payload); err != nil || payload.ActionID != proposal.Actions[index].ActionID {
+			if err := json.Unmarshal(checkpoint.Payload, &payload); err != nil || payload.ActionID != proposal.Actions[index].ActionID ||
+				(checkpoint.PayloadVersion != 1 && checkpoint.PayloadVersion != 2) ||
+				(checkpoint.PayloadVersion == 1 && payload.Error != nil) ||
+				(checkpoint.PayloadVersion == 2 && (payload.Error == nil || payload.ErrorCode != "")) {
 				return CheckpointPrefix{}, invalidCheckpoint("invalid Action Result payload")
 			}
-			result := ActionResult{Status: payload.Status, Output: payload.Output, ErrorCode: payload.ErrorCode}
+			result := ActionResult{Status: payload.Status, Output: payload.Output, ErrorCode: payload.ErrorCode, Error: payload.Error}
 			expected, err := NewActionResultCheckpoint(proposal.DecisionNo, index, proposal.Actions[index].ActionID, result)
 			if err != nil || !checkpointMatches(checkpoint, expected) {
 				return CheckpointPrefix{}, invalidCheckpoint("Action Result identity or payload mismatch")

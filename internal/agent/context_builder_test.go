@@ -36,6 +36,9 @@ func TestBareSystemPromptDescribesResearchDelegationEscalation(t *testing.T) {
 		"at most once per Run",
 		"available for review in the notebook's Source panel",
 		"do not delegate reflexively",
+		"call `rewrite_todo_list` before substantive work",
+		"call `update_todo_status` immediately",
+		"Read Agent Status before every decision",
 	} {
 		if !strings.Contains(BareSystemPrompt, required) {
 			t.Fatalf("bare prompt is missing %q", required)
@@ -45,6 +48,17 @@ func TestBareSystemPromptDescribesResearchDelegationEscalation(t *testing.T) {
 		if strings.Contains(BareSystemPrompt, forbidden) {
 			t.Fatalf("bare prompt still contains stale phrase %q", forbidden)
 		}
+	}
+}
+
+func TestComposerPromptTraceRefsUseTodoAwareImmutableVersions(t *testing.T) {
+	bare := composerPromptTraceRef(BarePromptVersion)
+	grounded := composerPromptTraceRef(GroundedPromptVersion)
+	if bare.Identity != "agent.chat-composer-bare" || bare.Version != 3 {
+		t.Fatalf("bare trace ref = %+v", bare)
+	}
+	if grounded.Identity != "agent.chat-composer-grounded" || grounded.Version != 4 {
+		t.Fatalf("grounded trace ref = %+v", grounded)
 	}
 }
 

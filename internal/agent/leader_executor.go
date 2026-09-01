@@ -391,6 +391,7 @@ func (e *LeaderExecutor) executeConfiguredResearch(ctx context.Context, attempt 
 		if closeErr != nil {
 			return closeErr
 		}
+		called = enrichActionDomainError(called)
 		checkpoint, err := NewActionResultCheckpoint(1, 0, action.ActionID, called)
 		if err != nil {
 			return err

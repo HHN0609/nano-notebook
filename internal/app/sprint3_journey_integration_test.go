@@ -66,7 +66,8 @@ func TestSprint3FourLocationJourneyStaysWithinPinnedBudgetsAndReloadsOneAnswer(t
 		w.Header().Set("Content-Type", "application/json")
 		switch modelCalls {
 		case 1:
-			if len(request.Tools) != 2 || request.Tools[0].Function.Name != "calculate" || request.Tools[1].Function.Name != "current_time" || len(request.Messages) != 2 {
+			if len(request.Tools) != 2 || request.Tools[0].Function.Name != "calculate" || request.Tools[1].Function.Name != "current_time" || len(request.Messages) != 3 ||
+				!isAgentStatusMessage(request.Messages[2].Role, request.Messages[2].Content) {
 				t.Errorf("first request tools/messages=%+v/%+v", request.Tools, request.Messages)
 				return
 			}
@@ -229,7 +230,8 @@ func TestSprint3FourLocationJourneyStaysWithinPinnedBudgetsAndReloadsOneAnswer(t
 
 func assertWireActionRound(t *testing.T, messages []sprint3WireMessage, proposalIndex, resultStart int, idPrefix string, width int) {
 	t.Helper()
-	if len(messages) != resultStart+width || len(messages[proposalIndex].ToolCalls) != width {
+	if len(messages) != resultStart+width+1 || len(messages[proposalIndex].ToolCalls) != width ||
+		!isAgentStatusMessage(messages[len(messages)-1].Role, messages[len(messages)-1].Content) {
 		t.Errorf("model messages have wrong round shape: %+v", messages)
 		return
 	}

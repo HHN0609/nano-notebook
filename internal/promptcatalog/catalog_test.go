@@ -27,7 +27,7 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
-	const extraVersions = 7 // chat composer upgrades plus final deep Research planner/executor/reporter upgrades, alongside their @1s
+	const extraVersions = 9 // chat composer upgrades plus final deep Research planner/executor/reporter upgrades, alongside their @1s
 	if got := len(catalog.Versions()); got != len(want)+extraVersions {
 		t.Fatalf("versions=%d want=%d", got, len(want)+extraVersions)
 	}
@@ -43,7 +43,7 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 			t.Fatalf("source path=%q", prompt.SourcePath)
 		}
 	}
-	for _, version := range []int{2, 3} {
+	for _, version := range []int{2, 3, 4} {
 		grounded, ok := catalog.Resolve("agent.chat-composer-grounded", version)
 		if !ok {
 			t.Fatalf("missing agent.chat-composer-grounded@%d", version)
@@ -58,6 +58,14 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 	}
 	if bare.Contract != "final_draft_text.v1" || bare.SHA256 == "" || strings.TrimSpace(bare.Content) == "" {
 		t.Fatalf("prompt=%+v", bare)
+	}
+	bareV3, ok := catalog.Resolve("agent.chat-composer-bare", 3)
+	if !ok || !strings.Contains(bareV3.Content, "rewrite_todo_list") || !strings.Contains(bareV3.Content, "TODO state is working memory") {
+		t.Fatalf("bare v3 prompt=%+v ok=%v", bareV3, ok)
+	}
+	groundedV4, ok := catalog.Resolve("agent.chat-composer-grounded", 4)
+	if !ok || !strings.Contains(groundedV4.Content, "update_todo_status") || !strings.Contains(groundedV4.Content, "Tool-call counts") {
+		t.Fatalf("grounded v4 prompt=%+v ok=%v", groundedV4, ok)
 	}
 	plannerV5, ok := catalog.Resolve("agent.deep-research-planner", 5)
 	if !ok || plannerV5.Contract != "research_plan_text.v1" || !strings.Contains(plannerV5.Content, "This phase has no Web evidence") || !strings.Contains(plannerV5.Content, "Do not prescribe generic report boilerplate") {

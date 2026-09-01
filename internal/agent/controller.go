@@ -67,6 +67,10 @@ type DecisionResponsePreparationRuntime interface {
 	PrepareDecisionResponse(context.Context, Execution, CheckpointPrefix, models.ModelDecision) (models.ModelDecision, error)
 }
 
+type DecisionRequestFinalizerRuntime interface {
+	FinalizeDecisionRequest(context.Context, Execution, CheckpointPrefix, models.ModelRequest) (models.ModelRequest, error)
+}
+
 // QueryContextRuntime is implemented by runtimes that must force their
 // decision loop's first Action to be a specific, isolated-query search
 // before any free tool choice — today, only Studio Output generation
@@ -193,11 +197,15 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 		recoveryBoundary = false
 
-		remainingActions := execution.ActionLimit - prefix.AcceptedActions
-		actionCapable := !forceFinalDecision && len(prefix.Proposals) < execution.ActionDecisionLimit && remainingActions > 0
+		remainingActions := execution.ActionLimit - acceptedBusinessActions(prefix)
+		remainingPlanMutations := execution.PlanMutationLimit - acceptedPlanMutations(prefix)
+		businessDecisionAvailable := acceptedBusinessDecisions(prefix) < execution.ActionDecisionLimit && remainingActions > 0
+		actionCapable := !forceFinalDecision && (businessDecisionAvailable || remainingPlanMutations > 0)
 		definitions := []models.ActionDefinition(nil)
 		if actionCapable {
-			definitions, err = c.actionDefinitions(ctx, toolSession, ActionPolicy{RemainingActions: remainingActions, Execution: &execution}, tracer)
+			definitions, err = c.actionDefinitions(ctx, toolSession, ActionPolicy{
+				RemainingActions: remainingActions, RemainingPlanMutations: remainingPlanMutations, Execution: &execution,
+			}, tracer)
 			if err != nil {
 				return c.handleRuntimeError(ctx, attempt, err)
 			}
@@ -261,6 +269,12 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 					Role:    models.RoleSystem,
 					Content: "The previous model response was invalid and was not accepted." + detail + " Retry this same decision now. Return exactly one valid decision matching the provided contract: either a tool-call batch with valid JSON arguments and unique call IDs, or a complete final answer. Do not describe the repair and do not repeat already completed tool calls.",
 				})
+			}
+			if finalizer, ok := c.runtime.(DecisionRequestFinalizerRuntime); ok {
+				request, err = finalizer.FinalizeDecisionRequest(ctx, execution, prefix, request)
+				if err != nil {
+					return c.fail(ctx, attempt, "context_failed", err)
+				}
 			}
 			if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
 				return c.handleRuntimeError(ctx, attempt, err)
@@ -368,7 +382,11 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		if err := c.validateProposal(toolSession, batch.Actions); err != nil {
 			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
 		}
-		if len(batch.Actions) > remainingActions {
+		businessActions, planMutations := proposalBudgetUse(batch.Actions)
+		if planMutations > 1 {
+			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), errors.New("Action proposal contains multiple TODO mutations"))
+		}
+		if businessActions > remainingActions || planMutations > remainingPlanMutations || (businessActions > 0 && !businessDecisionAvailable) {
 			forceFinalDecision = true
 			continue
 		}
@@ -381,6 +399,58 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 		forceFinalDecision = false
 	}
+}
+
+func isPlanMutationName(name string) bool {
+	return name == "rewrite_todo_list" || name == "update_todo_status"
+}
+
+func proposalBudgetUse(actions []models.ActionProposal) (businessActions, planMutations int) {
+	for _, action := range actions {
+		if isPlanMutationName(action.Name) {
+			planMutations++
+		} else {
+			businessActions++
+		}
+	}
+	return businessActions, planMutations
+}
+
+func acceptedBusinessActions(prefix CheckpointPrefix) int {
+	count := 0
+	for _, proposal := range prefix.Proposals {
+		for _, action := range proposal.Actions {
+			if !isPlanMutationName(action.Name) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func acceptedPlanMutations(prefix CheckpointPrefix) int {
+	count := 0
+	for _, proposal := range prefix.Proposals {
+		for _, action := range proposal.Actions {
+			if isPlanMutationName(action.Name) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func acceptedBusinessDecisions(prefix CheckpointPrefix) int {
+	count := 0
+	for _, proposal := range prefix.Proposals {
+		for _, action := range proposal.Actions {
+			if !isPlanMutationName(action.Name) {
+				count++
+				break
+			}
+		}
+	}
+	return count
 }
 
 func isModelContextOverflow(err error) bool {
@@ -409,9 +479,10 @@ func (c *Controller) closeUnknownRecoveredActions(
 		if c.actionCrashReplaySafe(session, action.Name) {
 			continue
 		}
-		checkpoint, err := NewActionResultCheckpoint(proposal.DecisionNo, action.Index, action.ActionID, ActionResult{
+		result := enrichActionDomainError(ActionResult{
 			Status: ActionDomainError, ErrorCode: ErrorActionInterrupted,
 		})
+		checkpoint, err := NewActionResultCheckpoint(proposal.DecisionNo, action.Index, action.ActionID, result)
 		if err != nil {
 			return false, c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
 		}
@@ -613,6 +684,7 @@ func (c *Controller) executeDelegationAction(
 	if err != nil {
 		return c.actionExecutionError(ctx, attempt, err)
 	}
+	result = enrichActionDomainError(result)
 	if err := result.Validate(); err != nil {
 		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
 	}
@@ -642,6 +714,7 @@ func (c *Controller) executeAction(
 	if err != nil {
 		return c.actionExecutionError(ctx, attempt, err)
 	}
+	result = enrichActionDomainError(result)
 	if err := result.Validate(); err != nil {
 		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
 	}
@@ -741,6 +814,7 @@ func (c *Controller) executeParallelBatch(
 			}
 			continue
 		}
+		outcome.Result = enrichActionDomainError(outcome.Result)
 		if err := outcome.Result.Validate(); err != nil {
 			if failure == nil {
 				failure = &batchFailure{invalidResponse: true, err: err}
