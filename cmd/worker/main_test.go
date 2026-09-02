@@ -47,9 +47,9 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	if config.AgentRelease.String() != "nano.default@22" {
 		t.Fatalf("Agent release default=%q", config.AgentRelease)
 	}
-	if config.ToolResultRedisURL != "redis://:nano-tool-results@127.0.0.1:56379/0" ||
-		config.ToolResultCacheTTL != 30*time.Minute || config.ToolResultInlineBytes != 16*1024 ||
-		config.ToolResultPageBytes != 16*1024 || config.ToolResultMaximumBytes != 2*1024*1024 ||
+	if config.ToolResultRedisURL != "redis://:nano-tool-results@127.0.0.1:56379/0" || config.ToolResultKeyPrefix != "nano:tool-result:v2:" ||
+		config.ToolResultCacheTTL != 30*time.Minute || config.ToolResultInlineBytes != 50*1024 ||
+		config.ToolResultPageBytes != 50*1024 || config.ToolResultMaximumBytes != 2*1024*1024 ||
 		config.ToolResultOperationTimeout != 750*time.Millisecond {
 		t.Fatalf("Tool Result cache defaults=%#v", config)
 	}
@@ -95,6 +95,13 @@ func TestLoadWorkerConfigRejectsMutableAgentRelease(t *testing.T) {
 	t.Setenv("NANO_AGENT_RELEASE", "nano.default@latest")
 	if _, err := loadWorkerConfig(); err == nil {
 		t.Fatal("loadWorkerConfig accepted mutable Agent release")
+	}
+}
+
+func TestLoadWorkerConfigRejectsToolResultPageTooSmallForVisibleEnvelope(t *testing.T) {
+	t.Setenv("NANO_TOOL_RESULT_PAGE_BYTES", "511")
+	if _, err := loadWorkerConfig(); err == nil {
+		t.Fatal("loadWorkerConfig accepted a Tool Result page budget smaller than its model-visible envelope")
 	}
 }
 

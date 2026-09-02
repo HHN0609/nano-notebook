@@ -20,6 +20,13 @@ type webReaderStub struct {
 	request webreader.Request
 }
 
+func TestReadURLDefinitionExplainsExternalizedContinuation(t *testing.T) {
+	description := (&readURLAction{}).Definition().Description
+	if !strings.Contains(description, "result_ref") || !strings.Contains(description, "read_tool_result") {
+		t.Fatalf("description does not explain long-result continuation: %q", description)
+	}
+}
+
 func TestResearchReadURLAndDocumentPagesActionsExposePDFEvidence(t *testing.T) {
 	reader := NewResearchURLContentReader(&acquiringStub{content: webreader.Content{
 		MediaType: webreader.MediaTypePDF, FinalURL: "https://example.com/paper.pdf",
@@ -66,7 +73,7 @@ func TestResearchReadURLAndDocumentPagesActionsExposePDFEvidence(t *testing.T) {
 	}
 }
 
-func TestResearchReadActionsCacheLongResultsOnlyForVersion14(t *testing.T) {
+func TestResearchReadActionsCacheLongResultsFromVersion14(t *testing.T) {
 	actions := NewVersionedResearchURLActions(nil, &webReaderStub{}, &acquiringStub{})
 	for _, action := range actions {
 		policy, ok := action.(ToolResultCacheEligibility)
@@ -78,6 +85,9 @@ func TestResearchReadActionsCacheLongResultsOnlyForVersion14(t *testing.T) {
 		}
 		if !policy.CacheLongToolResults(agentcatalog.MustParseReference("research.executor@14")) {
 			t.Fatalf("%s did not enable cache for v14", action.Definition().Name)
+		}
+		if !policy.CacheLongToolResults(agentcatalog.MustParseReference("research.executor@15")) {
+			t.Fatalf("%s did not preserve cache eligibility for v15", action.Definition().Name)
 		}
 	}
 }

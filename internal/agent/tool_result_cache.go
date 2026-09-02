@@ -64,6 +64,10 @@ type ToolResultStore interface {
 	Get(context.Context, string) (ToolResultEnvelope, error)
 }
 
+type ToolResultRangeStore interface {
+	ReadRange(context.Context, string, int, int) (ToolResultEnvelope, []byte, error)
+}
+
 type ToolResultProjection struct {
 	ActionID     string `json:"action_id,omitempty"`
 	ContentState string `json:"content_state"`
@@ -73,6 +77,9 @@ type ToolResultProjection struct {
 	SHA256       string `json:"sha256"`
 	ExpiresAt    string `json:"expires_at,omitempty"`
 	ReadTool     string `json:"read_tool,omitempty"`
+	NextOffset   int    `json:"next_offset,omitempty"`
+	Complete     bool   `json:"complete"`
+	Notice       string `json:"notice,omitempty"`
 }
 
 type ToolResultExternalization struct {
@@ -88,25 +95,43 @@ type ToolResultExternalizer struct {
 }
 
 type ToolResultPage struct {
-	ResultRef  string `json:"result_ref"`
-	Offset     int    `json:"offset"`
-	Content    string `json:"content"`
-	NextOffset int    `json:"next_offset"`
-	Complete   bool   `json:"complete"`
-	ExpiresAt  string `json:"expires_at"`
+	ResultRef   string `json:"result_ref"`
+	Offset      int    `json:"offset"`
+	Content     string `json:"content"`
+	NextOffset  int    `json:"next_offset"`
+	Complete    bool   `json:"complete"`
+	ResultBytes int    `json:"result_bytes"`
+	ExpiresAt   string `json:"expires_at"`
+	Notice      string `json:"notice,omitempty"`
 }
 
 type ToolResultReader struct {
-	Store            ToolResultStore
-	MaximumPageBytes int
-	Now              func() time.Time
+	Store              ToolResultStore
+	MaximumPageBytes   int
+	MaximumOutputBytes int
+	Now                func() time.Time
 }
 
 func (r ToolResultReader) Read(ctx context.Context, scope ToolResultScope, resultRef string, offset, maxBytes int) (ToolResultPage, error) {
 	if r.Store == nil || !strings.HasPrefix(resultRef, "tr_") {
 		return ToolResultPage{}, ErrToolResultExpired
 	}
-	envelope, err := r.Store.Get(ctx, resultRef)
+	pageLimit := maxBytes
+	if pageLimit <= 0 || pageLimit > r.MaximumPageBytes {
+		pageLimit = r.MaximumPageBytes
+	}
+	if pageLimit < utf8.UTFMax || r.MaximumPageBytes < utf8.UTFMax {
+		return ToolResultPage{}, ErrToolResultInvalidPageSize
+	}
+	var envelope ToolResultEnvelope
+	var rangedBody []byte
+	rangeStore, useRange := r.Store.(ToolResultRangeStore)
+	var err error
+	if useRange {
+		envelope, rangedBody, err = rangeStore.ReadRange(ctx, resultRef, offset, pageLimit+utf8.UTFMax-1)
+	} else {
+		envelope, err = r.Store.Get(ctx, resultRef)
+	}
 	if err != nil {
 		if errors.Is(err, ErrToolResultExpired) {
 			return ToolResultPage{}, ErrToolResultExpired
@@ -124,37 +149,67 @@ func (r ToolResultReader) Read(ctx context.Context, scope ToolResultScope, resul
 		envelope.ChatID != scope.ChatID || envelope.RunID != scope.RunID {
 		return ToolResultPage{}, ErrToolResultUnauthorized
 	}
-	if envelope.ResultBytes != len(envelope.Body) || hashPayload(envelope.Body) != envelope.SHA256 {
-		return ToolResultPage{}, ErrToolResultCorrupt
-	}
-	if offset < 0 || offset > len(envelope.Body) || !utf8.Valid(envelope.Body[offset:]) {
+	if offset < 0 || offset > envelope.ResultBytes {
 		return ToolResultPage{}, ErrToolResultInvalidOffset
 	}
-	pageLimit := maxBytes
-	if pageLimit <= 0 || pageLimit > r.MaximumPageBytes {
-		pageLimit = r.MaximumPageBytes
+	var content []byte
+	if useRange {
+		minimum := pageLimit
+		if remaining := envelope.ResultBytes - offset; remaining < minimum {
+			minimum = remaining
+		}
+		if envelope.ResultBytes < 0 || len(envelope.SHA256) != sha256.Size*2 || len(rangedBody) < minimum {
+			return ToolResultPage{}, ErrToolResultCorrupt
+		}
+		end := pageLimit
+		if end > len(rangedBody) {
+			end = len(rangedBody)
+		}
+		for end > 0 && !utf8.Valid(rangedBody[:end]) {
+			end--
+		}
+		if end == 0 && offset < envelope.ResultBytes {
+			return ToolResultPage{}, ErrToolResultInvalidOffset
+		}
+		content = rangedBody[:end]
+	} else {
+		if envelope.ResultBytes != len(envelope.Body) || hashPayload(envelope.Body) != envelope.SHA256 {
+			return ToolResultPage{}, ErrToolResultCorrupt
+		}
+		if !utf8.Valid(envelope.Body[offset:]) {
+			return ToolResultPage{}, ErrToolResultInvalidOffset
+		}
+		end := offset + pageLimit
+		if end > len(envelope.Body) {
+			end = len(envelope.Body)
+		}
+		for end > offset && !utf8.Valid(envelope.Body[offset:end]) {
+			end--
+		}
+		if end == offset && offset < len(envelope.Body) {
+			return ToolResultPage{}, ErrToolResultInvalidPageSize
+		}
+		content = envelope.Body[offset:end]
 	}
-	if pageLimit < utf8.UTFMax || r.MaximumPageBytes < utf8.UTFMax {
-		return ToolResultPage{}, ErrToolResultInvalidPageSize
+	nextOffset := offset + len(content)
+	page := ToolResultPage{
+		ResultRef: resultRef, Offset: offset, Content: string(content),
+		NextOffset: nextOffset, Complete: nextOffset == envelope.ResultBytes, ResultBytes: envelope.ResultBytes,
+		ExpiresAt: envelope.ExpiresAt.UTC().Format(time.RFC3339),
 	}
-	end := offset + pageLimit
-	if end > len(envelope.Body) {
-		end = len(envelope.Body)
-	}
-	for end > offset && !utf8.Valid(envelope.Body[offset:end]) {
-		end--
-	}
-	if end == offset && offset < len(envelope.Body) {
-		return ToolResultPage{}, ErrToolResultInvalidPageSize
-	}
-	return ToolResultPage{
-		ResultRef: resultRef, Offset: offset, Content: string(envelope.Body[offset:end]),
-		NextOffset: end, Complete: end == len(envelope.Body), ExpiresAt: envelope.ExpiresAt.UTC().Format(time.RFC3339),
-	}, nil
+	page.Notice = toolResultPageNotice(page.ResultRef, page.Offset, page.NextOffset, page.ResultBytes, page.Complete)
+	return page, nil
 }
 
 func (e *ToolResultExternalizer) Externalize(ctx context.Context, scope ToolResultScope, result ActionResult, inlineByteLimit int) (ActionResult, ToolResultExternalization) {
-	if result.Status != ActionSucceeded || inlineByteLimit < 1 || len(result.Output) <= inlineByteLimit {
+	if result.Status != ActionSucceeded || inlineByteLimit < 1 {
+		return result, ToolResultExternalization{State: ToolResultInline}
+	}
+	visibleBytes, err := modelVisibleToolResultBytes(scope.ActionID, result.Output)
+	if err != nil {
+		return result, ToolResultExternalization{State: ToolResultInline, Err: err}
+	}
+	if visibleBytes <= inlineByteLimit {
 		return result, ToolResultExternalization{State: ToolResultInline}
 	}
 	now := time.Now().UTC()
@@ -168,7 +223,7 @@ func (e *ToolResultExternalizer) Externalize(ctx context.Context, scope ToolResu
 		ResultBytes: len(result.Output), SHA256: sha,
 	}
 	fallback := func(err error) (ActionResult, ToolResultExternalization) {
-		projection.Preview = boundedToolResultPreview(result.Output, projection, inlineByteLimit)
+		projection = boundedToolResultPreview(result.Output, projection, inlineByteLimit)
 		encoded, marshalErr := json.Marshal(projection)
 		if marshalErr != nil {
 			return result, ToolResultExternalization{State: ToolResultInline, Err: marshalErr}
@@ -207,7 +262,7 @@ func (e *ToolResultExternalizer) Externalize(ctx context.Context, scope ToolResu
 	projection.ResultRef = resultRef
 	projection.ExpiresAt = expiresAt.Format(time.RFC3339)
 	projection.ReadTool = ToolResultReadTool
-	projection.Preview = boundedToolResultPreview(result.Output, projection, inlineByteLimit)
+	projection = boundedToolResultPreview(result.Output, projection, inlineByteLimit)
 	encoded, err := json.Marshal(projection)
 	if err != nil {
 		return fallback(err)
@@ -217,9 +272,9 @@ func (e *ToolResultExternalizer) Externalize(ctx context.Context, scope ToolResu
 	return copyResult, ToolResultExternalization{State: ToolResultExternalized}
 }
 
-func boundedToolResultPreview(body []byte, projection ToolResultProjection, limit int) string {
+func boundedToolResultPreview(body []byte, projection ToolResultProjection, limit int) ToolResultProjection {
 	if limit < 1 {
-		return ""
+		return projection
 	}
 	text := string(body)
 	if !utf8.ValidString(text) {
@@ -231,14 +286,46 @@ func boundedToolResultPreview(body []byte, projection ToolResultProjection, limi
 		middle := (low + high + 1) / 2
 		candidate := projection
 		candidate.Preview = string(runes[:middle])
+		candidate.NextOffset = len([]byte(candidate.Preview))
+		candidate.Complete = candidate.NextOffset == len(body)
+		candidate.Notice = toolResultPageNotice(candidate.ResultRef, 0, candidate.NextOffset, len(body), candidate.Complete)
 		encoded, _ := json.Marshal(candidate)
-		if len(encoded) <= limit {
+		visibleBytes, sizeErr := modelVisibleToolResultBytes(candidate.ActionID, encoded)
+		if sizeErr == nil && visibleBytes <= limit {
 			low = middle
 		} else {
 			high = middle - 1
 		}
 	}
-	return string(runes[:low])
+	projection.Preview = string(runes[:low])
+	projection.NextOffset = len([]byte(projection.Preview))
+	projection.Complete = projection.NextOffset == len(body)
+	projection.Notice = toolResultPageNotice(projection.ResultRef, 0, projection.NextOffset, len(body), projection.Complete)
+	return projection
+}
+
+func modelVisibleToolResultBytes(actionID string, output json.RawMessage) (int, error) {
+	canonical, err := CanonicalJSONObject(output)
+	if err != nil {
+		return 0, err
+	}
+	payload, err := json.Marshal(actionResultCheckpointPayload{
+		ActionID: actionID, Status: ActionSucceeded, Output: canonical,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(payload), nil
+}
+
+func toolResultPageNotice(resultRef string, offset, nextOffset, resultBytes int, complete bool) string {
+	if complete || nextOffset <= offset {
+		return ""
+	}
+	if resultRef == "" {
+		return fmt.Sprintf("[Showing bytes %d-%d of %d. Cached continuation is unavailable; reissue the original tool call.]", offset, nextOffset-1, resultBytes)
+	}
+	return fmt.Sprintf("[Showing bytes %d-%d of %d. Use read_tool_result(result_ref=%q, offset=%d) to continue.]", offset, nextOffset-1, resultBytes, resultRef, nextOffset)
 }
 
 func newOpaqueToolResultReference() (string, error) {

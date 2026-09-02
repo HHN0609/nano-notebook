@@ -27,7 +27,7 @@ func (m *ToolResultCacheMetrics) RecordOperation(operation, outcome string, body
 	m.catalog.ToolResultCacheDuration.WithLabelValues(operation, outcome).Observe(latency.Seconds())
 	if bodyBytes > 0 {
 		direction := "stored"
-		if operation == "read" {
+		if operation == "read" || operation == "read_range" {
 			direction = "served"
 		}
 		m.catalog.ToolResultCacheBytes.WithLabelValues(direction).Add(float64(bodyBytes))

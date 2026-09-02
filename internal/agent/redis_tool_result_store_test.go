@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -22,6 +23,31 @@ func TestRedisToolResultStoreRejectsUnsafeConfiguration(t *testing.T) {
 	}
 }
 
+func TestRedisToolResultStoreImplementsRangeReads(t *testing.T) {
+	if _, ok := any(&RedisToolResultStore{}).(ToolResultRangeStore); !ok {
+		t.Fatal("Redis Tool Result Store does not implement bounded range reads")
+	}
+}
+
+func TestRedisToolResultMetadataVerifiesOnlyRequestedAlignedChunks(t *testing.T) {
+	body := []byte(strings.Repeat("a", toolResultIntegrityChunkBytes) + strings.Repeat("b", toolResultIntegrityChunkBytes) + "tail")
+	envelope := testToolResultEnvelope(body)
+	metadata := redisToolResultMetadataFromEnvelope(envelope)
+
+	secondChunk := body[toolResultIntegrityChunkBytes : 2*toolResultIntegrityChunkBytes]
+	if !metadata.verifyChunks(1, 1, secondChunk) {
+		t.Fatal("valid requested chunk was rejected")
+	}
+	corrupt := append([]byte(nil), secondChunk...)
+	corrupt[len(corrupt)/2] ^= 1
+	if metadata.verifyChunks(1, 1, corrupt) {
+		t.Fatal("corrupt requested chunk was accepted")
+	}
+	if metadata.verifyChunks(0, 1, secondChunk) {
+		t.Fatal("misaligned chunk bytes were accepted")
+	}
+}
+
 func TestRedisToolResultStoreRoundTripWithAbsoluteTTL(t *testing.T) {
 	redisURL := strings.TrimSpace(os.Getenv("NANO_TEST_REDIS_URL"))
 	if redisURL == "" {
@@ -38,7 +64,11 @@ func TestRedisToolResultStoreRoundTripWithAbsoluteTTL(t *testing.T) {
 	if err := store.CheckReady(ctx); err != nil {
 		t.Fatal(err)
 	}
-	envelope := testToolResultEnvelope([]byte(`{"markdown":"real redis round trip"}`))
+	body, err := json.Marshal(map[string]string{"markdown": strings.Repeat("real redis range evidence 🛡️ ", 5000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := testToolResultEnvelope(body)
 	envelope.ResultRef = "tr_integration_reference_20260901"
 	envelope.CreatedAt = time.Now().UTC()
 	envelope.ExpiresAt = envelope.CreatedAt.Add(30 * time.Minute)
@@ -70,6 +100,23 @@ func TestRedisToolResultStoreRoundTripWithAbsoluteTTL(t *testing.T) {
 	}
 	if ttlAfterRead > ttl {
 		t.Fatalf("read renewed absolute TTL: before=%s after=%s", ttl, ttlAfterRead)
+	}
+	rangeOffset := toolResultIntegrityChunkBytes - 7
+	rangeMetadata, ranged, err := store.ReadRange(ctx, envelope.ResultRef, rangeOffset, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rangeMetadata.Body != nil || string(ranged) != string(envelope.Body[rangeOffset:rangeOffset+64]) {
+		t.Fatalf("range metadata/body=%#v/%q", rangeMetadata, ranged)
+	}
+	if err := store.client.Del(ctx, store.bodyKey(envelope.ResultRef)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReadRange(ctx, envelope.ResultRef, 0, 64); !errors.Is(err, ErrToolResultExpired) {
+		t.Fatalf("missing ranged body error=%v", err)
+	}
+	if _, _, err := store.ReadRange(ctx, envelope.ResultRef, len(envelope.Body), 64); !errors.Is(err, ErrToolResultExpired) {
+		t.Fatalf("missing ranged body at terminal offset error=%v", err)
 	}
 	if err := store.Delete(ctx, envelope.ResultRef); err != nil {
 		t.Fatal(err)

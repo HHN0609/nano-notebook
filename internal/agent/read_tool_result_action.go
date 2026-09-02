@@ -28,7 +28,7 @@ func (*readToolResultAction) CrashReplaySafe() bool { return true }
 func (*readToolResultAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
 		Name:        "read_tool_result",
-		Description: "Read one bounded byte range from a recent externalized read-only Tool Result. Reads do not extend its expiry.",
+		Description: "Read one bounded byte range from a recent externalized read-only Tool Result. Reads do not extend its expiry. When complete=false, call again at next_offset until complete=true.",
 		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["result_ref"],"properties":{"result_ref":{"type":"string","pattern":"^tr_[A-Za-z0-9_-]{12,128}$"},"offset":{"type":"integer","minimum":0},"max_bytes":{"type":"integer","minimum":1}}}`),
 	}
 }
@@ -60,11 +60,55 @@ func (a *readToolResultAction) Execute(ctx context.Context, request ActionReques
 		}
 		return ActionResult{Status: ActionDomainError, ErrorCode: code}, nil
 	}
-	output, err := json.Marshal(page)
+	output, err := marshalBoundedToolResultPage(page, request.ActionID, a.reader.MaximumOutputBytes)
 	if err != nil {
 		return ActionResult{}, err
 	}
 	return ActionResult{Status: ActionSucceeded, Output: output}, nil
+}
+
+func marshalBoundedToolResultPage(page ToolResultPage, actionID string, maximumOutputBytes int) ([]byte, error) {
+	encoded, err := json.Marshal(page)
+	if err != nil || maximumOutputBytes <= 0 {
+		return encoded, err
+	}
+	visibleBytes, err := modelVisibleToolResultBytes(actionID, encoded)
+	if err != nil || visibleBytes <= maximumOutputBytes {
+		return encoded, err
+	}
+	runes := []rune(page.Content)
+	low, high := 0, len(runes)
+	for low < high {
+		middle := (low + high + 1) / 2
+		candidate := page
+		candidate.Content = string(runes[:middle])
+		candidate.NextOffset = candidate.Offset + len([]byte(candidate.Content))
+		candidate.Complete = page.Complete && middle == len(runes)
+		candidate.Notice = toolResultPageNotice(candidate.ResultRef, candidate.Offset, candidate.NextOffset, candidate.ResultBytes, candidate.Complete)
+		payload, marshalErr := json.Marshal(candidate)
+		candidateVisibleBytes, sizeErr := modelVisibleToolResultBytes(actionID, payload)
+		if marshalErr == nil && sizeErr == nil && candidateVisibleBytes <= maximumOutputBytes {
+			low = middle
+		} else {
+			high = middle - 1
+		}
+	}
+	page.Content = string(runes[:low])
+	page.NextOffset = page.Offset + len([]byte(page.Content))
+	page.Complete = page.Complete && low == len(runes)
+	page.Notice = toolResultPageNotice(page.ResultRef, page.Offset, page.NextOffset, page.ResultBytes, page.Complete)
+	encoded, err = json.Marshal(page)
+	if err != nil {
+		return nil, err
+	}
+	visibleBytes, sizeErr := modelVisibleToolResultBytes(actionID, encoded)
+	if sizeErr != nil {
+		return nil, sizeErr
+	}
+	if low == 0 || visibleBytes > maximumOutputBytes {
+		return nil, ErrToolResultInvalidPageSize
+	}
+	return encoded, nil
 }
 
 func decodeReadToolResultInput(raw json.RawMessage) (readToolResultInput, error) {

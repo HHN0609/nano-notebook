@@ -18,6 +18,35 @@ type recordingToolResultStore struct {
 	getErr    error
 }
 
+type recordingRangeToolResultStore struct {
+	envelope   ToolResultEnvelope
+	fullGets   int
+	rangeReads int
+}
+
+func (*recordingRangeToolResultStore) Put(context.Context, ToolResultEnvelope, time.Duration) error {
+	return nil
+}
+
+func (s *recordingRangeToolResultStore) Get(context.Context, string) (ToolResultEnvelope, error) {
+	s.fullGets++
+	return ToolResultEnvelope{}, errors.New("full Tool Result GET must not be used for a page read")
+}
+
+func (s *recordingRangeToolResultStore) ReadRange(_ context.Context, resultRef string, offset, maximumBytes int) (ToolResultEnvelope, []byte, error) {
+	s.rangeReads++
+	if resultRef != s.envelope.ResultRef || offset < 0 || offset > len(s.envelope.Body) {
+		return ToolResultEnvelope{}, nil, ErrToolResultExpired
+	}
+	end := offset + maximumBytes
+	if end > len(s.envelope.Body) {
+		end = len(s.envelope.Body)
+	}
+	metadata := s.envelope
+	metadata.Body = nil
+	return metadata, append([]byte(nil), s.envelope.Body[offset:end]...), nil
+}
+
 func (s *recordingToolResultStore) Put(_ context.Context, envelope ToolResultEnvelope, _ time.Duration) error {
 	if s.putErr != nil {
 		return s.putErr
@@ -61,6 +90,21 @@ func TestToolResultReaderPreservesStoreFailureClassification(t *testing.T) {
 	}
 }
 
+func TestToolResultReaderUsesRangeStoreWithoutLoadingFullBody(t *testing.T) {
+	envelope := testToolResultEnvelope([]byte(`{"markdown":"range-backed evidence that is larger than one page"}`))
+	store := &recordingRangeToolResultStore{envelope: envelope}
+	reader := ToolResultReader{Store: store, MaximumPageBytes: 16, Now: testToolResultNow}
+	page, err := reader.Read(context.Background(), ToolResultScope{
+		UserID: envelope.UserID, ChatID: envelope.ChatID, RunID: envelope.RunID,
+	}, envelope.ResultRef, 0, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.fullGets != 0 || store.rangeReads != 1 || page.Offset != 0 || page.NextOffset > 16 || page.Complete {
+		t.Fatalf("fullGets=%d rangeReads=%d page=%+v", store.fullGets, store.rangeReads, page)
+	}
+}
+
 func TestToolResultExternalizerLeavesSmallResultInline(t *testing.T) {
 	store := &recordingToolResultStore{}
 	externalizer := testToolResultExternalizer(store)
@@ -75,6 +119,27 @@ func TestToolResultExternalizerLeavesSmallResultInline(t *testing.T) {
 	}
 	if len(store.envelopes) != 0 {
 		t.Fatalf("small result wrote %d cache entries", len(store.envelopes))
+	}
+}
+
+func TestToolResultExternalizerIncludesActionWrapperInInlineDecision(t *testing.T) {
+	store := &recordingToolResultStore{}
+	externalizer := testToolResultExternalizer(store)
+	result := ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"markdown":"` + strings.Repeat("x", 450) + `"}`)}
+
+	projected, outcome := externalizer.Externalize(context.Background(), ToolResultScope{
+		UserID: "user_a", ChatID: "chat_a", RunID: "run_a", ActionID: "decision:1/action:0", ToolName: "read_url",
+	}, result, 512)
+
+	if outcome.State != ToolResultExternalized || len(store.envelopes) != 1 {
+		t.Fatalf("wrapper overflow stayed inline: outcome=%+v writes=%d output_bytes=%d", outcome, len(store.envelopes), len(result.Output))
+	}
+	checkpoint, err := NewActionResultCheckpoint(1, 0, "decision:1/action:0", projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checkpoint.Payload) > 512 {
+		t.Fatalf("bounded checkpoint bytes=%d want <=512", len(checkpoint.Payload))
 	}
 }
 
@@ -111,6 +176,20 @@ func TestToolResultExternalizerCachesOnlyLossyLargeResult(t *testing.T) {
 	if visible.ContentState != ToolResultExternalized || visible.ResultRef != envelope.ResultRef || visible.ReadTool != "read_tool_result" || visible.ResultBytes != len(body) {
 		t.Fatalf("model projection = %#v", visible)
 	}
+	var continuation struct {
+		Preview    string `json:"preview"`
+		NextOffset int    `json:"next_offset"`
+		Complete   bool   `json:"complete"`
+		Notice     string `json:"notice"`
+	}
+	if err := json.Unmarshal(projected.Output, &continuation); err != nil {
+		t.Fatal(err)
+	}
+	if continuation.NextOffset != len([]byte(continuation.Preview)) || continuation.NextOffset <= 0 || continuation.Complete ||
+		!strings.Contains(continuation.Notice, `Use read_tool_result(result_ref="tr_test_reference", offset=`) ||
+		!strings.Contains(continuation.Notice, `Showing bytes 0-`) {
+		t.Fatalf("projection continuation = %#v", continuation)
+	}
 }
 
 func TestToolResultExternalizerWriteFailureReturnsNoReadableReference(t *testing.T) {
@@ -131,6 +210,13 @@ func TestToolResultExternalizerWriteFailureReturnsNoReadableReference(t *testing
 	}
 	if visible.ContentState != ToolResultNotCached || visible.ResultRef != "" || visible.ReadTool != "" {
 		t.Fatalf("write failure exposed false reference: %#v", visible)
+	}
+	checkpoint, err := NewActionResultCheckpoint(1, 0, "decision:1/action:0", projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checkpoint.Payload) > 384 || !strings.Contains(visible.Notice, "reissue the original tool call") {
+		t.Fatalf("write failure projection is not safely bounded/actionable: bytes=%d projection=%#v", len(checkpoint.Payload), visible)
 	}
 }
 

@@ -508,6 +508,7 @@ func main() {
 	readSkillTool := agent.NewReadSkillAction(definitionCatalog, skillCatalog)
 	toolResultReader := agent.ToolResultReader{
 		Store: toolResultStore, MaximumPageBytes: config.ToolResultPageBytes,
+		MaximumOutputBytes: config.ToolResultPageBytes,
 	}
 	readToolResultTool := agent.NewReadToolResultAction(toolResultReader)
 	researchURLTools := agent.NewVersionedResearchURLActions(researchURLReader, webReaderAdapter, webReaderAdapter)
@@ -898,11 +899,11 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
-	toolResultInlineBytes, err := workerEnvInt("NANO_TOOL_RESULT_INLINE_BYTES", 16*1024)
+	toolResultInlineBytes, err := workerEnvInt("NANO_TOOL_RESULT_INLINE_BYTES", 50*1024)
 	if err != nil {
 		return workerConfig{}, err
 	}
-	toolResultPageBytes, err := workerEnvInt("NANO_TOOL_RESULT_PAGE_BYTES", 16*1024)
+	toolResultPageBytes, err := workerEnvInt("NANO_TOOL_RESULT_PAGE_BYTES", 50*1024)
 	if err != nil {
 		return workerConfig{}, err
 	}
@@ -1048,7 +1049,7 @@ func loadWorkerConfig() (workerConfig, error) {
 			Region:          env("NANO_RESEARCH_WORKSPACE_S3_REGION", "us-east-1"), UseTLS: workspaceUseTLS,
 		},
 		ToolResultRedisURL:  env("NANO_TOOL_RESULT_REDIS_URL", "redis://:nano-tool-results@127.0.0.1:56379/0"),
-		ToolResultKeyPrefix: env("NANO_TOOL_RESULT_REDIS_KEY_PREFIX", "nano:tool-result:v1:"),
+		ToolResultKeyPrefix: env("NANO_TOOL_RESULT_REDIS_KEY_PREFIX", "nano:tool-result:v2:"),
 		ToolResultCacheTTL:  toolResultCacheTTL, ToolResultInlineBytes: toolResultInlineBytes,
 		ToolResultPageBytes: toolResultPageBytes, ToolResultMaximumBytes: toolResultMaximumBytes,
 		ToolResultOperationTimeout: toolResultOperationTimeout,
@@ -1102,7 +1103,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		strings.TrimSpace(config.ResearchWorkspaceS3.AccessKeyID) == "" || strings.TrimSpace(config.ResearchWorkspaceS3.SecretAccessKey) == "" ||
 		strings.TrimSpace(config.ResearchWorkspaceS3.Bucket) == "" || config.SourcePurgeLease <= 0 || config.SourcePurgePoll <= 0 ||
 		strings.TrimSpace(config.ToolResultRedisURL) == "" || strings.TrimSpace(config.ToolResultKeyPrefix) == "" ||
-		config.ToolResultCacheTTL != 30*time.Minute || config.ToolResultInlineBytes < 512 || config.ToolResultPageBytes < 4 ||
+		config.ToolResultCacheTTL != 30*time.Minute || config.ToolResultInlineBytes < 512 || config.ToolResultPageBytes < 512 ||
 		config.ToolResultMaximumBytes < config.ToolResultInlineBytes || config.ToolResultOperationTimeout <= 0 ||
 		strings.TrimSpace(config.QdrantURL) == "" || strings.TrimSpace(config.QdrantCollection) == "" || config.QdrantDenseDimensions <= 0 ||
 		(config.RetrievalBootstrapMode != "development" && config.RetrievalBootstrapMode != "required") ||

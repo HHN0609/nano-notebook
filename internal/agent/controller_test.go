@@ -1016,6 +1016,32 @@ func TestControllerExternalizesEligibleLargeResultBeforeCheckpointBudget(t *test
 	if result == nil || len(result.Output) > 512 || strings.Contains(string(result.Output), string(action.output)) {
 		t.Fatalf("checkpoint result leaked large body: %#v", result)
 	}
+	units, err := ProjectChatLane(context.Background(), ChatLane{Turns: []ChatLaneTurn{{
+		MessageID: "msg_externalized", Content: "read the paper",
+		Runs: []ChatLaneRun{{RunID: runtime.execution.Attempt.RunID, Prefix: &prefix}},
+	}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adjacentActionMessage *models.ModelMessage
+	for _, message := range FlattenContextUnits(units) {
+		if message.Role == models.RoleAction {
+			copyMessage := message
+			adjacentActionMessage = &copyMessage
+			break
+		}
+	}
+	if adjacentActionMessage == nil || len(runtime.checkpoints) < 2 || runtime.checkpoints[1].Kind != CheckpointActionResult ||
+		adjacentActionMessage.Content != string(runtime.checkpoints[1].Payload) {
+		t.Fatalf("adjacent Action message diverged from bounded checkpoint: message=%+v checkpoints=%+v", adjacentActionMessage, runtime.checkpoints)
+	}
+	if len(adjacentActionMessage.Content) > 512 {
+		t.Fatalf("model-visible Tool Result bytes=%d want <=512", len(adjacentActionMessage.Content))
+	}
+	if strings.Contains(adjacentActionMessage.Content, string(action.output)) || !strings.Contains(adjacentActionMessage.Content, `"next_offset":`) ||
+		!strings.Contains(adjacentActionMessage.Content, `read_tool_result`) {
+		t.Fatalf("adjacent Action message lost bounded continuation contract: %s", adjacentActionMessage.Content)
+	}
 	if len(runtime.failed) != 0 || len(runtime.published) != 1 {
 		t.Fatalf("failed=%v published=%v", runtime.failed, runtime.published)
 	}

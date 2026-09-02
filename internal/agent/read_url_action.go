@@ -76,7 +76,7 @@ func (*readURLAction) CacheLongToolResults(definition agentcatalog.Reference) bo
 func (*readURLAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
 		Name:        "read_url",
-		Description: "Fetch one public HTTP or HTTPS URL and return cleaned Markdown for substantive evidence analysis.",
+		Description: "Fetch one public HTTP or HTTPS URL and return cleaned Markdown for substantive evidence analysis. A long successful result may include a bounded preview and result_ref; use read_tool_result with its next_offset to continue.",
 		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["url"],"properties":{"url":{"type":"string","minLength":1,"maxLength":4096,"pattern":"^https?://"}}}`),
 	}
 }
