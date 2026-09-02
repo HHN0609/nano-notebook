@@ -108,14 +108,13 @@ func validateLimitCeiling(value, ceiling Limits) error {
 		{"model_calls", value.ModelCalls, ceiling.ModelCalls},
 		{"action_decisions", value.ActionDecisions, ceiling.ActionDecisions},
 		{"actions", value.Actions, ceiling.Actions},
-		{"plan_mutations", value.PlanMutations, ceiling.PlanMutations},
 		{"action_batch", value.ActionBatch, ceiling.ActionBatch},
 		{"context_bytes", value.ContextBytes, ceiling.ContextBytes},
 		{"result_bytes", value.ResultBytes, ceiling.ResultBytes},
 		{"attempts", value.Attempts, ceiling.Attempts},
 	}
 	for _, check := range checks {
-		if check.name == "plan_mutations" || check.name == "action_decisions" {
+		if check.name == "action_decisions" {
 			if check.value > check.ceiling {
 				return fmt.Errorf("%s=%d exceeds %d", check.name, check.value, check.ceiling)
 			}

@@ -110,6 +110,44 @@ func TestMCPToolPlaneUsesOfficialInMemoryProtocolAndDefinitionScope(t *testing.T
 	}
 }
 
+func TestMCPToolPlaneKeepsTodoToolsAfterBusinessBudgetIsExhausted(t *testing.T) {
+	catalog, err := agentcatalog.LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewMCPToolRegistry(
+		MCPToolRegistration{Action: testMCPAction("calculate"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("current_time"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: NewRewriteTodoListAction(&todoActionLoaderStub{}), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: testMCPAction("search_evidence"), Scheduling: agentcatalog.ToolOrderedSync},
+		MCPToolRegistration{Action: NewUpdateTodoStatusAction(&todoActionLoaderStub{}), Scheduling: agentcatalog.ToolOrderedSync},
+		testDelegationMCPRegistration(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := NewMCPToolHost(catalog, registry, &mcpToolAuthority{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := host.OpenAttempt(context.Background(), AttemptToolScope{
+		Definition:       agentcatalog.MustParseReference("chat.leader@4"),
+		Attempt:          Attempt{RunID: "run-todo-unlimited", JobID: "job-todo-unlimited", AttemptNo: 1, LeaseToken: "lease"},
+		RemainingActions: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	definitions, err := session.ActionDefinitions(context.Background(), ActionPolicy{RemainingActions: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := definitionNames(definitions); got != "rewrite_todo_list,update_todo_status" {
+		t.Fatalf("zero-business-budget definitions=%q", got)
+	}
+}
+
 func TestMCPToolRegistryAcceptsParallelScheduling(t *testing.T) {
 	catalog, err := agentcatalog.LoadEmbedded()
 	if err != nil {

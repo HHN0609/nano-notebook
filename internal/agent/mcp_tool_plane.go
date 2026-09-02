@@ -353,9 +353,6 @@ func (s *MCPAttemptSession) ListTools(ctx context.Context) ([]MaterializedMCPToo
 }
 
 func (s *MCPAttemptSession) ActionDefinitions(ctx context.Context, policy ActionPolicy, tracers ...*agentobs.Tracer) ([]models.ActionDefinition, error) {
-	if policy.RemainingActions <= 0 && policy.RemainingPlanMutations <= 0 {
-		return nil, nil
-	}
 	var tracer *agentobs.Tracer
 	if len(tracers) > 0 {
 		tracer = tracers[0]
@@ -371,7 +368,7 @@ func (s *MCPAttemptSession) ActionDefinitions(ctx context.Context, policy Action
 		if mutation, ok := registered.Action.(PlanMutationPolicy); ok {
 			planMutation = mutation.IsPlanMutation()
 		}
-		if (planMutation && policy.RemainingPlanMutations <= 0) || (!planMutation && policy.RemainingActions <= 0) {
+		if !planMutation && policy.RemainingActions <= 0 {
 			continue
 		}
 		if policy.Execution != nil {

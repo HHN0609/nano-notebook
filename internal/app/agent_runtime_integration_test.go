@@ -322,8 +322,8 @@ func TestLeaderLoopUsesCheckpointBackedTodoAndInjectsCurrentAgentStatus(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if execution.PlanMutationLimit != 12 || execution.ActionDecisionLimit != 4 || execution.ActionLimit != 8 {
-		t.Fatalf("pinned budgets plan/actions/decisions=%d/%d/%d", execution.PlanMutationLimit, execution.ActionLimit, execution.ActionDecisionLimit)
+	if execution.ActionDecisionLimit != 4 || execution.ActionLimit != 8 {
+		t.Fatalf("pinned budgets actions/decisions=%d/%d", execution.ActionLimit, execution.ActionDecisionLimit)
 	}
 	rewrite := agent.NewRewriteTodoListAction(runtime)
 	update := agent.NewUpdateTodoStatusAction(runtime)

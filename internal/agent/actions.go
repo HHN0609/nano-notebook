@@ -83,10 +83,9 @@ type Action interface {
 }
 
 type ActionPolicy struct {
-	AllowedNames           map[string]bool
-	RemainingActions       int
-	RemainingPlanMutations int
-	Execution              *Execution
+	AllowedNames     map[string]bool
+	RemainingActions int
+	Execution        *Execution
 }
 
 type ActionAvailability interface {
@@ -138,9 +137,6 @@ func NewActionRegistry(actions ...Action) (*ActionRegistry, error) {
 }
 
 func (r *ActionRegistry) Definitions(ctx context.Context, policy ActionPolicy, tracers ...*agentobs.Tracer) []models.ActionDefinition {
-	if policy.RemainingActions <= 0 && policy.RemainingPlanMutations <= 0 {
-		return nil
-	}
 	var tracer *agentobs.Tracer
 	if len(tracers) > 0 {
 		tracer = tracers[0]
@@ -152,7 +148,7 @@ func (r *ActionRegistry) Definitions(ctx context.Context, policy ActionPolicy, t
 		if mutation, ok := action.executor.(PlanMutationPolicy); ok {
 			planMutation = mutation.IsPlanMutation()
 		}
-		if (planMutation && policy.RemainingPlanMutations <= 0) || (!planMutation && policy.RemainingActions <= 0) {
+		if !planMutation && policy.RemainingActions <= 0 {
 			continue
 		}
 		if policy.Execution != nil {

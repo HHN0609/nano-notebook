@@ -226,7 +226,7 @@ func leaderExecutorCapability(tools map[string]bool) agentcatalog.ExecutorCapabi
 		},
 		Tools: tools, ChildExecutors: map[string]bool{"research": true},
 		MaxLimits: agentcatalog.Limits{
-			ModelCalls: 17, ActionDecisions: 4, Actions: 8, PlanMutations: 12, ActionBatch: 4, ContextBytes: 65536, ResultBytes: 65536, Attempts: 3,
+			ModelCalls: 17, ActionDecisions: 4, Actions: 8, ActionBatch: 4, ContextBytes: 65536, ResultBytes: 65536, Attempts: 3,
 		},
 		MaxChildren: 1, MemberVisible: true, CanPublish: true,
 	}

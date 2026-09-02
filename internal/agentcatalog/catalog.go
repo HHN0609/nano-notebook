@@ -77,11 +77,13 @@ type Limits struct {
 	ModelCalls      int `json:"model_calls"`
 	ActionDecisions int `json:"action_decisions,omitempty"`
 	Actions         int `json:"actions"`
-	PlanMutations   int `json:"plan_mutations,omitempty"`
-	ActionBatch     int `json:"action_batch"`
-	ContextBytes    int `json:"context_bytes"`
-	ResultBytes     int `json:"result_bytes"`
-	Attempts        int `json:"attempts"`
+	// LegacyPlanMutations preserves immutable historical Definition payloads.
+	// Runtime tool availability and execution budgets intentionally ignore it.
+	LegacyPlanMutations int `json:"plan_mutations,omitempty"`
+	ActionBatch         int `json:"action_batch"`
+	ContextBytes        int `json:"context_bytes"`
+	ResultBytes         int `json:"result_bytes"`
+	Attempts            int `json:"attempts"`
 }
 
 type ContractBindings struct {
@@ -671,7 +673,7 @@ func validateDefinition(value Definition) error {
 }
 
 func validatePositiveLimits(limits Limits) error {
-	if limits.ModelCalls < 1 || limits.ActionDecisions < 0 || limits.Actions < 1 || limits.PlanMutations < 0 || limits.ActionBatch < 1 || limits.ContextBytes < 1 || limits.ResultBytes < 1 || limits.Attempts < 1 {
+	if limits.ModelCalls < 1 || limits.ActionDecisions < 0 || limits.Actions < 1 || limits.LegacyPlanMutations < 0 || limits.ActionBatch < 1 || limits.ContextBytes < 1 || limits.ResultBytes < 1 || limits.Attempts < 1 {
 		return errors.New("all definition limits must be positive")
 	}
 	if limits.ActionBatch > limits.Actions {

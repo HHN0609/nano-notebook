@@ -257,7 +257,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatalf("v23 manifest=%+v ok=%v", manifestV23, ok)
 	}
 	chatV4, ok := catalog.ResolveDefinition(MustParseReference("chat.leader@4"))
-	if !ok || chatV4.Limits.PlanMutations != 12 || chatV4.Limits.ActionDecisions != 4 || chatV4.Limits.ModelCalls != 17 || chatV4.Prompts["chat_composer_bare"].String() != "agent.chat-composer-bare@3" || chatV4.Prompts["chat_composer_grounded"].String() != "agent.chat-composer-grounded@4" {
+	if !ok || chatV4.Limits.LegacyPlanMutations != 12 || chatV4.Limits.ActionDecisions != 4 || chatV4.Limits.ModelCalls != 17 || chatV4.Prompts["chat_composer_bare"].String() != "agent.chat-composer-bare@3" || chatV4.Prompts["chat_composer_grounded"].String() != "agent.chat-composer-grounded@4" {
 		t.Fatalf("chat v4=%+v ok=%v", chatV4, ok)
 	}
 	researchPolicy, ok := catalog.ResolveModelPolicy(MustParseReference("agent.deep-research-default@2"))

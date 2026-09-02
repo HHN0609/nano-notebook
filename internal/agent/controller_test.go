@@ -75,7 +75,7 @@ func TestControllerCheckpointsOrderedActionsThenFinalAndPublishesOnce(t *testing
 	}
 }
 
-func TestControllerPlanMutationDoesNotConsumeBusinessActionOrDecisionBudget(t *testing.T) {
+func TestControllerPlanMutationRemainsAvailableWithoutDedicatedBudget(t *testing.T) {
 	at := time.Date(2026, 8, 31, 7, 20, 1, 0, time.UTC)
 	registry, err := NewActionRegistry(
 		NewRewriteTodoListAction(&todoActionLoaderStub{inputMessageID: "msg_1", proposedAt: at}),
@@ -88,7 +88,6 @@ func TestControllerPlanMutationDoesNotConsumeBusinessActionOrDecisionBudget(t *t
 	runtime.execution.InputMessageID = "msg_1"
 	runtime.execution.ActionDecisionLimit = 1
 	runtime.execution.ActionLimit = 1
-	runtime.execution.PlanMutationLimit = 1
 	runtime.execution.ActionBatchLimit = 1
 	model := &decisionModelStub{decisions: []models.ModelDecision{
 		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "rewrite_todo_list", Input: json.RawMessage(`{"items":["plan","execute"]}`)}}}},
@@ -102,13 +101,108 @@ func TestControllerPlanMutationDoesNotConsumeBusinessActionOrDecisionBudget(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if acceptedPlanMutations(prefix) != 1 || acceptedBusinessActions(prefix) != 1 || acceptedBusinessDecisions(prefix) != 1 {
-		t.Fatalf("accepted budget use: plan=%d actions=%d decisions=%d", acceptedPlanMutations(prefix), acceptedBusinessActions(prefix), acceptedBusinessDecisions(prefix))
+	if acceptedBusinessActions(prefix) != 1 || acceptedBusinessDecisions(prefix) != 1 {
+		t.Fatalf("accepted business budget use: actions=%d decisions=%d", acceptedBusinessActions(prefix), acceptedBusinessDecisions(prefix))
 	}
-	if len(model.requests) != 3 || definitionNames(model.requests[0].ActionDefinitions) != "calculate,rewrite_todo_list" || definitionNames(model.requests[1].ActionDefinitions) != "calculate" || len(model.requests[2].ActionDefinitions) != 0 {
+	if len(model.requests) != 3 || definitionNames(model.requests[0].ActionDefinitions) != "calculate,rewrite_todo_list" ||
+		definitionNames(model.requests[1].ActionDefinitions) != "calculate,rewrite_todo_list" ||
+		definitionNames(model.requests[2].ActionDefinitions) != "rewrite_todo_list" {
 		t.Fatalf("request definitions = %#v", model.requests)
 	}
 	if len(runtime.published) != 1 || len(runtime.failed) != 0 {
+		t.Fatalf("published=%v failed=%v", runtime.published, runtime.failed)
+	}
+}
+
+func TestControllerRecoversToolCallNotAdvertisedForCurrentDecision(t *testing.T) {
+	executionOrder := make([]string, 0, 1)
+	registry, err := NewActionRegistry(
+		&unavailableRecordingAction{recordingAction: recordingAction{name: "hidden", order: &executionOrder}},
+		NewCalculateAction(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &invalidResponseRecoveryRuntimeStub{
+		controllerRuntimeStub: &controllerRuntimeStub{execution: defaultControllerExecution()},
+		limit:                 1,
+	}
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "hidden", Input: json.RawMessage(`{"value":"must-not-run"}`)}}}},
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "calculate", Input: json.RawMessage(`{"operation":"add","operands":["1","2"]}`)}}}},
+		{Final: &models.FinalDraft{Text: "recovered"}},
+	}}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(executionOrder) != 0 {
+		t.Fatalf("unadvertised Action executed: %v", executionOrder)
+	}
+	if len(model.requests) != 3 || definitionNames(model.requests[0].ActionDefinitions) != "calculate" ||
+		definitionNames(model.requests[1].ActionDefinitions) != "calculate" {
+		t.Fatalf("request definitions = %#v", model.requests)
+	}
+	recoveryMessages := model.requests[1].Messages
+	if len(recoveryMessages) == 0 || !strings.Contains(recoveryMessages[len(recoveryMessages)-1].Content, "hidden") ||
+		!strings.Contains(recoveryMessages[len(recoveryMessages)-1].Content, "calculate") {
+		t.Fatalf("recovery mapping detail = %+v", recoveryMessages)
+	}
+	if len(runtime.published) != 1 || runtime.published[0].Text != "recovered" || len(runtime.failed) != 0 {
+		t.Fatalf("published=%v failed=%v", runtime.published, runtime.failed)
+	}
+}
+
+func TestControllerRecoversIdenticalCompletedTodoRewriteWithoutExecutingItAgain(t *testing.T) {
+	at := time.Date(2026, 9, 2, 15, 11, 9, 0, time.UTC)
+	registry, err := NewActionRegistry(
+		NewRewriteTodoListAction(&todoActionLoaderStub{inputMessageID: "msg_1", proposedAt: at}),
+		NewCalculateAction(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	base.execution.InputMessageID = "msg_1"
+	runtime := &invalidResponseRecoveryRuntimeStub{controllerRuntimeStub: base, limit: 1}
+	rewrite := models.ActionProposal{Name: "rewrite_todo_list", Input: json.RawMessage(`{"items":["discover evidence","write report"]}`)}
+	semanticallyIdenticalRewrite := models.ActionProposal{Name: "rewrite_todo_list", Input: json.RawMessage(`{
+		"items": ["discover evidence", "write report"]
+	}`)}
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{rewrite}}},
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{semanticallyIdenticalRewrite}}},
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "calculate", Input: json.RawMessage(`{"operation":"add","operands":["1","2"]}`)}}}},
+		{Final: &models.FinalDraft{Text: "recovered"}},
+	}}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := LoadCheckpointPrefix(context.Background(), runtime.checkpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewrites := 0
+	for _, proposal := range prefix.Proposals {
+		for _, action := range proposal.Actions {
+			if action.Name == "rewrite_todo_list" {
+				rewrites++
+			}
+		}
+	}
+	if rewrites != 1 {
+		t.Fatalf("accepted identical rewrites=%d, want 1", rewrites)
+	}
+	if len(model.requests) != 4 {
+		t.Fatalf("model requests=%d, want 4", len(model.requests))
+	}
+	messages := model.requests[2].Messages
+	if len(messages) == 0 || !strings.Contains(messages[len(messages)-1].Content, "identical input already completed") ||
+		!strings.Contains(messages[len(messages)-1].Content, "rewrite_todo_list") {
+		t.Fatalf("duplicate recovery detail=%+v", messages)
+	}
+	if len(runtime.published) != 1 || runtime.published[0].Text != "recovered" || len(runtime.failed) != 0 {
 		t.Fatalf("published=%v failed=%v", runtime.published, runtime.failed)
 	}
 }
@@ -561,14 +655,15 @@ func TestControllerStopsAfterSecondContextOverflow(t *testing.T) {
 	}
 }
 
-func TestControllerRejectsOverCapacityBatchAndUsesActionDisabledFinalDecision(t *testing.T) {
+func TestControllerRecoversOverCapacityBatchWithoutDisablingActions(t *testing.T) {
 	executionOrder := make([]string, 0)
 	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &executionOrder})
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
-	runtime.execution.ActionLimit = 1
+	base := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	base.execution.ActionLimit = 1
+	runtime := &invalidResponseRecoveryRuntimeStub{controllerRuntimeStub: base, limit: 1}
 	model := &decisionModelStub{decisions: []models.ModelDecision{
 		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{
 			{Name: "record", Input: json.RawMessage(`{"value":"one"}`)},
@@ -580,8 +675,11 @@ func TestControllerRejectsOverCapacityBatchAndUsesActionDisabledFinalDecision(t 
 	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
 		t.Fatal(err)
 	}
-	if len(model.requests) != 2 || len(model.requests[0].ActionDefinitions) != 1 || len(model.requests[1].ActionDefinitions) != 0 {
+	if len(model.requests) != 2 || len(model.requests[0].ActionDefinitions) != 1 || len(model.requests[1].ActionDefinitions) != 1 {
 		t.Fatalf("Action definitions across budget fallback = %+v", model.requests)
+	}
+	if messages := model.requests[1].Messages; len(messages) == 0 || !strings.Contains(messages[len(messages)-1].Content, "remaining Action budget") {
+		t.Fatalf("budget recovery detail = %+v", messages)
 	}
 	if len(executionOrder) != 0 {
 		t.Fatalf("over-capacity Actions executed = %v", executionOrder)
@@ -1339,6 +1437,14 @@ type recordingAction struct {
 	proceed         <-chan struct{}
 	attempts        []Attempt
 	crashReplaySafe bool
+}
+
+type unavailableRecordingAction struct {
+	recordingAction
+}
+
+func (*unavailableRecordingAction) Available(Execution) (bool, string) {
+	return false, "test_unavailable"
 }
 
 type cacheableResultAction struct{ output json.RawMessage }

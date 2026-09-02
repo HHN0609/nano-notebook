@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
@@ -167,7 +168,6 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			return err
 		}
 	}
-	forceFinalDecision := false
 	recoveryBoundary := true
 	for {
 		prefix, err := c.runtime.LoadCheckpointPrefix(ctx, attempt)
@@ -207,21 +207,18 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		recoveryBoundary = false
 
 		remainingActions := execution.ActionLimit - acceptedBusinessActions(prefix)
-		remainingPlanMutations := execution.PlanMutationLimit - acceptedPlanMutations(prefix)
 		businessDecisionAvailable := acceptedBusinessDecisions(prefix) < execution.ActionDecisionLimit && remainingActions > 0
-		actionCapable := !forceFinalDecision && (businessDecisionAvailable || remainingPlanMutations > 0)
-		definitions := []models.ActionDefinition(nil)
-		if actionCapable {
-			definitions, err = c.actionDefinitions(ctx, toolSession, ActionPolicy{
-				RemainingActions: remainingActions, RemainingPlanMutations: remainingPlanMutations, Execution: &execution,
-			}, tracer)
-			if err != nil {
-				return c.handleRuntimeError(ctx, attempt, err)
-			}
-			if len(definitions) == 0 {
-				actionCapable = false
-			}
+		advertisedBusinessActions := remainingActions
+		if !businessDecisionAvailable {
+			advertisedBusinessActions = 0
 		}
+		definitions, err := c.actionDefinitions(ctx, toolSession, ActionPolicy{
+			RemainingActions: advertisedBusinessActions, Execution: &execution,
+		}, tracer)
+		if err != nil {
+			return c.handleRuntimeError(ctx, attempt, err)
+		}
+		actionCapable := len(definitions) > 0
 		if !actionCapable && execution.FinalDecisionLimit < 1 {
 			return c.fail(ctx, attempt, ErrorAgentBudgetExhausted, errors.New("no reserved Final decision is available"))
 		}
@@ -317,6 +314,12 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 					}
 				}
 			}
+			if err == nil {
+				if validationErr := c.validateDecisionForRequest(toolSession, prefix, outcome.ModelDecision, definitions, actionCapable, execution, remainingActions, businessDecisionAvailable); validationErr != nil {
+					invalidResponseRecoveryDetail = validationErr.Error()
+					err = &models.ModelError{Kind: models.ErrorInvalidResponse, Err: validationErr}
+				}
+			}
 			if isModelInvalidResponse(err) {
 				limit := 0
 				if runtime, ok := c.runtime.(InvalidModelResponseRecoveryRuntime); ok {
@@ -340,13 +343,6 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			return c.handleModelError(ctx, attempt, err)
 		}
 		decision := outcome.ModelDecision
-		if err := decision.Validate(); err != nil {
-			code := string(models.ErrorInvalidResponse)
-			if !actionCapable {
-				code = ErrorAgentBudgetExhausted
-			}
-			return c.fail(ctx, attempt, code, err)
-		}
 		if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
 			return c.handleRuntimeError(ctx, attempt, err)
 		}
@@ -378,27 +374,12 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			if _, err := c.runtime.AppendCheckpoint(ctx, attempt, checkpoint); err != nil {
 				return c.handleRuntimeError(ctx, attempt, err)
 			}
-			forceFinalDecision = false
 			continue
 		}
 		if !actionCapable {
 			return c.fail(ctx, attempt, ErrorAgentBudgetExhausted, errors.New("reserved Final decision proposed Actions"))
 		}
 		batch := *decision.Proposal
-		if len(batch.Actions) > execution.ActionBatchLimit {
-			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), errors.New("Action proposal exceeds batch limit"))
-		}
-		if err := c.validateProposal(toolSession, batch.Actions); err != nil {
-			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
-		}
-		businessActions, planMutations := proposalBudgetUse(batch.Actions)
-		if planMutations > 1 {
-			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), errors.New("Action proposal contains multiple TODO mutations"))
-		}
-		if businessActions > remainingActions || planMutations > remainingPlanMutations || (businessActions > 0 && !businessDecisionAvailable) {
-			forceFinalDecision = true
-			continue
-		}
 		checkpoint, err := NewProposalCheckpoint(decisionNo, batch)
 		if err != nil {
 			return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), err)
@@ -406,8 +387,69 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		if _, err := c.runtime.AppendCheckpoint(ctx, attempt, checkpoint); err != nil {
 			return c.handleRuntimeError(ctx, attempt, err)
 		}
-		forceFinalDecision = false
 	}
+}
+
+func (c *Controller) validateDecisionForRequest(session *MCPAttemptSession, prefix CheckpointPrefix, decision models.ModelDecision, definitions []models.ActionDefinition, actionCapable bool, execution Execution, remainingActions int, businessDecisionAvailable bool) error {
+	if err := decision.Validate(); err != nil {
+		return err
+	}
+	if decision.Proposal == nil || !actionCapable {
+		return nil
+	}
+	batch := *decision.Proposal
+	if len(batch.Actions) > execution.ActionBatchLimit {
+		return errors.New("Action proposal exceeds batch limit")
+	}
+	available := make(map[string]bool, len(definitions))
+	names := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		available[definition.Name] = true
+		names = append(names, definition.Name)
+	}
+	for index, action := range batch.Actions {
+		if !available[action.Name] {
+			return fmt.Errorf("Action proposal %d names Tool %q unavailable for this decision; available Tools: %s", index, action.Name, strings.Join(names, ", "))
+		}
+	}
+	if err := c.validateProposal(session, batch.Actions); err != nil {
+		return err
+	}
+	for _, action := range batch.Actions {
+		if action.Name == "rewrite_todo_list" && completedActionHasCanonicalInput(prefix, action.Name, action.Input) {
+			return fmt.Errorf("Tool %q with identical input already completed; choose another available Tool or submit a materially different TODO plan", action.Name)
+		}
+	}
+	businessActions, planMutations := proposalBudgetUse(batch.Actions)
+	if planMutations > 1 {
+		return errors.New("Action proposal contains multiple TODO mutations")
+	}
+	if businessActions > remainingActions {
+		return fmt.Errorf("Action proposal requests %d business Actions with %d remaining Action budget", businessActions, remainingActions)
+	}
+	if businessActions > 0 && !businessDecisionAvailable {
+		return errors.New("Action proposal requests a business Action with no remaining business decision budget")
+	}
+	return nil
+}
+
+func completedActionHasCanonicalInput(prefix CheckpointPrefix, name string, input []byte) bool {
+	wanted, err := CanonicalJSONObject(input)
+	if err != nil {
+		return false
+	}
+	for _, proposal := range prefix.Proposals {
+		for _, action := range proposal.Actions {
+			if action.Name != name || action.Result == nil || action.Result.Status != ActionSucceeded {
+				continue
+			}
+			canonical, err := CanonicalJSONObject(action.Input)
+			if err == nil && string(canonical) == string(wanted) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isPlanMutationName(name string) bool {
@@ -430,18 +472,6 @@ func acceptedBusinessActions(prefix CheckpointPrefix) int {
 	for _, proposal := range prefix.Proposals {
 		for _, action := range proposal.Actions {
 			if !isPlanMutationName(action.Name) {
-				count++
-			}
-		}
-	}
-	return count
-}
-
-func acceptedPlanMutations(prefix CheckpointPrefix) int {
-	count := 0
-	for _, proposal := range prefix.Proposals {
-		for _, action := range proposal.Actions {
-			if isPlanMutationName(action.Name) {
 				count++
 			}
 		}
