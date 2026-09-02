@@ -119,40 +119,6 @@ type researchTaskMemoryModelStep struct {
 	RetainedTrajectory []researchCompactionMessage `json:"retained_trajectory"`
 }
 
-func researchTrajectoryWithoutTodoControl(units []ContextUnit) ([]ContextUnit, error) {
-	result := make([]ContextUnit, 0, len(units))
-	for _, unit := range units {
-		if unit.Kind != ContextUnitAgentStep || len(unit.Messages) == 0 || len(unit.Messages[0].ActionCalls) == 0 {
-			result = append(result, cloneResearchContextUnit(unit))
-			continue
-		}
-		containsTodo, allTodo := false, true
-		for _, call := range unit.Messages[0].ActionCalls {
-			isTodo := call.Name == "rewrite_todo_list" || call.Name == "update_todo_status"
-			containsTodo = containsTodo || isTodo
-			allTodo = allTodo && isTodo
-		}
-		if !containsTodo {
-			result = append(result, cloneResearchContextUnit(unit))
-			continue
-		}
-		// TODO is rebuilt from its authoritative checkpoints as fresh Agent
-		// Status. A malformed mixed Step cannot be partly removed without
-		// breaking Tool Call/Result pairing, so fail closed instead of leaking
-		// the control snapshot into compaction.
-		if !allTodo || len(unit.Messages) != 1+len(unit.Messages[0].ActionCalls) {
-			return nil, projectionError("Research TODO control Step %d is not independently projectable", unit.DecisionNo)
-		}
-		for index, call := range unit.Messages[0].ActionCalls {
-			resultMessage := unit.Messages[index+1]
-			if resultMessage.Role != models.RoleAction || resultMessage.ActionCallID != call.ID {
-				return nil, projectionError("Research TODO control Step %d lost Tool pairing", unit.DecisionNo)
-			}
-		}
-	}
-	return result, nil
-}
-
 func researchCompactionMessages(messages []models.ModelMessage) []researchCompactionMessage {
 	result := make([]researchCompactionMessage, 0, len(messages))
 	for _, message := range messages {
@@ -292,8 +258,8 @@ func (r *ResearchRuntime) PrepareDecisionRequest(
 	if err != nil || len(rawUnits) < 2 {
 		return models.ModelRequest{}, ErrContextBudgetExceeded
 	}
-	rawTrajectory, err := researchTrajectoryWithoutTodoControl(rawUnits[1:])
-	if err != nil || len(rawTrajectory) < 2 {
+	rawTrajectory := rawUnits[1:]
+	if len(rawTrajectory) < 2 {
 		return models.ModelRequest{}, ErrContextBudgetExceeded
 	}
 	archived, err := r.loadResearchArchivalCapsules(ctx, execution.RunID)

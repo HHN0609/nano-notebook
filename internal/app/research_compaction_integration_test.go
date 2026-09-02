@@ -19,6 +19,69 @@ type researchCompactionModel struct {
 	calls                  int
 	requests               []models.ModelRequest
 	capsuleConclusionBytes int
+	sawTodoStep            bool
+}
+
+func TestResearchV10DecisionRequestRetainsCompletedTodoStepBeforeCompaction(t *testing.T) {
+	api := newTestAPI(t)
+	claimed, _, _, _ := admitResearchExecutionForRelease(t, api, "research-todo-context-v10@example.com", "nano.default@17")
+	ctx := context.Background()
+	runtime, err := agent.NewResearchRuntime(api.db.Pool(), promptcatalog.MustLoadEmbedded())
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := runtime.Load(ctx, attemptFromClaim(claimed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{{
+		Name: "rewrite_todo_list", Input: json.RawMessage(`{"items":["read evidence","write report"]}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(claimed), proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := agent.RewriteTodoList(agent.TodoSnapshot{}, false, execution.InputMessageID,
+		[]string{"read evidence", "write report"}, stored.CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.NewActionResultCheckpoint(1, 0, "decision:1/action:0", agent.ActionResult{Status: agent.ActionSucceeded, Output: output})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(claimed), result); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := runtime.LoadCheckpointPrefix(ctx, attemptFromClaim(claimed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := runtime.BuildDecisionRequest(ctx, execution, prefix, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundCall, foundSucceededResult := false, false
+	for _, message := range request.Messages {
+		for _, call := range message.ActionCalls {
+			if call.Name == "rewrite_todo_list" && strings.Contains(string(call.Input), "read evidence") {
+				foundCall = true
+			}
+		}
+		if message.Role == models.RoleAction && message.ActionCallID == "decision:1/action:0" && strings.Contains(message.Content, `"status":"succeeded"`) {
+			foundSucceededResult = true
+		}
+	}
+	if !foundCall || !foundSucceededResult {
+		t.Fatalf("completed TODO step missing from pre-compaction request: call=%t result=%t messages=%+v", foundCall, foundSucceededResult, request.Messages)
+	}
 }
 
 func (m *researchCompactionModel) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
@@ -31,10 +94,11 @@ func (m *researchCompactionModel) Decide(_ context.Context, request models.Model
 		(!strings.Contains(request.Messages[1].Content, "decision-1-") && !strings.Contains(request.Messages[1].Content, "decision-2-") && !strings.Contains(request.Messages[1].Content, "small-1")) {
 		return models.ModelOutcome{}, fmt.Errorf("compaction input lost retained Tool name or complete input")
 	}
-	if strings.Contains(request.Messages[1].Content, "TODO private marker") ||
-		strings.Contains(request.Messages[1].Content, "rewrite_todo_list") ||
-		strings.Contains(request.Messages[1].Content, "<agent_status") {
-		return models.ModelOutcome{}, fmt.Errorf("compaction input included rebuilt TODO or Agent Status")
+	if strings.Contains(request.Messages[1].Content, "TODO private marker") && strings.Contains(request.Messages[1].Content, "rewrite_todo_list") {
+		m.sawTodoStep = true
+	}
+	if strings.Contains(request.Messages[1].Content, "<agent_status") {
+		return models.ModelOutcome{}, fmt.Errorf("compaction input included ephemeral Agent Status")
 	}
 	var input struct {
 		Steps []struct {
@@ -124,7 +188,7 @@ func TestResearchV10ThresholdCompactionPersistsTwoLayersWithoutChangingCheckpoin
 	prefix := agent.CheckpointPrefix{}
 	inputPadding := strings.Repeat("i", 64_000)
 	resultPadding := strings.Repeat("r", 64_000)
-	for decision := 2; decision <= 47; decision++ {
+	for decision := 2; decision <= 46; decision++ {
 		proposal, err := agent.NewProposalCheckpoint(decision, models.ActionProposalBatch{Actions: []models.ActionProposal{{
 			Name: "web_search", Input: json.RawMessage(fmt.Sprintf(`{"queries":["decision-%d-%s"]}`, decision, inputPadding)),
 		}}})
@@ -165,7 +229,7 @@ func TestResearchV10ThresholdCompactionPersistsTwoLayersWithoutChangingCheckpoin
 		t.Fatal(err)
 	}
 	checkpointPayloadsAfter := researchCheckpointPayloadSnapshot(t, api.db.Pool(), claimed.RunID)
-	if model.calls != 2 || capsules != 24 || memories != 1 || legacyCapsules != 0 || legacyRollups != 0 || !reflect.DeepEqual(checkpointPayloadsAfter, checkpointPayloads) {
+	if model.calls != 2 || !model.sawTodoStep || capsules != 24 || memories != 1 || legacyCapsules != 0 || legacyRollups != 0 || !reflect.DeepEqual(checkpointPayloadsAfter, checkpointPayloads) {
 		t.Fatalf("calls=%d capsules=%d memories=%d legacy=%d/%d checkpoint_changed=%t", model.calls, capsules, memories, legacyCapsules, legacyRollups, !reflect.DeepEqual(checkpointPayloadsAfter, checkpointPayloads))
 	}
 	if request.ContextTelemetry.InputTokens > execution.ModelContext.Budgets.SafeInputTokens || request.ContextTelemetry.BeforeCompactionTokens <= request.ContextTelemetry.AfterCompactionTokens || !request.ContextTelemetry.AgentStatusInjected {
@@ -180,18 +244,18 @@ func TestResearchV10ThresholdCompactionPersistsTwoLayersWithoutChangingCheckpoin
 	}
 	projected := strings.Join(joined, "\n")
 	if strings.Contains(projected, "decision-2-") || strings.Contains(projected, "result-2-") ||
-		!strings.Contains(projected, "decision-47-") || !strings.Contains(projected, "result-47-") || !strings.Contains(projected, "research_task_memory") ||
+		!strings.Contains(projected, "decision-46-") || !strings.Contains(projected, "result-46-") || !strings.Contains(projected, "research_task_memory") ||
 		!strings.Contains(projected, "<agent_status version=\"1\">") || !strings.Contains(projected, "Investigate TODO private marker") {
 		t.Fatalf("unexpected compacted projection markers; bytes=%d old=%t/%t recent=%t/%t memory=%t status=%t todo=%t",
 			len(projected), strings.Contains(projected, "decision-2-"), strings.Contains(projected, "result-2-"),
-			strings.Contains(projected, "decision-47-"), strings.Contains(projected, "result-47-"),
+			strings.Contains(projected, "decision-46-"), strings.Contains(projected, "result-46-"),
 			strings.Contains(projected, "research_task_memory"), strings.Contains(projected, "<agent_status version=\"1\">"),
 			strings.Contains(projected, "Investigate TODO private marker"))
 	}
 	for index, compactorRequest := range model.requests {
 		encoded, _ := json.Marshal(compactorRequest)
-		if strings.Contains(string(encoded), "TODO private marker") || strings.Contains(string(encoded), "rewrite_todo_list") || strings.Contains(string(encoded), "<agent_status") {
-			t.Fatalf("compactor request %d included TODO control state", index+1)
+		if strings.Contains(string(encoded), "<agent_status") {
+			t.Fatalf("compactor request %d included ephemeral Agent Status", index+1)
 		}
 	}
 }

@@ -81,9 +81,10 @@ use full compaction only after cheaper representations are insufficient.
 5. Use three operational layers: externalized bounded Tool results, archival
    compaction, and deep task-memory compaction.
 6. Rebuild the existing checkpoint-backed TODO and ephemeral Agent Status on
-   every request. TODO mutation Steps remain in checkpoints but are removed
-   from the v10 model trajectory and compactor inputs; neither TODO nor Agent
-   Status is copied into compression summaries.
+   every request. As corrected on 2026-09-02, completed TODO mutation Steps
+   remain in the exact model trajectory before compaction and enter ordinary
+   Step compaction atomically; only ephemeral Agent Status is excluded from
+   compactor inputs and compression summaries.
 
 ## Layer 1: externalized bounded Tool results
 

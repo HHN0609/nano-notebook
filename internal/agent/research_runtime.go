@@ -252,10 +252,7 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		if err != nil {
 			return models.ModelRequest{}, err
 		}
-		projectedTrajectory, err := researchTrajectoryWithoutTodoControl(projected[1:])
-		if err != nil {
-			return models.ModelRequest{}, err
-		}
+		projectedTrajectory := projected[1:]
 		archived := archivalOverride
 		if archived == nil {
 			archived, err = r.loadResearchArchivalCapsules(ctx, execution.RunID)
