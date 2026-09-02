@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 23; got != want {
+	if got, want := len(definitions), 30; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -38,8 +38,16 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			executor: "chat_leader", model: "agent.chat-default@1",
 			tools: []string{"calculate", "current_time", "rewrite_todo_list", "search_evidence", "update_todo_status"}, children: []string{"research.source-discovery@1"},
 		},
+		"chat.leader@5": {
+			executor: "chat_leader", model: "agent.chat-default@2",
+			tools: []string{"calculate", "current_time", "rewrite_todo_list", "search_evidence", "update_todo_status"}, children: []string{"research.source-discovery@2"},
+		},
 		"research.source-discovery@1": {
 			executor: "research", model: "agent.research-default@1",
+			tools: []string{"web_search"},
+		},
+		"research.source-discovery@2": {
+			executor: "research", model: "agent.research-default@2",
 			tools: []string{"web_search"},
 		},
 		"research.planner@1": {
@@ -52,6 +60,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		},
 		"research.planner@6": {
 			executor: "research_planner", model: "agent.deep-research-default@3",
+			tools: []string{"read_skill"},
+		},
+		"research.planner@7": {
+			executor: "research_planner", model: "agent.deep-research-default@6",
 			tools: []string{"read_skill"},
 		},
 		"research.executor@1": {
@@ -102,16 +114,32 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			executor: "studio_structured_output", model: "agent.studio-default@1",
 			tools: []string{"search_evidence"},
 		},
+		"studio.report@2": {
+			executor: "studio_structured_output", model: "agent.studio-default@2",
+			tools: []string{"search_evidence"},
+		},
 		"studio.flashcards@1": {
 			executor: "studio_structured_output", model: "agent.studio-default@1",
+			tools: []string{"search_evidence"},
+		},
+		"studio.flashcards@2": {
+			executor: "studio_structured_output", model: "agent.studio-default@2",
 			tools: []string{"search_evidence"},
 		},
 		"studio.mind-map@1": {
 			executor: "studio_structured_output", model: "agent.studio-default@1",
 			tools: []string{"search_evidence"},
 		},
+		"studio.mind-map@2": {
+			executor: "studio_structured_output", model: "agent.studio-default@2",
+			tools: []string{"search_evidence"},
+		},
 		"studio.data-table@1": {
 			executor: "studio_structured_output", model: "agent.studio-default@1",
+			tools: []string{"search_evidence"},
+		},
+		"studio.data-table@2": {
+			executor: "studio_structured_output", model: "agent.studio-default@2",
 			tools: []string{"search_evidence"},
 		},
 	}
@@ -138,7 +166,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			t.Fatalf("immutable identity missing for %s: %+v", key, definition)
 		}
 	}
-	if got, want := len(catalog.ModelPolicies()), 8; got != want {
+	if got, want := len(catalog.ModelPolicies()), 12; got != want {
 		t.Fatalf("model policies=%d want=%d", got, want)
 	}
 	if got, want := len(catalog.Contracts()), 12; got != want {
@@ -222,6 +250,11 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 	if !ok || manifestV22.Roots["chat"].String() != "chat.leader@4" || manifestV22.Roots["research_planner"].String() != "research.planner@6" ||
 		manifestV22.Roots["research"].String() != "research.executor@15" || manifestV22.Roots["studio_report"].String() != "studio.report@1" {
 		t.Fatalf("v22 manifest=%+v ok=%v", manifestV22, ok)
+	}
+	manifestV23, ok := catalog.ResolveRelease(MustParseReference("nano.default@23"))
+	if !ok || manifestV23.Roots["chat"].String() != "chat.leader@5" || manifestV23.Roots["research_planner"].String() != "research.planner@7" ||
+		manifestV23.Roots["research"].String() != "research.executor@15" || manifestV23.Roots["studio_report"].String() != "studio.report@2" {
+		t.Fatalf("v23 manifest=%+v ok=%v", manifestV23, ok)
 	}
 	chatV4, ok := catalog.ResolveDefinition(MustParseReference("chat.leader@4"))
 	if !ok || chatV4.Limits.PlanMutations != 12 || chatV4.Limits.ActionDecisions != 4 || chatV4.Limits.ModelCalls != 17 || chatV4.Prompts["chat_composer_bare"].String() != "agent.chat-composer-bare@3" || chatV4.Prompts["chat_composer_grounded"].String() != "agent.chat-composer-grounded@4" {

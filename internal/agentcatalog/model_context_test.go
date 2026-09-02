@@ -71,6 +71,87 @@ func TestEmbeddedDeepResearchV5UsesExpandedWorkingContext(t *testing.T) {
 	}
 }
 
+func TestEmbeddedDefaultV23UsesExpandedContextForEntireExecutionGraph(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, ok := catalog.ResolveRelease(MustParseReference("nano.default@23"))
+	if !ok {
+		t.Fatal("nano.default@23 is missing")
+	}
+	visited := make(map[Reference]bool)
+	var visit func(Reference)
+	visit = func(reference Reference) {
+		t.Helper()
+		if visited[reference] {
+			return
+		}
+		visited[reference] = true
+		definition, ok := catalog.ResolveDefinition(reference)
+		if !ok {
+			t.Fatalf("definition %s is missing", reference)
+		}
+		resolved, err := catalog.ResolveModelContextPolicy(definition.ModelPolicy)
+		if err != nil {
+			t.Fatalf("resolve context for %s: %v", reference, err)
+		}
+		if resolved.Policy.SoftInputLimitTokens != 512_000 || resolved.Policy.KeepRecentTokens != 96_000 ||
+			resolved.Policy.EstimationSafetyTokens != 8_192 || resolved.Policy.SummaryMaxOutputTokens != 4_096 ||
+			resolved.Policy.OverflowRetryLimit != 2 {
+			t.Errorf("context for %s=%+v", reference, resolved.Policy)
+		}
+		for _, child := range definition.Children {
+			visit(child)
+		}
+	}
+	for _, root := range manifest.Roots {
+		visit(root)
+	}
+	want := map[Reference]bool{
+		MustParseReference("chat.leader@5"):               true,
+		MustParseReference("research.source-discovery@2"): true,
+		MustParseReference("research.planner@7"):          true,
+		MustParseReference("research.executor@15"):        true,
+		MustParseReference("studio.report@2"):             true,
+		MustParseReference("studio.flashcards@2"):         true,
+		MustParseReference("studio.mind-map@2"):           true,
+		MustParseReference("studio.data-table@2"):         true,
+	}
+	if len(visited) != len(want) {
+		t.Fatalf("visited=%v want=%v", visited, want)
+	}
+	for reference := range want {
+		if !visited[reference] {
+			t.Errorf("release graph does not reach %s", reference)
+		}
+	}
+}
+
+func TestExpandedContextPoliciesPreserveInvocationBehavior(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range [][2]string{
+		{"agent.chat-default@1", "agent.chat-default@2"},
+		{"agent.research-default@1", "agent.research-default@2"},
+		{"agent.deep-research-default@3", "agent.deep-research-default@6"},
+		{"agent.studio-default@1", "agent.studio-default@2"},
+	} {
+		oldPolicy, oldOK := catalog.ResolveModelPolicy(MustParseReference(pair[0]))
+		newPolicy, newOK := catalog.ResolveModelPolicy(MustParseReference(pair[1]))
+		if !oldOK || !newOK {
+			t.Fatalf("policies %v missing: old=%v new=%v", pair, oldOK, newOK)
+		}
+		if oldPolicy.ProviderModel != newPolicy.ProviderModel || oldPolicy.Temperature != newPolicy.Temperature ||
+			oldPolicy.MaxOutputTokens != newPolicy.MaxOutputTokens || oldPolicy.TimeoutMS != newPolicy.TimeoutMS ||
+			oldPolicy.ThinkingEnabled() != newPolicy.ThinkingEnabled() {
+			t.Errorf("invocation changed for %v: old=%+v new=%+v", pair, oldPolicy, newPolicy)
+		}
+	}
+}
+
 func TestCatalogRejectsContradictoryModelContextPolicy(t *testing.T) {
 	files := minimalCatalogFS()
 	files["provider-capabilities/provider.model.v1.json"] = mapFile(`{"identity":"provider.model","version":1,"provider_model":"provider/model","resolved_model":"model-1","context_window_tokens":1000,"max_input_tokens":900,"max_output_tokens":200,"tokenizer_identity":"test-tokenizer","tokenizer_version":"1","invocation_mode":"non_thinking"}`)

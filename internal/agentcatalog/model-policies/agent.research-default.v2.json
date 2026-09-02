@@ -1,0 +1,8 @@
+{
+  "identity": "agent.research-default",
+  "version": 2,
+  "provider_model": "aliyun/qwen-plus",
+  "temperature": 0,
+  "max_output_tokens": 2048,
+  "timeout_ms": 30000
+}

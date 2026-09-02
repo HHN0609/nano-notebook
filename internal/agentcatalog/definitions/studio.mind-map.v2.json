@@ -1,0 +1,23 @@
+{
+  "identity": "studio.mind-map",
+  "version": 2,
+  "executor": "studio_structured_output",
+  "model_policy": "agent.studio-default@2",
+  "prompts": {
+    "mind_map": "agent.studio-mind-map@1"
+  },
+  "contracts": {
+    "input": "studio.output-request@1",
+    "result": "studio.mind-map-result@1"
+  },
+  "tools": ["search_evidence"],
+  "children": [],
+  "limits": {
+    "model_calls": 2,
+    "actions": 1,
+    "action_batch": 1,
+    "context_bytes": 65536,
+    "result_bytes": 65536,
+    "attempts": 3
+  }
+}
