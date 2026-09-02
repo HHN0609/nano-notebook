@@ -34,7 +34,7 @@ func TestEmbeddedDeepResearchPoliciesUseThinkingCapabilityOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, reference := range []string{"agent.deep-research-default@3", "agent.deep-research-default@4"} {
+	for _, reference := range []string{"agent.deep-research-default@3", "agent.deep-research-default@4", "agent.deep-research-default@5"} {
 		policy, ok := catalog.ResolveModelPolicy(MustParseReference(reference))
 		if !ok || policy.EnableThinking == nil || !*policy.EnableThinking {
 			t.Fatalf("thinking policy %s=%+v ok=%v", reference, policy, ok)
@@ -53,6 +53,21 @@ func TestEmbeddedDeepResearchPoliciesUseThinkingCapabilityOnly(t *testing.T) {
 		if err != nil || resolved.Capability.InvocationMode != "non_thinking" {
 			t.Fatalf("non-thinking context %s=%+v err=%v", reference, resolved, err)
 		}
+	}
+}
+
+func TestEmbeddedDeepResearchV5UsesExpandedWorkingContext(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := catalog.ResolveModelContextPolicy(MustParseReference("agent.deep-research-default@5"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Budgets.CompactionTriggerTokens != 512_000 || resolved.Policy.KeepRecentTokens != 96_000 ||
+		resolved.Policy.SummaryMaxOutputTokens != 4_096 || resolved.Policy.PinnedMaxOutputTokens != 16_384 {
+		t.Fatalf("expanded Deep Research context=%+v", resolved)
 	}
 }
 
