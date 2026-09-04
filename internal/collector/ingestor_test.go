@@ -297,6 +297,28 @@ func TestIngestorRejectsReplayAttachmentMetadataMutationOnResend(t *testing.T) {
 	}
 }
 
+func collectorBatchWithReplay(t *testing.T, ciphertext []byte) collector.Batch {
+	t.Helper()
+	batch := validCollectorBatch(t)
+	const attachmentID = "019bf000-0000-7000-8000-000000000101"
+	batch.Chunks[0].Records[1].Record.Attributes = append(
+		batch.Chunks[0].Records[1].Record.Attributes,
+		agentobs.String(replay.ModelRequestAttachmentKey, attachmentID),
+	)
+	batch.Chunks[0].Records[1] = collectorEnvelope(t, 2, batch.Chunks[0].Records[1].Record)
+	ciphertextDigest := sha256.Sum256(ciphertext)
+	batch.Chunks[0].Attachments = []collector.AttachmentDescriptor{{
+		AttachmentID: attachmentID, RecordSequence: 2, Class: replay.ClassModelRequest,
+		SchemaVersion: 1, PlaintextSHA256: strings.Repeat("b", 64),
+		StagingObjectKey: "producer-staging/attachment-1", CiphertextBytes: len(ciphertext),
+		CiphertextSHA256: hex.EncodeToString(ciphertextDigest[:]), Compression: replay.CompressionGZIP,
+		Encryption: replay.EncryptionAES256GCM, KeyID: "dev-key-v1",
+		WrappedKey: bytes.Repeat([]byte{0xc3}, 60), Nonce: bytes.Repeat([]byte{0xd4}, 12),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}}
+	return batch
+}
+
 func TestIngestorRejectsAConflictingTraceChunkWithoutChangingCommittedData(t *testing.T) {
 	store := collector.NewMemoryStore()
 	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})

@@ -45,16 +45,14 @@ type Catalog struct {
 	ToolResultCacheRedisEvictedKeys prometheus.Gauge
 
 	// Runtime and leak surfaces (PRD section 4.6 / 6.4)
-	RunHubSubscribers                          prometheus.Gauge
-	RunHubRunsTracked                          prometheus.Gauge
-	SSEConnectionsActive                       *prometheus.GaugeVec
-	HTTPInflightRequests                       prometheus.Gauge
-	WorkerInflightAttempts                     prometheus.Gauge
-	WorkerHeartbeatGoroutines                  prometheus.Gauge
-	CollectorMemoryStoreRecords                prometheus.Gauge
-	DBPoolConnections                          *prometheus.GaugeVec
-	CollectorProjectionQueueStuckRecords       *prometheus.GaugeVec
-	CollectorProjectionQueueStuckOldestSeconds *prometheus.GaugeVec
+	RunHubSubscribers           prometheus.Gauge
+	RunHubRunsTracked           prometheus.Gauge
+	SSEConnectionsActive        *prometheus.GaugeVec
+	HTTPInflightRequests        prometheus.Gauge
+	WorkerInflightAttempts      prometheus.Gauge
+	WorkerHeartbeatGoroutines   prometheus.Gauge
+	CollectorMemoryStoreRecords prometheus.Gauge
+	DBPoolConnections           *prometheus.GaugeVec
 
 	// Kafka-to-ClickHouse Trace analytics pipeline. Labels are deliberately
 	// operational and bounded; identities remain in Trace storage and logs.
@@ -150,11 +148,6 @@ func NewCatalog(reg *Registry) *Catalog {
 		"Records held by the Collector in-memory Trace store, when used.")
 	c.DBPoolConnections = mustGaugeVec(reg, "nano_db_pool_connections",
 		"pgx pool connection counts by state.", []string{"pool", "state"})
-	c.CollectorProjectionQueueStuckRecords = mustGaugeVec(reg, "nano_collector_projection_queue_stuck_records",
-		"obs_projection_queue rows with a last_error_code set, by error code.", []string{"error_code"})
-	c.CollectorProjectionQueueStuckOldestSeconds = mustGaugeVec(reg, "nano_collector_projection_queue_stuck_oldest_seconds",
-		"Age of the oldest Trace stuck in the Collector projection queue, by error code.", []string{"error_code"})
-
 	c.AgentTraceProducerOfferRejected = mustCounterVec(reg, "nano_agent_trace_producer_offer_rejected_total",
 		"Agent Trace offers rejected synchronously before Kafka buffering.", []string{"reason"})
 	c.AgentTraceProducerDeliveries = mustCounterVec(reg, "nano_agent_trace_producer_deliveries_total",

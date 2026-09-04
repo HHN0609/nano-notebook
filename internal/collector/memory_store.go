@@ -25,9 +25,8 @@ type MemoryStore struct {
 
 // RecordCount reports the total number of Records held in memory across
 // every Trace, the leak surface behind nano_collector_memory_store_records
-// (docs/sprint/SPRINT-12-PRD.md criterion 56). PostgresStore is the
-// production Collector store; this exists for the in-memory fallback used
-// by tests and embedded harnesses.
+// (docs/sprint/SPRINT-12-PRD.md criterion 56). ClickHouseStore is the
+// production Collector store; this exists only for tests and embedded harnesses.
 func (s *MemoryStore) RecordCount() int {
 	if s == nil {
 		return 0

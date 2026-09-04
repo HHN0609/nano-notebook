@@ -17,6 +17,13 @@ type TraceProjection struct {
 	Links   []LinkProjection  `json:"links"`
 }
 
+type ProjectedTrace struct {
+	Projection       TraceProjection `json:"projection"`
+	CommittedThrough int             `json:"committed_sequence"`
+	ProjectedThrough int             `json:"projected_sequence"`
+	CanonicalJSON    string          `json:"-"`
+}
+
 type TraceSummary struct {
 	TraceID              agentobs.TraceID `json:"trace_id"`
 	WorkloadKind         WorkloadKind     `json:"workload_kind"`
@@ -197,9 +204,8 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 				// set. Treat it the same as a Span whose start simply
 				// hasn't been received yet: omit it from the projection
 				// rather than blocking the whole Trace. The next commit
-				// that actually carries the start re-triggers a full
-				// re-projection (see the obs_projection_queue upsert in
-				// CommitTraceChunk), which resolves it then.
+				// that actually carries the start rebuilds the complete
+				// ClickHouse projection and resolves it then.
 				continue
 			}
 			return TraceProjection{}, err
