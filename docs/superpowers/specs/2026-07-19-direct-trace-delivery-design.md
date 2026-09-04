@@ -1,5 +1,8 @@
 # Direct Agent Trace Delivery Design
 
+> Historical design. Its Observability PostgreSQL topology was superseded by the
+> Kafka/ClickHouse architecture and fully retired on 2026-09-04.
+
 **Date:** 2026-07-19
 
 **Status:** Approved for implementation

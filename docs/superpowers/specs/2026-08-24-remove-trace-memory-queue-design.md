@@ -1,5 +1,8 @@
 # Remove the Trace Memory Queue Design
 
+> Historical design. Its deferred PostgreSQL rollback cleanup was completed on
+> 2026-09-04; ClickHouse is now the only supported Trace store.
+
 **Date:** 2026-08-24
 
 **Status:** Approved

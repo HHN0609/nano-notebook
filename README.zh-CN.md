@@ -60,7 +60,7 @@ Nano 提供三个可观测性平面,分别回答三个不同的问题:"这一次
 ### 环境搭建
 
 ```bash
-# 引导依赖服务(PostgreSQL、MinIO、Qdrant、Bifrost 等)
+# 引导依赖服务(PostgreSQL、Kafka、ClickHouse、MinIO、Qdrant、Bifrost 等)
 make bootstrap
 
 # 执行数据库迁移并写入种子数据

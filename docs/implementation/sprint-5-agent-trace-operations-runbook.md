@@ -39,9 +39,9 @@ replication factor 1 and `min.insync.replicas=1`. It is not highly available.
 
 Production Compose uses three combined broker/controllers. Application Trace, purge,
 and quarantine topics use replication factor 3 and `min.insync.replicas=2`; producers
-use all three bootstrap addresses and `acks=all`. ClickHouse is the normal raw Trace
-and query-projection store. The `postgres-trace-rollback` profile is dormant and is not
-part of the default path.
+use all three bootstrap addresses and `acks=all`. ClickHouse is the only raw Trace and
+query-projection store. The former Observability PostgreSQL rollback topology was
+retired on 2026-09-04 and is no longer deployable.
 
 ## Required producer configuration
 

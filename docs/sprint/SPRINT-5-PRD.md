@@ -1,5 +1,8 @@
 # Nano Notebook Sprint 5 PRD
 
+> Historical delivery record. The Observability PostgreSQL topology described here
+> was fully retired on 2026-09-04; current Trace storage and queries use ClickHouse.
+
 ## Document Status
 
 - **Sprint:** Sprint 5

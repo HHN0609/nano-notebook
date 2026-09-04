@@ -60,7 +60,7 @@ Both Compose stacks (local and prod) provision Prometheus and Grafana as part of
 ### Setup
 
 ```bash
-# Bootstrap dependencies (PostgreSQL, MinIO, Qdrant, Bifrost, etc.)
+# Bootstrap dependencies (PostgreSQL, Kafka, ClickHouse, MinIO, Qdrant, Bifrost, etc.)
 make bootstrap
 
 # Run database migrations and seed data

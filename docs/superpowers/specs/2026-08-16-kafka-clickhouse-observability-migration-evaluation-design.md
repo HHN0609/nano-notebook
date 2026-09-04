@@ -1,5 +1,8 @@
 # Kafka and ClickHouse Observability Migration and Evaluation Design
 
+> Historical migration design. The evaluated PostgreSQL stages remain benchmark
+> history; the rollback backend and its database were fully retired on 2026-09-04.
+
 **Date:** 2026-08-16
 
 **Status:** Accepted for implementation
