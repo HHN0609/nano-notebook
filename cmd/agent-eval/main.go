@@ -24,7 +24,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 )
 
-const defaultAgentRelease = "nano.default@24"
+const defaultAgentRelease = "nano.default@25"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "run" {
@@ -148,7 +148,7 @@ func runSuite(args []string, output io.Writer) error {
 	currentTimeTool := agent.NewCurrentTimeAction(nil)
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
 	discoverSourcesTool := agent.NewDiscoverSourcesAction(
-		agent.NewPostgresDiscoverSourcesBackend(db.Pool(), searchProvider, nil),
+		agent.NewPostgresDiscoverSourcesBackend(db.Pool(), searchProvider),
 		agent.ResearchAvailabilityFrom(searchProvider),
 	)
 	webSearchTool := agent.NewWebSearchAction(searchProvider)

@@ -53,6 +53,12 @@ func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testi
 	}
 }
 
+func TestResearchRootAllowsEightReadActionsPerParallelBatch(t *testing.T) {
+	if got := ResearchRootExecutorCapability().MaxLimits.ActionBatch; got != 8 {
+		t.Fatalf("Research Root action batch=%d want=8", got)
+	}
+}
+
 func TestExecutorRegistryResolvesExactDefinitionAndPolicyWithoutRole(t *testing.T) {
 	registry := newTestExecutorRegistry(t)
 	binding, err := registry.Resolve(agentcatalog.MustParseReference("chat.leader@1"))

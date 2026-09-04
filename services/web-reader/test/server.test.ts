@@ -379,6 +379,8 @@ test('parse returns service_busy at the concurrency limit', async () => {
 
 test('loadConfig validates environment values', () => {
   assert.equal(loadConfig({}).addr, '127.0.0.1:8085');
+  assert.equal(loadConfig({}).maxConcurrent, 8);
+  assert.equal(loadConfig({}).browserMaxConcurrent, 4);
   assert.equal(loadConfig({ NANO_WEB_READER_SERVICE_TOKEN: 'x' }).serviceToken, 'x');
   assert.equal(loadConfig({ NANO_WEB_READER_ADDR: ':8085' }).addr, ':8085');
   assert.throws(() => loadConfig({ NANO_WEB_READER_ADDR: 'bad' }));

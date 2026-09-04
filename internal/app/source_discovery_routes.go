@@ -1,12 +1,14 @@
 package app
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcediscovery"
@@ -138,6 +140,8 @@ type discoveryImportOutcome struct {
 	ErrorCode   *string `json:"error_code,omitempty"`
 }
 
+const sourceDiscoveryImportConcurrency = 8
+
 func sourceDiscoveryImports(w http.ResponseWriter, r *http.Request, s *Server, userID, sessionID string, retryOnly bool) {
 	if r.Method != http.MethodPost {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
@@ -171,6 +175,11 @@ func sourceDiscoveryImports(w http.ResponseWriter, r *http.Request, s *Server, u
 		return
 	}
 	outcomes := make([]discoveryImportOutcome, 0, len(session.Candidates))
+	type pendingImport struct {
+		index     int
+		candidate sourcediscovery.Candidate
+	}
+	pending := make([]pendingImport, 0, len(session.Candidates))
 	for _, candidate := range session.Candidates {
 		if !candidate.Selected {
 			continue
@@ -182,40 +191,60 @@ func sourceDiscoveryImports(w http.ResponseWriter, r *http.Request, s *Server, u
 			outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "imported", SourceID: candidate.SourceID})
 			continue
 		}
-		var admission sourcediscovery.CandidateImport
-		err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
-			var beginErr error
-			admission, beginErr = sourcediscovery.NewStore(tx).BeginCandidateImport(r.Context(), sessionID, candidate.ID)
-			return beginErr
-		})
-		if err != nil {
-			code := "discovery_invalid_state"
-			outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "import_failed", ErrorCode: &code})
-			continue
-		}
-		digest := sha256.Sum256([]byte(key + "\x00" + candidate.ID))
-		candidateKey := "discovery:" + hex.EncodeToString(digest[:])
-		created, _, importErr := s.importURLSource(r.Context(), userID, admission.NotebookID, candidateKey, admission.URL, admission.Title)
-		if importErr != nil {
-			code := discoveryImportErrorCode(importErr)
-			_ = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
-				return sourcediscovery.NewStore(tx).DropCandidateImport(r.Context(), sessionID, candidate.ID)
-			})
-			outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "import_failed", ErrorCode: &code})
-			continue
-		}
-		completeErr := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
-			return sourcediscovery.NewStore(tx).CompleteCandidateImport(r.Context(), sessionID, candidate.ID, created.ID)
-		})
-		if completeErr != nil {
-			code := "discovery_import_failed"
-			outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "import_failed", ErrorCode: &code})
-			continue
-		}
-		sourceID := created.ID
-		outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID, Status: "imported", SourceID: &sourceID})
+		pending = append(pending, pendingImport{index: len(outcomes), candidate: candidate})
+		outcomes = append(outcomes, discoveryImportOutcome{CandidateID: candidate.ID})
 	}
+	semaphore := make(chan struct{}, sourceDiscoveryImportConcurrency)
+	var wait sync.WaitGroup
+	for _, item := range pending {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-r.Context().Done():
+				code := "discovery_import_failed"
+				outcomes[item.index] = discoveryImportOutcome{CandidateID: item.candidate.ID, Status: "import_failed", ErrorCode: &code}
+				return
+			}
+			outcomes[item.index] = importDiscoveryCandidate(r.Context(), s, userID, sessionID, key, item.candidate)
+		}()
+	}
+	wait.Wait()
 	writeJSON(w, http.StatusAccepted, map[string]any{"outcomes": outcomes})
+}
+
+func importDiscoveryCandidate(ctx context.Context, s *Server, userID, sessionID, key string, candidate sourcediscovery.Candidate) discoveryImportOutcome {
+	var admission sourcediscovery.CandidateImport
+	err := s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		var beginErr error
+		admission, beginErr = sourcediscovery.NewStore(tx).BeginCandidateImport(ctx, sessionID, candidate.ID)
+		return beginErr
+	})
+	if err != nil {
+		code := "discovery_invalid_state"
+		return discoveryImportOutcome{CandidateID: candidate.ID, Status: "import_failed", ErrorCode: &code}
+	}
+	digest := sha256.Sum256([]byte(key + "\x00" + candidate.ID))
+	candidateKey := "discovery:" + hex.EncodeToString(digest[:])
+	created, _, importErr := s.importURLSource(ctx, userID, admission.NotebookID, candidateKey, admission.URL, admission.Title)
+	if importErr != nil {
+		code := discoveryImportErrorCode(importErr)
+		_ = s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+			return sourcediscovery.NewStore(tx).DropCandidateImport(ctx, sessionID, candidate.ID)
+		})
+		return discoveryImportOutcome{CandidateID: candidate.ID, Status: "import_failed", ErrorCode: &code}
+	}
+	completeErr := s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		return sourcediscovery.NewStore(tx).CompleteCandidateImport(ctx, sessionID, candidate.ID, created.ID)
+	})
+	if completeErr != nil {
+		code := "discovery_import_failed"
+		return discoveryImportOutcome{CandidateID: candidate.ID, Status: "import_failed", ErrorCode: &code}
+	}
+	sourceID := created.ID
+	return discoveryImportOutcome{CandidateID: candidate.ID, Status: "imported", SourceID: &sourceID}
 }
 
 func sourceDiscoveryRetry(w http.ResponseWriter, r *http.Request, s *Server, userID, sessionID string) {

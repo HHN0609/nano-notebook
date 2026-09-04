@@ -20,12 +20,6 @@ func (p *discoverSourcesProvider) Search(_ context.Context, request websearch.Re
 	return p.results[request.Query], nil
 }
 
-type selectiveDiscoveryValidator struct{ rejected string }
-
-func (v selectiveDiscoveryValidator) Validate(_ context.Context, rawURL string) bool {
-	return rawURL != v.rejected
-}
-
 func TestDiscoverSourcesToolPersistsDeduplicatedSessionAndReplaysWithoutResearchChild(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "discover-tool@example.com")
 	ctx := context.Background()
@@ -69,7 +63,7 @@ func TestDiscoverSourcesToolPersistsDeduplicatedSessionAndReplaysWithoutResearch
 			{Title: "Rejected", URL: "https://blocked.example/report", DisplayURL: "blocked.example/report", Description: "blocked", Rank: 2},
 		},
 	}}
-	backend := agent.NewPostgresDiscoverSourcesBackend(api.db.Pool(), provider, selectiveDiscoveryValidator{rejected: "https://blocked.example/report"})
+	backend := agent.NewPostgresDiscoverSourcesBackend(api.db.Pool(), provider)
 	request := agent.DiscoverSourcesRequest{
 		RunID: admission.RunID, ActionID: "decision:1/action:1", UserID: userID, ChatID: chatID,
 		Queries: []string{"recent changes", "official update"},
@@ -78,7 +72,7 @@ func TestDiscoverSourcesToolPersistsDeduplicatedSessionAndReplaysWithoutResearch
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "ready" || result.SessionID == "" || result.NovelCandidateCount != 1 ||
+	if result.Status != "ready" || result.SessionID == "" || result.NovelCandidateCount != 2 ||
 		result.ExistingCandidateCount != 1 || result.ExistingSelectedCount != 1 {
 		t.Fatalf("result=%+v", result)
 	}
@@ -104,7 +98,7 @@ func TestDiscoverSourcesToolPersistsDeduplicatedSessionAndReplaysWithoutResearch
 	`, result.SessionID, admission.RunID).Scan(&origin, &status, &linkedSession, &candidateCount); err != nil {
 		t.Fatal(err)
 	}
-	if origin != "chat_agent" || status != "ready" || linkedSession != result.SessionID || candidateCount != 2 {
+	if origin != "chat_agent" || status != "ready" || linkedSession != result.SessionID || candidateCount != 3 {
 		t.Fatalf("session origin=%s status=%s linked=%s candidates=%d", origin, status, linkedSession, candidateCount)
 	}
 }

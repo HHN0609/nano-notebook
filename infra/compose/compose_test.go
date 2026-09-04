@@ -260,6 +260,26 @@ func TestProductionTraceTopologyUsesKafkaAndClickHouse(t *testing.T) {
 	}
 }
 
+func TestWebReaderConcurrencyContract(t *testing.T) {
+	for _, name := range []string{"compose.yaml", "compose.prod.yaml"} {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var file composeFile
+		if err := yaml.Unmarshal(data, &file); err != nil {
+			t.Fatal(err)
+		}
+		reader := file.Services["web-reader"]
+		if reader.Environment["NANO_WEB_READER_MAX_CONCURRENT"] != "8" ||
+			reader.Environment["NANO_WEB_READER_BROWSER_MAX_CONCURRENT"] != "4" {
+			t.Fatalf("%s web-reader concurrency=%q/%q, want 8/4", name,
+				reader.Environment["NANO_WEB_READER_MAX_CONCURRENT"],
+				reader.Environment["NANO_WEB_READER_BROWSER_MAX_CONCURRENT"])
+		}
+	}
+}
+
 func TestStartAndGoGateUseDefaultClickHouseTraceTopology(t *testing.T) {
 	start, err := os.ReadFile("../../scripts/start")
 	if err != nil {

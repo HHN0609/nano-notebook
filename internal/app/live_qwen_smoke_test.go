@@ -142,7 +142,7 @@ func TestLiveQwenRetrievalFirstChatProactivelySearchesTheWeb(t *testing.T) {
 			}
 			api.server = app.NewServer(app.Config{
 				CookieSecure: false, AgentRun: agent.DefaultRunConfig("nano-interactive-v1"),
-				AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@24"),
+				AgentCatalog: catalog, AgentRelease: agentcatalog.MustParseReference("nano.default@25"),
 			}, api.db)
 			api.handler = api.server.Handler()
 
@@ -171,7 +171,7 @@ func TestLiveQwenRetrievalFirstChatProactivelySearchesTheWeb(t *testing.T) {
 			provider := &liveChatDiscoveryProvider{}
 			runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, func() string { return "msg_" + uuid.NewString() },
 				agent.WithGroundingService(agent.NewGroundingService(api.db.Pool())))
-			discover := agent.NewDiscoverSourcesAction(agent.NewPostgresDiscoverSourcesBackend(api.db.Pool(), provider, nil), provider)
+			discover := agent.NewDiscoverSourcesAction(agent.NewPostgresDiscoverSourcesBackend(api.db.Pool(), provider), provider)
 			actions := []agent.Action{
 				agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil), discover,
 				agent.NewRewriteTodoListAction(runtime), agent.NewSearchEvidenceAction(nil), agent.NewUpdateTodoStatusAction(runtime),

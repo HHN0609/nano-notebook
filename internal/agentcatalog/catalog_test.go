@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 31; got != want {
+	if got, want := len(definitions), 32; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -111,6 +111,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			tools: []string{"assemble_research_report", "inspect_source", "list_research_files", "read_research_file", "read_tool_result", "read_url", "rewrite_todo_list", "save_url_as_source", "search_evidence", "update_todo_status", "web_search", "write_research_file"},
 		},
 		"research.executor@15": {
+			executor: "research_root", model: "agent.deep-research-default@5",
+			tools: []string{"assemble_research_report", "inspect_source", "list_research_files", "read_research_file", "read_tool_result", "read_url", "rewrite_todo_list", "save_url_as_source", "search_evidence", "update_todo_status", "web_search", "write_research_file"},
+		},
+		"research.executor@16": {
 			executor: "research_root", model: "agent.deep-research-default@5",
 			tools: []string{"assemble_research_report", "inspect_source", "list_research_files", "read_research_file", "read_tool_result", "read_url", "rewrite_todo_list", "save_url_as_source", "search_evidence", "update_todo_status", "web_search", "write_research_file"},
 		},
@@ -265,6 +269,11 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		manifestV24.Roots["research"].String() != "research.executor@15" || manifestV24.Roots["studio_report"].String() != "studio.report@2" {
 		t.Fatalf("v24 manifest=%+v ok=%v", manifestV24, ok)
 	}
+	manifestV25, ok := catalog.ResolveRelease(MustParseReference("nano.default@25"))
+	if !ok || manifestV25.Roots["chat"].String() != "chat.leader@6" || manifestV25.Roots["research_planner"].String() != "research.planner@7" ||
+		manifestV25.Roots["research"].String() != "research.executor@16" || manifestV25.Roots["studio_report"].String() != "studio.report@2" {
+		t.Fatalf("v25 manifest=%+v ok=%v", manifestV25, ok)
+	}
 	chatV4, ok := catalog.ResolveDefinition(MustParseReference("chat.leader@4"))
 	if !ok || chatV4.Limits.LegacyPlanMutations != 12 || chatV4.Limits.ActionDecisions != 4 || chatV4.Limits.ModelCalls != 17 || chatV4.Prompts["chat_composer_bare"].String() != "agent.chat-composer-bare@3" || chatV4.Prompts["chat_composer_grounded"].String() != "agent.chat-composer-grounded@4" {
 		t.Fatalf("chat v4=%+v ok=%v", chatV4, ok)
@@ -301,6 +310,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 	researchV15, ok := catalog.ResolveDefinition(MustParseReference("research.executor@15"))
 	if !ok || researchV15.ModelPolicy.String() != "agent.deep-research-default@5" {
 		t.Fatalf("research v15=%+v ok=%v", researchV15, ok)
+	}
+	researchV16, ok := catalog.ResolveDefinition(MustParseReference("research.executor@16"))
+	if !ok || researchV16.ModelPolicy.String() != "agent.deep-research-default@5" || researchV16.Limits.ActionBatch != 8 {
+		t.Fatalf("research v16=%+v ok=%v", researchV16, ok)
 	}
 	planner, ok := catalog.ResolveDefinition(MustParseReference("research.planner@1"))
 	if !ok || len(planner.Skills) != 1 || planner.Skills[0].String() != "skill.grill-me@1" {

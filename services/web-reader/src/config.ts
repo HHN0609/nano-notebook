@@ -63,7 +63,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const browserExecutable = env['NANO_WEB_READER_BROWSER_EXECUTABLE'] ?? '';
   const browserTimeoutMs = parsePositiveInt(env['NANO_WEB_READER_BROWSER_TIMEOUT_MS'], 30_000, 'NANO_WEB_READER_BROWSER_TIMEOUT_MS');
-  const browserMaxConcurrent = parsePositiveInt(env['NANO_WEB_READER_BROWSER_MAX_CONCURRENT'], 2, 'NANO_WEB_READER_BROWSER_MAX_CONCURRENT');
+  const browserMaxConcurrent = parsePositiveInt(env['NANO_WEB_READER_BROWSER_MAX_CONCURRENT'], 4, 'NANO_WEB_READER_BROWSER_MAX_CONCURRENT');
   const autoUpgradeMinWords = parsePositiveInt(env['NANO_WEB_READER_AUTO_UPGRADE_MIN_WORDS'], 100, 'NANO_WEB_READER_AUTO_UPGRADE_MIN_WORDS');
 
   return {

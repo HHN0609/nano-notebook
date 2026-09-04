@@ -197,7 +197,7 @@ All configuration is environment-driven with fail-fast validation
 | `NANO_WEB_READER_USER_AGENT` | Edge UA on Windows | Sent by both engines; the browser engine derives matching client hints. |
 | `NANO_WEB_READER_BROWSER_EXECUTABLE` | *(empty)* | Chromium/Edge executable path. Falls back to common Linux paths (`/usr/bin/chromium`, ...). |
 | `NANO_WEB_READER_BROWSER_TIMEOUT_MS` | `30000` | Navigation timeout (ms). |
-| `NANO_WEB_READER_BROWSER_MAX_CONCURRENT` | `2` | Concurrent browser renders (a Chromium spawn cluster). |
+| `NANO_WEB_READER_BROWSER_MAX_CONCURRENT` | `4` | Concurrent browser renders (a Chromium spawn cluster). |
 | `NANO_WEB_READER_AUTO_UPGRADE_MIN_WORDS` | `100` | Auto mode upgrades results thinner than this. |
 
 ## Running

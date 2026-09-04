@@ -13,13 +13,12 @@ import (
 )
 
 type PostgresDiscoverSourcesBackend struct {
-	pool      *pgxpool.Pool
-	provider  websearch.Provider
-	validator sourcediscovery.CandidateValidator
+	pool     *pgxpool.Pool
+	provider websearch.Provider
 }
 
-func NewPostgresDiscoverSourcesBackend(pool *pgxpool.Pool, provider websearch.Provider, validator sourcediscovery.CandidateValidator) *PostgresDiscoverSourcesBackend {
-	return &PostgresDiscoverSourcesBackend{pool: pool, provider: provider, validator: validator}
+func NewPostgresDiscoverSourcesBackend(pool *pgxpool.Pool, provider websearch.Provider) *PostgresDiscoverSourcesBackend {
+	return &PostgresDiscoverSourcesBackend{pool: pool, provider: provider}
 }
 
 func (b *PostgresDiscoverSourcesBackend) Discover(ctx context.Context, request DiscoverSourcesRequest) (DiscoverSourcesResult, error) {
@@ -72,15 +71,6 @@ func (b *PostgresDiscoverSourcesBackend) Discover(ctx context.Context, request D
 		groups = append(groups, candidates)
 	}
 	candidates := mergeResearchCandidates(groups)
-	if b.validator != nil {
-		validated := make([]sourcediscovery.DiscoveredCandidate, 0, len(candidates))
-		for _, candidate := range candidates {
-			if b.validator.Validate(ctx, candidate.URL) {
-				validated = append(validated, candidate)
-			}
-		}
-		candidates = validated
-	}
 	tx, err = b.workerTx(ctx)
 	if err != nil {
 		return DiscoverSourcesResult{}, err

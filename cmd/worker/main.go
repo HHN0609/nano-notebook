@@ -511,7 +511,7 @@ func main() {
 	updateTodoStatusTool := agent.NewUpdateTodoStatusAction(runtime)
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
 	discoverSourcesTool := agent.NewDiscoverSourcesAction(
-		agent.NewPostgresDiscoverSourcesBackend(db.Pool(), searchProvider, candidateValidator),
+		agent.NewPostgresDiscoverSourcesBackend(db.Pool(), searchProvider),
 		agent.ResearchAvailabilityFrom(searchProvider),
 	)
 	inspectSourceTool := agent.NewInspectSourceAction(agent.NewSourceInspectionService(db.Pool(), sourceObjects))
@@ -859,7 +859,7 @@ func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@24"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@25"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}

@@ -286,8 +286,8 @@ services:
       # OrbStack/Clash fake-IP DNS maps public hostnames into narrow synthetic
       # ranges. IP-literal and ordinary private destinations stay blocked.
       NANO_WEB_READER_ALLOW_SYNTHETIC_PROXY_TARGETS: "true"
-      NANO_WEB_READER_MAX_CONCURRENT: "4"
-      NANO_WEB_READER_BROWSER_MAX_CONCURRENT: "2"
+      NANO_WEB_READER_MAX_CONCURRENT: "8"
+      NANO_WEB_READER_BROWSER_MAX_CONCURRENT: "4"
       NANO_WEB_READER_BROWSER_EXECUTABLE: /usr/bin/chromium
     ports:
       - "127.0.0.1:8085:8085"

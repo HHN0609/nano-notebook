@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,42 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 	"github.com/jackc/pgx/v5"
 )
+
+type concurrentDiscoveryReader struct {
+	mu      sync.Mutex
+	active  int
+	peak    int
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *concurrentDiscoveryReader) Parse(ctx context.Context, request webreader.Request) (webreader.Page, error) {
+	r.mu.Lock()
+	r.active++
+	if r.active > r.peak {
+		r.peak = r.active
+	}
+	if r.active == 3 {
+		r.once.Do(func() { close(r.release) })
+	}
+	r.mu.Unlock()
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return webreader.Page{}, ctx.Err()
+	case <-time.After(250 * time.Millisecond):
+	}
+	r.mu.Lock()
+	r.active--
+	r.mu.Unlock()
+	return webreader.Page{Title: request.URL, FinalURL: request.URL, Content: "# Imported\n\nReader content.", WordCount: 2}, nil
+}
+
+func (r *concurrentDiscoveryReader) peakConcurrency() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.peak
+}
 
 func TestSourceDiscoverySessionIsPrivateDurableAndMaintainerOnly(t *testing.T) {
 	api := newTestAPI(t)
@@ -176,6 +213,49 @@ func TestSourceDiscoveryImportsPersistedSelectionThroughURLSourcePipeline(t *tes
 	decodeBody(t, listed, &listedBody)
 	if len(listedBody.Sources) != 1 || listedBody.Sources[0].Title != "My renamed source" {
 		t.Fatalf("renamed Source titles = %+v, want user title", listedBody.Sources)
+	}
+}
+
+func TestSourceDiscoveryImportsSelectedURLsConcurrently(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "discovery-import-concurrent@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "discovery-import-concurrent")
+	ownerID := sourceTestUserID(t, api, "discovery-import-concurrent@example.com")
+	ctx := context.Background()
+	if err := api.db.WithRequestPrincipal(ctx, ownerID, func(tx pgx.Tx) error {
+		_, err := sourcediscovery.NewStore(tx).CreateSession(ctx, sourcediscovery.CreateSessionCommand{
+			ID: "dsc_import_concurrent", JobID: "dscjob_import_concurrent", NotebookID: notebookID, UserID: ownerID,
+			Origin: sourcediscovery.OriginManual, Query: "parallel imports",
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		update source_discovery_sessions set status='ready',completed_at=now() where id='dsc_import_concurrent';
+		update source_discovery_jobs set status='succeeded' where id='dscjob_import_concurrent';
+		insert into source_discovery_candidates(id,session_id,ordinal,title,canonical_url,display_url,snippet,selected)
+		values('dscand_parallel_1','dsc_import_concurrent',0,'One','https://parallel.example/1','parallel.example/1','One',true),
+		      ('dscand_parallel_2','dsc_import_concurrent',1,'Two','https://parallel.example/2','parallel.example/2','Two',true),
+		      ('dscand_parallel_3','dsc_import_concurrent',2,'Three','https://parallel.example/3','parallel.example/3','Three',true)
+	`); err != nil {
+		t.Fatal(err)
+	}
+	reader := &concurrentDiscoveryReader{release: make(chan struct{})}
+	api.server = app.NewServer(newConfiguredServerConfig(app.Config{
+		CookieSecure: false, SourceReader: reader, SourceSnapshots: objectstore.NewMemoryStore(),
+	}), api.db)
+	api.handler = api.server.Handler()
+
+	response := api.postJSONWithCookieAndCSRF(t,
+		"/api/v1/source-discovery-sessions/dsc_import_concurrent/imports", map[string]any{},
+		owner, csrf, csrf.Value, "discovery-import-concurrent-1",
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("import status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := reader.peakConcurrency(); got < 3 {
+		t.Fatalf("Reader peak concurrency=%d want at least 3", got)
 	}
 }
 
