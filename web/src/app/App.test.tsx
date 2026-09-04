@@ -893,6 +893,16 @@ test("loads the exact delegated Research Session without opening full Discovery 
   expect(within(sources).getByDisplayValue("Go learning material")).toBeInTheDocument();
   expect(within(sources).getByRole("status")).toHaveTextContent("Searching…");
   expect(discoverySessionReads).toBe(readsBeforeOpen);
+
+  const discoveryEvents = FakeEventSource.instances.find((item) => item.url === "/api/v1/source-discovery-sessions/dss_research/events");
+  act(() => discoveryEvents?.emit("discovery", { session: {
+    id: "dss_research", notebook_id: "nb_test", query: "Go learning material", status: "ready",
+    candidates: [{
+      id: "candidate_novel", ordinal: 0, title: "New Go guide", canonical_url: "https://example.com/go-guide",
+      display_url: "example.com/go-guide", snippet: "A new source.", selected: true, status: "discovered"
+    }]
+  } }));
+  await waitFor(() => expect(document.querySelector(".workspace-panels")).toHaveClass("workspace-panels--source-discovery"));
 });
 
 test("opens all ready Research sources only after View and returns to the compact card", async () => {

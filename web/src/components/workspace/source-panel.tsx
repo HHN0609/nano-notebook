@@ -107,6 +107,7 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
   const [reviewing, setReviewing] = useState(false);
   const openedDiscoverySessionID = useRef<string | undefined>(undefined);
   const ignoreDiscoveryExpansion = useCallback(() => undefined, []);
+  const activatePinnedDiscovery = useCallback(() => setDiscoveryOpen(true), []);
 
   useEffect(() => onDiscoveryModeChange?.(discoveryOpen), [discoveryOpen, onDiscoveryModeChange]);
 
@@ -276,6 +277,7 @@ export function SourcePanelContent({ copy, notebookID, originChatID, requestedDi
           detailOpen={discoveryOpen}
           hideLabel
           onExpandedChange={ignoreDiscoveryExpansion}
+          onSessionActive={pinnedDiscoverySessionID ? activatePinnedDiscovery : undefined}
           onViewResults={() => setDiscoveryOpen(true)}
           onImported={controller.refresh}
           onImportAccepted={() => setDiscoveryOpen(false)}
