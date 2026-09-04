@@ -116,11 +116,13 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
           DEPLOY_AWS_REGION: ${{ secrets.AWS_REGION }}
           NANO_PUBLIC_HOST: ${{ secrets.EC2_HOST }}
+          NANO_GRAFANA_ADMIN_USER: ${{ secrets.NANO_GRAFANA_ADMIN_USER }}
+          NANO_GRAFANA_ADMIN_PASSWORD: ${{ secrets.NANO_GRAFANA_ADMIN_PASSWORD }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
-          envs: ECR_REGISTRY,IMAGE_TAG,DEPLOY_AWS_REGION,NANO_PUBLIC_HOST
+          envs: ECR_REGISTRY,IMAGE_TAG,DEPLOY_AWS_REGION,NANO_PUBLIC_HOST,NANO_GRAFANA_ADMIN_USER,NANO_GRAFANA_ADMIN_PASSWORD
           script: |
             set -euo pipefail
             cd /home/ubuntu/nano-notebook
@@ -133,12 +135,20 @@ jobs:
             esac
             compose_env=infra/compose/.env
             test -f "$compose_env"
-            if grep -q '^NANO_PUBLIC_HOST=' "$compose_env"; then
-              sed -i.bak "s|^NANO_PUBLIC_HOST=.*$|NANO_PUBLIC_HOST=$NANO_PUBLIC_HOST|" "$compose_env"
-              rm -f "$compose_env.bak"
-            else
-              printf '\nNANO_PUBLIC_HOST=%s\n' "$NANO_PUBLIC_HOST" >> "$compose_env"
-            fi
+            set_env_value() {
+              env_key="$1"
+              env_value="$2"
+              test -n "$env_value"
+              if grep -q "^${env_key}=" "$compose_env"; then
+                sed -i.bak "s|^${env_key}=.*$|${env_key}=${env_value}|" "$compose_env"
+                rm -f "$compose_env.bak"
+              else
+                printf '\n%s=%s\n' "$env_key" "$env_value" >> "$compose_env"
+              fi
+            }
+            set_env_value NANO_PUBLIC_HOST "$NANO_PUBLIC_HOST"
+            set_env_value NANO_GRAFANA_ADMIN_USER "$NANO_GRAFANA_ADMIN_USER"
+            set_env_value NANO_GRAFANA_ADMIN_PASSWORD "$NANO_GRAFANA_ADMIN_PASSWORD"
 
             aws ecr get-login-password --region "$DEPLOY_AWS_REGION" \
               | docker login --username AWS --password-stdin "$ECR_REGISTRY"

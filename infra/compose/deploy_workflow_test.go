@@ -59,6 +59,20 @@ func TestDeployWorkflowUsesProductionEnvironmentForComposeInterpolation(t *testi
 	}
 }
 
+func TestDeployWorkflowPersistsGrafanaCredentialsWithoutPrintingThem(t *testing.T) {
+	workflow := readDeploymentFile(t, "../../.github/workflows/deploy.yml")
+	for _, required := range []string{
+		"NANO_GRAFANA_ADMIN_USER: ${{ secrets.NANO_GRAFANA_ADMIN_USER }}",
+		"NANO_GRAFANA_ADMIN_PASSWORD: ${{ secrets.NANO_GRAFANA_ADMIN_PASSWORD }}",
+		`set_env_value NANO_GRAFANA_ADMIN_USER "$NANO_GRAFANA_ADMIN_USER"`,
+		`set_env_value NANO_GRAFANA_ADMIN_PASSWORD "$NANO_GRAFANA_ADMIN_PASSWORD"`,
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("deploy workflow is missing Grafana credential handling %q", required)
+		}
+	}
+}
+
 func TestProductionWebBaseURLUsesThePublicHost(t *testing.T) {
 	compose := readDeploymentFile(t, "compose.prod.yaml")
 	if !strings.Contains(compose, "NANO_WEB_BASE_URL: http://${NANO_PUBLIC_HOST}") {
