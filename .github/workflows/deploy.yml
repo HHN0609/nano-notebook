@@ -3,6 +3,7 @@ name: Deploy
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -29,12 +30,23 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Ensure web-reader ECR repository
+      - name: Ensure application ECR repositories
         run: |
-          aws ecr describe-repositories \
-            --repository-names nano-notebook-web-reader >/dev/null 2>&1 \
-            || aws ecr create-repository \
-              --repository-name nano-notebook-web-reader >/dev/null
+          repositories=(
+            nano-notebook-control-plane
+            nano-notebook-worker
+            nano-notebook-collector
+            nano-notebook-agent-trace-processor
+            nano-notebook-document-renderer
+            nano-notebook-web-reader
+            nano-notebook-nginx
+          )
+          for repository in "${repositories[@]}"; do
+            aws ecr describe-repositories \
+              --repository-names "$repository" >/dev/null 2>&1 \
+              || aws ecr create-repository \
+                --repository-name "$repository" >/dev/null
+          done
 
       - name: Build and push images
         env:
@@ -66,6 +78,14 @@ jobs:
           docker push $ECR_REGISTRY/nano-notebook-collector:latest
 
           docker build \
+            -f infra/agent-trace-processor/Dockerfile \
+            -t $ECR_REGISTRY/nano-notebook-agent-trace-processor:$IMAGE_TAG \
+            -t $ECR_REGISTRY/nano-notebook-agent-trace-processor:latest \
+            .
+          docker push $ECR_REGISTRY/nano-notebook-agent-trace-processor:$IMAGE_TAG
+          docker push $ECR_REGISTRY/nano-notebook-agent-trace-processor:latest
+
+          docker build \
             -f infra/document-renderer/Dockerfile \
             -t $ECR_REGISTRY/nano-notebook-document-renderer:$IMAGE_TAG \
             -t $ECR_REGISTRY/nano-notebook-document-renderer:latest \
@@ -91,25 +111,44 @@ jobs:
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+          DEPLOY_AWS_REGION: ${{ secrets.AWS_REGION }}
+          NANO_PUBLIC_HOST: ${{ secrets.EC2_HOST }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: ECR_REGISTRY,IMAGE_TAG,DEPLOY_AWS_REGION,NANO_PUBLIC_HOST
           script: |
-            set -e
+            set -euo pipefail
             cd /home/ubuntu/nano-notebook
 
             git fetch origin
             git reset --hard origin/main
 
-            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
-              | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+            case "$NANO_PUBLIC_HOST" in
+              *[!A-Za-z0-9.:-]*) echo "invalid NANO_PUBLIC_HOST" >&2; exit 1 ;;
+            esac
+            compose_env=infra/compose/.env
+            test -f "$compose_env"
+            if grep -q '^NANO_PUBLIC_HOST=' "$compose_env"; then
+              sed -i.bak "s|^NANO_PUBLIC_HOST=.*$|NANO_PUBLIC_HOST=$NANO_PUBLIC_HOST|" "$compose_env"
+              rm -f "$compose_env.bak"
+            else
+              printf '\nNANO_PUBLIC_HOST=%s\n' "$NANO_PUBLIC_HOST" >> "$compose_env"
+            fi
 
-            export ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
-            export IMAGE_TAG=${{ github.sha }}
+            aws ecr get-login-password --region "$DEPLOY_AWS_REGION" \
+              | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
+            docker compose -f infra/compose/compose.prod.yaml config --quiet
             docker compose -f infra/compose/compose.prod.yaml pull
-            docker compose -f infra/compose/compose.prod.yaml down --timeout 30
-            docker compose -f infra/compose/compose.prod.yaml up -d
+            docker compose -f infra/compose/compose.prod.yaml up -d --remove-orphans --wait --wait-timeout 300
+
+            curl --fail --silent --show-error http://127.0.0.1/health >/dev/null
+            curl --fail --silent --show-error http://127.0.0.1/version >/dev/null
+            docker compose -f infra/compose/compose.prod.yaml ps
 
             docker image prune -af --filter "until=24h"
