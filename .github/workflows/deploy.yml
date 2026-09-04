@@ -143,12 +143,12 @@ jobs:
             aws ecr get-login-password --region "$DEPLOY_AWS_REGION" \
               | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-            docker compose -f infra/compose/compose.prod.yaml config --quiet
-            docker compose -f infra/compose/compose.prod.yaml pull
-            docker compose -f infra/compose/compose.prod.yaml up -d --remove-orphans --wait --wait-timeout 300
+            docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml config --quiet
+            docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml pull
+            docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml up -d --remove-orphans --wait --wait-timeout 300
 
             curl --fail --silent --show-error http://127.0.0.1/health >/dev/null
             curl --fail --silent --show-error http://127.0.0.1/version >/dev/null
-            docker compose -f infra/compose/compose.prod.yaml ps
+            docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml ps
 
             docker image prune -af --filter "until=24h"

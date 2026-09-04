@@ -39,15 +39,23 @@ func TestDeployWorkflowValidatesBeforeReconcileAndWaitsForHealth(t *testing.T) {
 	for _, required := range []string{
 		"workflow_dispatch:",
 		"NANO_PUBLIC_HOST",
-		"docker compose -f infra/compose/compose.prod.yaml config --quiet",
-		"docker compose -f infra/compose/compose.prod.yaml pull",
-		"docker compose -f infra/compose/compose.prod.yaml up -d --remove-orphans --wait",
+		`docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml config --quiet`,
+		`docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml pull`,
+		`docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml up -d --remove-orphans --wait`,
 		"curl --fail --silent --show-error http://127.0.0.1/health",
 		"curl --fail --silent --show-error http://127.0.0.1/version",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("deploy workflow is missing %q", required)
 		}
+	}
+}
+
+func TestDeployWorkflowUsesProductionEnvironmentForComposeInterpolation(t *testing.T) {
+	workflow := readDeploymentFile(t, "../../.github/workflows/deploy.yml")
+	commandPrefix := `docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml`
+	if got := strings.Count(workflow, commandPrefix); got != 4 {
+		t.Fatalf("production Compose commands using explicit environment file = %d, want 4", got)
 	}
 }
 
