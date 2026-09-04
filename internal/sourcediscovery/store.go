@@ -30,6 +30,7 @@ type Origin string
 const (
 	OriginManual        Origin = "manual"
 	OriginResearchAgent Origin = "research_agent"
+	OriginChatAgent     Origin = "chat_agent"
 )
 
 type Status string
@@ -123,6 +124,22 @@ type ResearchSessionCommand struct {
 	OriginChatID  string
 	ResearchRunID string
 	Query         string
+}
+
+type ChatAgentSessionCommand struct {
+	ID           string
+	NotebookID   string
+	UserID       string
+	OriginChatID string
+	AgentRunID   string
+	ActionID     string
+	Query        string
+}
+
+type CandidateCounts struct {
+	Novel            int
+	Existing         int
+	ExistingSelected int
 }
 
 type CandidateImport struct {
@@ -237,6 +254,60 @@ func (s *Store) EnsureResearchSession(ctx context.Context, command ResearchSessi
 		return Session{}, err
 	}
 	return s.GetSession(ctx, command.ID)
+}
+
+func (s *Store) EnsureChatAgentSession(ctx context.Context, command ChatAgentSessionCommand) (Session, error) {
+	query := strings.TrimSpace(command.Query)
+	if command.ID == "" || command.NotebookID == "" || command.UserID == "" || command.OriginChatID == "" ||
+		command.AgentRunID == "" || command.ActionID == "" || query == "" || utf8.RuneCountInString(query) > 500 {
+		return Session{}, ErrInvalid
+	}
+	var allowed bool
+	if err := s.db.QueryRow(ctx, `
+		select exists(
+			select 1 from agent_runs run
+			left join agent_trees tree on tree.id=run.tree_id
+			left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+			join chat_chats chat on chat.id=coalesce(run.chat_id,product.chat_id)
+			join notebook_memberships member on member.notebook_id=chat.notebook_id
+				and member.user_id=coalesce(run.user_id,product.user_id)
+			where run.id=$1 and chat.id=$2 and chat.notebook_id=$3
+				and coalesce(run.user_id,product.user_id)=$4 and member.role in ('owner','editor')
+		)
+	`, command.AgentRunID, command.OriginChatID, command.NotebookID, command.UserID).Scan(&allowed); err != nil {
+		return Session{}, err
+	}
+	if !allowed {
+		return Session{}, ErrForbidden
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into source_discovery_sessions(
+			id,notebook_id,user_id,origin_chat_id,origin,query,status,agent_run_id,action_id
+		) values($1,$2,$3,$4,'chat_agent',$5,'searching',$6,$7)
+		on conflict(id) do nothing
+	`, command.ID, command.NotebookID, command.UserID, command.OriginChatID, query, command.AgentRunID, command.ActionID); err != nil {
+		return Session{}, err
+	}
+	var sessionID string
+	if err := s.db.QueryRow(ctx, `
+		select id from source_discovery_sessions
+		where agent_run_id=$1 and action_id=$2 and notebook_id=$3 and user_id=$4 and origin_chat_id=$5
+	`, command.AgentRunID, command.ActionID, command.NotebookID, command.UserID, command.OriginChatID).Scan(&sessionID); err != nil {
+		return Session{}, err
+	}
+	if sessionID != command.ID {
+		return Session{}, ErrState
+	}
+	if _, err := s.db.Exec(ctx, `
+		update agent_runs set discovery_session_id=$2,updated_at=now()
+		where id=$1 and discovery_session_id is null
+	`, command.AgentRunID, sessionID); err != nil {
+		return Session{}, err
+	}
+	if err := realtime.NotifySourceDiscovery(ctx, s.db, sessionID); err != nil {
+		return Session{}, err
+	}
+	return s.GetSession(ctx, sessionID)
 }
 
 func (s *Store) GetSession(ctx context.Context, sessionID string) (Session, error) {
@@ -487,6 +558,75 @@ func (s *Store) CompleteResearchSession(ctx context.Context, researchRunID, summ
 		return "", err
 	}
 	return sessionID, nil
+}
+
+func (s *Store) CompleteChatAgentSession(ctx context.Context, sessionID, summary string, candidates []DiscoveredCandidate) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return ErrInvalid
+	}
+	var status Status
+	var notebookID, query string
+	if err := s.db.QueryRow(ctx, `
+		select status,notebook_id,query from source_discovery_sessions
+		where id=$1 and origin='chat_agent' for update
+	`, sessionID).Scan(&status, &notebookID, &query); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if status == StatusReady {
+		return nil
+	}
+	if status != StatusSearching {
+		return ErrState
+	}
+	canonical := canonicalCandidates(candidates)
+	if strings.TrimSpace(summary) == "" {
+		summary = SummaryForQuery(query)
+	}
+	if _, err := s.db.Exec(ctx, `
+		update source_discovery_sessions
+		set status='ready',summary=nullif(trim($2),''),error_code=null,completed_at=now(),updated_at=now()
+		where id=$1
+	`, sessionID, summary); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx, `delete from source_discovery_candidates where session_id=$1`, sessionID); err != nil {
+		return err
+	}
+	if err := s.insertCandidates(ctx, sessionID, notebookID, canonical); err != nil {
+		return err
+	}
+	return realtime.NotifySourceDiscovery(ctx, s.db, sessionID)
+}
+
+func (s *Store) FailChatAgentSession(ctx context.Context, sessionID, errorCode string) error {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(errorCode) == "" {
+		return ErrInvalid
+	}
+	if _, err := s.db.Exec(ctx, `
+		update source_discovery_sessions
+		set status='failed',error_code=$2,completed_at=now(),updated_at=now()
+		where id=$1 and origin='chat_agent' and status='searching'
+	`, sessionID, errorCode); err != nil {
+		return err
+	}
+	return realtime.NotifySourceDiscovery(ctx, s.db, sessionID)
+}
+
+func (s *Store) CountsForChat(ctx context.Context, sessionID, chatID string) (CandidateCounts, error) {
+	var counts CandidateCounts
+	err := s.db.QueryRow(ctx, `
+		select
+			count(*) filter(where candidate.status='discovered'),
+			count(*) filter(where candidate.status='imported'),
+			count(*) filter(where candidate.status='imported' and selection.selected=true)
+		from source_discovery_candidates candidate
+		left join chat_source_selections selection
+			on selection.chat_id=$2 and selection.source_id=candidate.source_id
+		where candidate.session_id=$1
+	`, sessionID, chatID).Scan(&counts.Novel, &counts.Existing, &counts.ExistingSelected)
+	return counts, err
 }
 
 func (s *Store) insertCandidates(ctx context.Context, sessionID, notebookID string, candidates []DiscoveredCandidate) error {

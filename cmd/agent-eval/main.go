@@ -24,7 +24,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 )
 
-const defaultAgentRelease = "nano.default@23"
+const defaultAgentRelease = "nano.default@24"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "run" {
@@ -147,10 +147,15 @@ func runSuite(args []string, output io.Writer) error {
 	calculateTool := agent.NewCalculateAction()
 	currentTimeTool := agent.NewCurrentTimeAction(nil)
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
+	discoverSourcesTool := agent.NewDiscoverSourcesAction(
+		agent.NewPostgresDiscoverSourcesBackend(db.Pool(), searchProvider, nil),
+		agent.ResearchAvailabilityFrom(searchProvider),
+	)
 	webSearchTool := agent.NewWebSearchAction(searchProvider)
 	mcpToolRegistrations := []agent.MCPToolRegistration{
 		{Action: calculateTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		{Action: currentTimeTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		{Action: discoverSourcesTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 	}

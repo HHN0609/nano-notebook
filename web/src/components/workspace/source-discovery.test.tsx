@@ -300,3 +300,44 @@ test("does not reactivate Discovery when clearing the pinned session reveals an 
   await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/v1/notebooks/nb_1/source-discovery-sessions/latest", expect.anything()));
   expect(onSessionActive).toHaveBeenCalledTimes(1);
 });
+
+test.each([
+  {
+    name: "still searching",
+    session: { id: "dss_searching", notebook_id: "nb_1", query: "fresh material", status: "searching", candidates: [] }
+  },
+  {
+    name: "contains only sources already in the Notebook",
+    session: {
+      id: "dss_existing",
+      notebook_id: "nb_1",
+      query: "fresh material",
+      status: "ready",
+      candidates: [{
+        id: "candidate_existing", ordinal: 0, title: "Already saved", canonical_url: "https://example.com/saved",
+        display_url: "example.com/saved", snippet: "Already available.", selected: false, status: "imported"
+      }]
+    }
+  }
+])("does not activate Discovery when an Agent session $name", async ({ session }) => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ session })));
+  const onSessionActive = vi.fn();
+
+  render(<SourceDiscovery
+    notebookID="nb_1"
+    requestedSessionID={session.id}
+    active
+    onExpandedChange={vi.fn()}
+    onSessionActive={onSessionActive}
+    onImported={vi.fn()}
+    copy={{
+      label: "Search the web", placeholder: "Search for sources", search: "Search", searching: "Searching…",
+      selectAll: "Select all", importSelected: "Import selected", failed: "Search failed", noResults: "No results",
+      openResult: "Open result", importFailed: "Import failed", retry: "Retry", imported: "Imported",
+      researchComplete: "Research completed", viewResults: "View", moreSources: "{count} more sources"
+    }}
+  />);
+
+  await waitFor(() => expect(fetch).toHaveBeenCalled());
+  expect(onSessionActive).not.toHaveBeenCalled();
+});

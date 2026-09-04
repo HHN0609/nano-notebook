@@ -148,8 +148,8 @@ func (r *ExecutorRegistry) Resolve(reference agentcatalog.Reference) (ResolvedEx
 }
 
 // NanoToolCapabilities declares each tool's execution scheduling. calculate,
-// current_time, and search_evidence are read-only and side-effect-free, so
-// a batch made up only of these can run concurrently. web_search stays
+// current_time, search_evidence, and the independently idempotent
+// discover_sources tool can run concurrently. web_search stays
 // ordered_sync: it calls an external, rate-limited provider, and batching
 // concurrent calls to it needs its own rate-limit accounting first.
 func NanoToolCapabilities() map[string]agentcatalog.ToolCapability {
@@ -157,6 +157,7 @@ func NanoToolCapabilities() map[string]agentcatalog.ToolCapability {
 		"assemble_research_report": {Scheduling: agentcatalog.ToolOrderedSync},
 		"calculate":                {Scheduling: agentcatalog.ToolParallel},
 		"current_time":             {Scheduling: agentcatalog.ToolParallel},
+		"discover_sources":         {Scheduling: agentcatalog.ToolParallel},
 		"inspect_source":           {Scheduling: agentcatalog.ToolParallel},
 		"list_research_files":      {Scheduling: agentcatalog.ToolParallel},
 		"read_research_file":       {Scheduling: agentcatalog.ToolParallel},
@@ -184,7 +185,7 @@ func ChatLeaderExecutorCapability() agentcatalog.ExecutorCapability {
 			agentcatalog.MustParseReference("chat.answer@1"): true,
 		},
 		Tools: map[string]bool{
-			"calculate": true, "current_time": true, "rewrite_todo_list": true,
+			"calculate": true, "current_time": true, "discover_sources": true, "rewrite_todo_list": true,
 			"search_evidence": true, "update_todo_status": true,
 		},
 		ChildExecutors: map[string]bool{"research": true},

@@ -239,11 +239,14 @@ func main() {
 		os.Exit(1)
 	}
 	chatDefinition, ok := definitionCatalog.ResolveDefinition(chatRoot)
-	if !ok || len(chatDefinition.Children) != 1 {
+	if !ok || len(chatDefinition.Children) > 1 {
 		slog.Error("worker Chat root has invalid configured child topology", "definition", chatRoot)
 		os.Exit(1)
 	}
-	researchChild := chatDefinition.Children[0]
+	researchChild := agentcatalog.MustParseReference("research.source-discovery@2")
+	if len(chatDefinition.Children) == 1 {
+		researchChild = chatDefinition.Children[0]
+	}
 	researchDefinition, ok := definitionCatalog.ResolveDefinition(researchChild)
 	if !ok {
 		slog.Error("worker Research child Definition is missing", "definition", researchChild)
@@ -498,11 +501,19 @@ func main() {
 		agent.WithTraceSink(traceSink), agent.WithBestEffortTraceExporter(traceBridge),
 		agent.WithReplayStager(replayStager), agent.WithGroundingService(grounder), agent.WithTaskMetrics(taskMetrics))
 	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient).WithMetrics(taskMetrics)
+	candidateValidator := sourcediscovery.NewImportabilityValidator(webReaderAdapter, sourcediscovery.ImportabilityValidatorConfig{
+		ExtractionConfigID: config.SourceExtractionConfigID,
+		MaxBytes:           config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
+	})
 	calculateTool := agent.NewCalculateAction()
 	currentTimeTool := agent.NewCurrentTimeAction(nil)
 	rewriteTodoListTool := agent.NewRewriteTodoListAction(runtime)
 	updateTodoStatusTool := agent.NewUpdateTodoStatusAction(runtime)
 	searchEvidenceTool := agent.NewSearchEvidenceAction(evidenceSearch)
+	discoverSourcesTool := agent.NewDiscoverSourcesAction(
+		agent.NewPostgresDiscoverSourcesBackend(db.Pool(), searchProvider, candidateValidator),
+		agent.ResearchAvailabilityFrom(searchProvider),
+	)
 	inspectSourceTool := agent.NewInspectSourceAction(agent.NewSourceInspectionService(db.Pool(), sourceObjects))
 	webSearchTool := agent.NewResearchDeduplicatingAction(db.Pool(), agent.NewWebSearchAction(searchProvider))
 	readSkillTool := agent.NewReadSkillAction(definitionCatalog, skillCatalog)
@@ -521,7 +532,7 @@ func main() {
 		os.Exit(1)
 	}
 	registryTools := []agent.Action{
-		calculateTool, currentTimeTool, rewriteTodoListTool, inspectSourceTool, searchEvidenceTool, updateTodoStatusTool,
+		calculateTool, currentTimeTool, discoverSourcesTool, rewriteTodoListTool, inspectSourceTool, searchEvidenceTool, updateTodoStatusTool,
 		webSearchTool, readSkillTool, readToolResultTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool,
 	}
 	registryTools = append(registryTools, workspaceTools...)
@@ -533,6 +544,7 @@ func main() {
 	mcpToolRegistrations := []agent.MCPToolRegistration{
 		agent.MCPToolRegistration{Action: calculateTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: currentTimeTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: discoverSourcesTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: rewriteTodoListTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: inspectSourceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
@@ -597,10 +609,6 @@ func main() {
 	sourceExtractor := sourceprocessing.NewNativeExtractorWithWebReader(modelClient, webReaderAdapter, sourceprocessing.NativeExtractorConfig{
 		VisionModel: config.SourceVisionModel, TranscriptionModel: config.SourceTranscriptionModel,
 		VisionPromptVersion: config.SourceVisionPromptVersion, MaxVisionPages: config.SourceMaxVisionPages,
-	})
-	candidateValidator := sourcediscovery.NewImportabilityValidator(webReaderAdapter, sourcediscovery.ImportabilityValidatorConfig{
-		ExtractionConfigID: config.SourceExtractionConfigID,
-		MaxBytes:           config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
 	})
 	roleRuntime := agent.NewLeaderExecutor(
 		db.Pool(), controller, agent.NewModelResearchPlanner(modelClient), searchProvider,
@@ -851,7 +859,7 @@ func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@23"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@24"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}

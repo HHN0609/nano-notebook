@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 30; got != want {
+	if got, want := len(definitions), 31; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -41,6 +41,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"chat.leader@5": {
 			executor: "chat_leader", model: "agent.chat-default@2",
 			tools: []string{"calculate", "current_time", "rewrite_todo_list", "search_evidence", "update_todo_status"}, children: []string{"research.source-discovery@2"},
+		},
+		"chat.leader@6": {
+			executor: "chat_leader", model: "agent.chat-default@2",
+			tools: []string{"calculate", "current_time", "discover_sources", "rewrite_todo_list", "search_evidence", "update_todo_status"},
 		},
 		"research.source-discovery@1": {
 			executor: "research", model: "agent.research-default@1",
@@ -255,6 +259,11 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 	if !ok || manifestV23.Roots["chat"].String() != "chat.leader@5" || manifestV23.Roots["research_planner"].String() != "research.planner@7" ||
 		manifestV23.Roots["research"].String() != "research.executor@15" || manifestV23.Roots["studio_report"].String() != "studio.report@2" {
 		t.Fatalf("v23 manifest=%+v ok=%v", manifestV23, ok)
+	}
+	manifestV24, ok := catalog.ResolveRelease(MustParseReference("nano.default@24"))
+	if !ok || manifestV24.Roots["chat"].String() != "chat.leader@6" || manifestV24.Roots["research_planner"].String() != "research.planner@7" ||
+		manifestV24.Roots["research"].String() != "research.executor@15" || manifestV24.Roots["studio_report"].String() != "studio.report@2" {
+		t.Fatalf("v24 manifest=%+v ok=%v", manifestV24, ok)
 	}
 	chatV4, ok := catalog.ResolveDefinition(MustParseReference("chat.leader@4"))
 	if !ok || chatV4.Limits.LegacyPlanMutations != 12 || chatV4.Limits.ActionDecisions != 4 || chatV4.Limits.ModelCalls != 17 || chatV4.Prompts["chat_composer_bare"].String() != "agent.chat-composer-bare@3" || chatV4.Prompts["chat_composer_grounded"].String() != "agent.chat-composer-grounded@4" {

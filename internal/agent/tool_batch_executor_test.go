@@ -37,6 +37,36 @@ func TestToolBatchExecutorRunParallelRunsTasksConcurrently(t *testing.T) {
 	}
 }
 
+func TestSearchEvidenceAndDiscoverSourcesCanRunInTheSameParallelBatch(t *testing.T) {
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	tasks := make([]BatchTask, 0, 2)
+	for index, name := range []string{"search_evidence", "discover_sources"} {
+		index, name := index, name
+		tasks = append(tasks, BatchTask{Index: index, Run: func(context.Context) (ActionResult, error) {
+			started <- name
+			<-release
+			return ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{}`)}, nil
+		}})
+	}
+	done := make(chan []BatchOutcome, 1)
+	go func() { done <- (ToolBatchExecutor{}).RunParallel(context.Background(), tasks) }()
+
+	seen := map[string]bool{}
+	for range 2 {
+		select {
+		case name := <-started:
+			seen[name] = true
+		case <-time.After(time.Second):
+			t.Fatal("search_evidence and discover_sources did not overlap")
+		}
+	}
+	close(release)
+	if outcomes := <-done; len(outcomes) != 2 || !seen["search_evidence"] || !seen["discover_sources"] {
+		t.Fatalf("seen=%v outcomes=%+v", seen, outcomes)
+	}
+}
+
 func TestToolBatchExecutorRunParallelPreservesOutcomeOrderRegardlessOfCompletionOrder(t *testing.T) {
 	tasks := []BatchTask{
 		{Index: 0, Run: func(context.Context) (ActionResult, error) {

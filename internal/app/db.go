@@ -1801,6 +1801,19 @@ alter table agent_runs drop column parent_run_id;
 create unique index if not exists source_discovery_sessions_research_run_idx
 	on source_discovery_sessions(research_run_id) where research_run_id is not null;
 
+alter table source_discovery_sessions add column if not exists agent_run_id text references agent_runs(id) on delete cascade;
+alter table source_discovery_sessions add column if not exists action_id text;
+alter table source_discovery_sessions drop constraint if exists source_discovery_sessions_origin_check;
+alter table source_discovery_sessions add constraint source_discovery_sessions_origin_check
+	check (origin in ('manual','research_agent','chat_agent'));
+alter table source_discovery_sessions drop constraint if exists source_discovery_sessions_chat_action_shape_check;
+alter table source_discovery_sessions add constraint source_discovery_sessions_chat_action_shape_check check (
+	(origin='chat_agent' and agent_run_id is not null and action_id is not null and research_run_id is null)
+	or (origin<>'chat_agent' and agent_run_id is null and action_id is null)
+);
+create unique index if not exists source_discovery_sessions_chat_action_idx
+	on source_discovery_sessions(agent_run_id,action_id) where agent_run_id is not null;
+
 -- A Run pins the exact authoritative Evidence and Retrieval projection that
 -- existed at admission. Source identities intentionally are not foreign keys:
 -- deletion must invalidate publication without erasing what the Run selected.

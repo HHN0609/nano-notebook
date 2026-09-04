@@ -31,9 +31,8 @@ type DiscoverySession = {
 };
 
 function shouldActivateDiscovery(session: DiscoverySession) {
-  if (session.status !== "ready") return true;
-  if (session.candidates.length === 0) return true;
-  return session.candidates.some((candidate) => candidate.status === "discovered" || candidate.status === "importing");
+  return session.status === "ready"
+    && session.candidates.some((candidate) => candidate.status === "discovered" || candidate.status === "importing");
 }
 
 export type SourceDiscoveryCopy = {
@@ -111,13 +110,14 @@ export function SourceDiscovery({ notebookID, originChatID, requestedSessionID, 
         if (!payload.session || payload.session.id !== sessionID) return;
         setSession(payload.session);
         setQuery(payload.session.query);
+        if (shouldActivateDiscovery(payload.session)) onSessionActive?.();
       } catch {
         // A malformed projection is ignored; EventSource will keep the stream alive.
       }
     };
     events.addEventListener("discovery", projectSession);
     return () => events.close();
-  }, [active, session?.id]);
+  }, [active, onSessionActive, session?.id]);
 
   async function search() {
     const value = query.trim();

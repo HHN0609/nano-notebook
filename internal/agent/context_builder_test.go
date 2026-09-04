@@ -8,34 +8,33 @@ import (
 
 func TestGroundedSystemPromptDescribesPlainTextSourceMarkerContract(t *testing.T) {
 	for _, required := range []string{
-		"call `search_evidence` before answering",
+		"strongly prefer calling `search_evidence` before answering",
 		"with an older topic",
-		"reason to refuse",
-		"actually asks for information from selected Sources",
 		"[source:<source_id>]",
 		"ordinary plain text",
-		"omit Source markers",
-		"delegate.research.source-discovery.v1",
+		"`discover_sources`",
+		"same Action batch",
+		"do not wait for an evidence-sufficiency gate",
 		"at most once per Run",
-		"available for review in the notebook's Source panel",
+		"left Discovery panel",
 	} {
 		if !strings.Contains(GroundedSystemPrompt, required) {
 			t.Fatalf("grounded prompt is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"claims", "must be only JSON", "verbatim", "You must always use search_evidence"} {
+	for _, forbidden := range []string{"delegate.research.source-discovery.v1", "must be only JSON", "You must always use search_evidence"} {
 		if strings.Contains(GroundedSystemPrompt, forbidden) {
 			t.Fatalf("grounded prompt still contains %q", forbidden)
 		}
 	}
 }
 
-func TestBareSystemPromptDescribesResearchDelegationEscalation(t *testing.T) {
+func TestBareSystemPromptStronglyPrefersPublicSourceDiscovery(t *testing.T) {
 	for _, required := range []string{
-		"delegate.research.source-discovery.v1",
+		"strongly prefer calling `discover_sources` before answering",
 		"at most once per Run",
-		"available for review in the notebook's Source panel",
-		"do not delegate reflexively",
+		"left Discovery panel",
+		"semantic judgment",
 		"call `rewrite_todo_list` before substantive work",
 		"call `update_todo_status` immediately",
 		"Read Agent Status before every decision",
@@ -44,20 +43,20 @@ func TestBareSystemPromptDescribesResearchDelegationEscalation(t *testing.T) {
 			t.Fatalf("bare prompt is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"has no Sources or web research", "claim to have searched the web"} {
+	for _, forbidden := range []string{"delegate.research.source-discovery.v1"} {
 		if strings.Contains(BareSystemPrompt, forbidden) {
 			t.Fatalf("bare prompt still contains stale phrase %q", forbidden)
 		}
 	}
 }
 
-func TestComposerPromptTraceRefsUseTodoAwareImmutableVersions(t *testing.T) {
+func TestComposerPromptTraceRefsUseRetrievalFirstImmutableVersions(t *testing.T) {
 	bare := composerPromptTraceRef(BarePromptVersion)
 	grounded := composerPromptTraceRef(GroundedPromptVersion)
-	if bare.Identity != "agent.chat-composer-bare" || bare.Version != 3 {
+	if bare.Identity != "agent.chat-composer-bare" || bare.Version != 4 {
 		t.Fatalf("bare trace ref = %+v", bare)
 	}
-	if grounded.Identity != "agent.chat-composer-grounded" || grounded.Version != 4 {
+	if grounded.Identity != "agent.chat-composer-grounded" || grounded.Version != 5 {
 		t.Fatalf("grounded trace ref = %+v", grounded)
 	}
 }

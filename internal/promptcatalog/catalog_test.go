@@ -29,7 +29,7 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
-	const extraVersions = 14 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
+	const extraVersions = 16 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
 	if got := len(catalog.Versions()); got != len(want)+extraVersions {
 		t.Fatalf("versions=%d want=%d", got, len(want)+extraVersions)
 	}
@@ -68,6 +68,16 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 	groundedV4, ok := catalog.Resolve("agent.chat-composer-grounded", 4)
 	if !ok || !strings.Contains(groundedV4.Content, "update_todo_status") || !strings.Contains(groundedV4.Content, "Tool-call counts") {
 		t.Fatalf("grounded v4 prompt=%+v ok=%v", groundedV4, ok)
+	}
+	bareV4, ok := catalog.Resolve("agent.chat-composer-bare", 4)
+	if !ok || !strings.Contains(bareV4.Content, "discover_sources") || !strings.Contains(bareV4.Content, "factual") ||
+		!strings.Contains(bareV4.Content, "one to three") {
+		t.Fatalf("bare v4 prompt=%+v ok=%v", bareV4, ok)
+	}
+	groundedV5, ok := catalog.Resolve("agent.chat-composer-grounded", 5)
+	if !ok || !strings.Contains(groundedV5.Content, "discover_sources") ||
+		!strings.Contains(groundedV5.Content, "same Action batch") || strings.Contains(groundedV5.Content, "delegate.research.source-discovery") {
+		t.Fatalf("grounded v5 prompt=%+v ok=%v", groundedV5, ok)
 	}
 	plannerV5, ok := catalog.Resolve("agent.deep-research-planner", 5)
 	if !ok || plannerV5.Contract != "research_plan_text.v1" || !strings.Contains(plannerV5.Content, "This phase has no Web evidence") || !strings.Contains(plannerV5.Content, "Do not prescribe generic report boilerplate") {

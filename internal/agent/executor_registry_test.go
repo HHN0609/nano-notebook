@@ -28,6 +28,7 @@ func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testi
 		"assemble_research_report": agentcatalog.ToolOrderedSync,
 		"calculate":                agentcatalog.ToolParallel,
 		"current_time":             agentcatalog.ToolParallel,
+		"discover_sources":         agentcatalog.ToolParallel,
 		"inspect_source":           agentcatalog.ToolParallel,
 		"list_research_files":      agentcatalog.ToolParallel,
 		"read_document_pages":      agentcatalog.ToolParallel,
@@ -176,6 +177,7 @@ func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 		"assemble_research_report": {Scheduling: agentcatalog.ToolOrderedSync},
 		"calculate":                {Scheduling: agentcatalog.ToolOrderedSync},
 		"current_time":             {Scheduling: agentcatalog.ToolOrderedSync},
+		"discover_sources":         {Scheduling: agentcatalog.ToolOrderedSync},
 		"inspect_source":           {Scheduling: agentcatalog.ToolOrderedSync},
 		"list_research_files":      {Scheduling: agentcatalog.ToolOrderedSync},
 		"read_document_pages":      {Scheduling: agentcatalog.ToolOrderedSync},
@@ -195,7 +197,7 @@ func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 func productionExecutorRegistrations() []ExecutorRegistration {
 	return []ExecutorRegistration{
 		{Identity: "chat_leader", Executor: noopDefinitionExecutor{}, Capability: leaderExecutorCapability(map[string]bool{
-			"calculate": true, "current_time": true, "rewrite_todo_list": true, "search_evidence": true, "update_todo_status": true,
+			"calculate": true, "current_time": true, "discover_sources": true, "rewrite_todo_list": true, "search_evidence": true, "update_todo_status": true,
 		})},
 		{Identity: "research", Executor: noopDefinitionExecutor{}, Capability: agentcatalog.ExecutorCapability{
 			PromptPurposes: map[string]bool{"planner": true},
