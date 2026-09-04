@@ -42,7 +42,7 @@ func TestDeployWorkflowValidatesBeforeReconcileAndWaitsForHealth(t *testing.T) {
 		`docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml config --quiet`,
 		`docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml pull`,
 		`docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml up -d --remove-orphans --wait`,
-		"curl --fail --silent --show-error http://127.0.0.1/health",
+		"curl --fail --silent --show-error http://127.0.0.1/health/ready",
 		"curl --fail --silent --show-error http://127.0.0.1/version",
 	} {
 		if !strings.Contains(workflow, required) {
@@ -107,14 +107,14 @@ func TestProductionEntryServicesExposeHealthChecks(t *testing.T) {
 	}
 
 	controlPlane := file.Services["control-plane"]
-	if got := strings.Join(controlPlane.Healthcheck.Test, " "); !strings.Contains(got, "127.0.0.1:8080/health") {
-		t.Fatalf("control-plane health check does not cover /health: %q", got)
+	if got := strings.Join(controlPlane.Healthcheck.Test, " "); !strings.Contains(got, "127.0.0.1:8080/health/ready") {
+		t.Fatalf("control-plane health check does not cover /health/ready: %q", got)
 	}
 	nginx := file.Services["nginx"]
 	if nginx.DependsOn["control-plane"].Condition != "service_healthy" {
 		t.Fatalf("nginx starts before control-plane is healthy: %#v", nginx.DependsOn["control-plane"])
 	}
-	if got := strings.Join(nginx.Healthcheck.Test, " "); !strings.Contains(got, "127.0.0.1/health") {
+	if got := strings.Join(nginx.Healthcheck.Test, " "); !strings.Contains(got, "127.0.0.1/health/ready") {
 		t.Fatalf("nginx health check does not cover the public health path: %q", got)
 	}
 }

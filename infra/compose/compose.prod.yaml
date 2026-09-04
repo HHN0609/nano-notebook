@@ -7,7 +7,7 @@ services:
       control-plane:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health/ready >/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -44,7 +44,7 @@ services:
       NANO_MAIL_FROM: nano@notebook.local
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health/ready >/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 60

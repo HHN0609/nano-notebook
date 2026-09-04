@@ -161,7 +161,7 @@ jobs:
               exit 1
             fi
 
-            curl --fail --silent --show-error http://127.0.0.1/health >/dev/null
+            curl --fail --silent --show-error http://127.0.0.1/health/ready >/dev/null
             curl --fail --silent --show-error http://127.0.0.1/version >/dev/null
             docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml ps
 
