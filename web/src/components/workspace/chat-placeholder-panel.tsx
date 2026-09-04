@@ -211,13 +211,14 @@ function ResearchStatusCard({ copy, controller }: { copy: ChatPanelCopy; control
   const research = controller.research;
   if (!research) return null;
   const { session, evidence, plan } = research;
+  if (session.status === "cancelled") return null;
   if (session.status === "planning") {
     return <section className="research-status-card" aria-label={copy.researchProgressLabel}><span className="research-pulse" />{copy.researchPlanningLabel}</section>;
   }
   if (session.status === "awaiting_confirmation" && plan) {
     return <ResearchPlanEditor key={`${session.id}:${plan.version}`} copy={copy} controller={controller} plan={plan.content} version={plan.version} />;
   }
-  const terminal = session.status === "completed" ? copy.researchCompletedLabel : session.status === "failed" || session.status === "cancelled" ? copy.researchFailedLabel : copy.researchProgressLabel;
+  const terminal = session.status === "completed" ? copy.researchCompletedLabel : session.status === "failed" ? copy.researchFailedLabel : copy.researchProgressLabel;
   return (
     <section className="research-status-card research-status-card--metrics" aria-label={copy.researchProgressLabel}>
       <strong>{terminal}</strong>

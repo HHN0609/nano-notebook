@@ -301,6 +301,13 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     queryClient.setQueryData<ChatSnapshot>(queryKey, (current) => current
       ? { ...current, runs: upsertRun(current.runs, body.run) }
       : current);
+    const research = researchQuery.data;
+    if (research && (research.session.planning_run_id === runID || research.session.execution_run_id === runID)) {
+      queryClient.setQueryData<ResearchSessionSnapshot>(["research-session", research.session.id], {
+        ...research,
+        session: { ...research.session, status: "cancelled" }
+      });
+    }
     return true;
   }
 
