@@ -13,7 +13,12 @@ state_dir="${NANO_FAKE_DOCKER_STATE:?}"
 log="$state_dir/docker.log"
 printf '%s\n' "$*" >>"$log"
 
-if [[ "$*" == "compose -f infra/compose/compose.yaml up -d postgres minio minio-init" ]]; then
+if [[ "$*" == "compose -f infra/compose/compose.yaml up -d postgres clickhouse minio minio-init tool-result-cache" ]]; then
+  exit 0
+fi
+
+if [[ "$*" == *" exec -T clickhouse clickhouse-client "* ]]; then
+  touch "$state_dir/clickhouse-ready"
   exit 0
 fi
 
@@ -96,5 +101,9 @@ if [[ ! -f "$tmpdir/final-postgres-ready" ]]; then
 fi
 if [[ ! -f "$tmpdir/nano_test-created" ]]; then
   echo "test-go did not create nano_test after final PostgreSQL readiness" >&2
+  exit 1
+fi
+if [[ ! -f "$tmpdir/clickhouse-ready" ]]; then
+  echo "test-go did not verify ClickHouse readiness" >&2
   exit 1
 fi

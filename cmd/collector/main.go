@@ -20,34 +20,25 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 type collectorConfig struct {
-	StoreBackend               string
-	DatabaseURL                string
-	DatabaseMaxConns           int32
-	DatabaseMinConns           int32
-	ProjectionDatabaseMaxConns int32
-	ProjectionDatabaseMinConns int32
-	QueryDatabaseMaxConns      int32
-	QueryDatabaseMinConns      int32
-	Addr                       string
-	ServiceToken               string
-	QueryToken                 string
-	ProducerID                 string
-	ProducerIDPrefix           string
-	MaxBodyBytes               int64
-	ClickHouseAddr             []string
-	ClickHouseDatabase         string
-	ClickHouseUser             string
-	ClickHousePassword         string
-	ClickHouseMaxOpenConns     int
-	ClickHouseMaxIdleConns     int
-	ClickHouseDialTimeout      time.Duration
-	ReplayStagingS3            objectstore.S3Config
-	ReplayS3                   objectstore.S3Config
+	Addr                   string
+	ServiceToken           string
+	QueryToken             string
+	ProducerID             string
+	ProducerIDPrefix       string
+	MaxBodyBytes           int64
+	ClickHouseAddr         []string
+	ClickHouseDatabase     string
+	ClickHouseUser         string
+	ClickHousePassword     string
+	ClickHouseMaxOpenConns int
+	ClickHouseMaxIdleConns int
+	ClickHouseDialTimeout  time.Duration
+	ReplayStagingS3        objectstore.S3Config
+	ReplayS3               objectstore.S3Config
 }
 
 func main() {
@@ -66,30 +57,6 @@ func main() {
 }
 
 func loadConfig() (collectorConfig, error) {
-	maxConns, err := envInt32("NANO_COLLECTOR_DATABASE_MAX_CONNS", 16)
-	if err != nil {
-		return collectorConfig{}, err
-	}
-	minConns, err := envInt32("NANO_COLLECTOR_DATABASE_MIN_CONNS", 2)
-	if err != nil {
-		return collectorConfig{}, err
-	}
-	projectionMaxConns, err := envInt32("NANO_COLLECTOR_PROJECTION_DATABASE_MAX_CONNS", 4)
-	if err != nil {
-		return collectorConfig{}, err
-	}
-	projectionMinConns, err := envInt32("NANO_COLLECTOR_PROJECTION_DATABASE_MIN_CONNS", 1)
-	if err != nil {
-		return collectorConfig{}, err
-	}
-	queryMaxConns, err := envInt32("NANO_COLLECTOR_QUERY_DATABASE_MAX_CONNS", 8)
-	if err != nil {
-		return collectorConfig{}, err
-	}
-	queryMinConns, err := envInt32("NANO_COLLECTOR_QUERY_DATABASE_MIN_CONNS", 1)
-	if err != nil {
-		return collectorConfig{}, err
-	}
 	maxBodyBytes, err := envInt64("NANO_COLLECTOR_MAX_BODY_BYTES", 2*1024*1024)
 	if err != nil {
 		return collectorConfig{}, err
@@ -107,27 +74,19 @@ func loadConfig() (collectorConfig, error) {
 		return collectorConfig{}, err
 	}
 	config := collectorConfig{
-		StoreBackend:               env("NANO_COLLECTOR_STORE", "clickhouse"),
-		DatabaseURL:                env("NANO_COLLECTOR_DATABASE_URL", "postgres://nano_observability:nano-observability@localhost:55432/nano_observability?sslmode=disable"),
-		DatabaseMaxConns:           maxConns,
-		DatabaseMinConns:           minConns,
-		ProjectionDatabaseMaxConns: projectionMaxConns,
-		ProjectionDatabaseMinConns: projectionMinConns,
-		QueryDatabaseMaxConns:      queryMaxConns,
-		QueryDatabaseMinConns:      queryMinConns,
-		Addr:                       env("NANO_COLLECTOR_ADDR", ":8082"),
-		ServiceToken:               env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
-		QueryToken:                 env("NANO_COLLECTOR_QUERY_TOKEN", "nano-local-collector-query-token"),
-		ProducerID:                 env("NANO_COLLECTOR_PRODUCER_ID", "nano-worker"),
-		ProducerIDPrefix:           env("NANO_COLLECTOR_PRODUCER_ID_PREFIX", "nano-"),
-		MaxBodyBytes:               maxBodyBytes,
-		ClickHouseAddr:             strings.Split(env("NANO_CLICKHOUSE_ADDR", "127.0.0.1:59004"), ","),
-		ClickHouseDatabase:         env("NANO_CLICKHOUSE_DATABASE", "nano_observability"),
-		ClickHouseUser:             env("NANO_CLICKHOUSE_USER", "nano_observability"),
-		ClickHousePassword:         env("NANO_CLICKHOUSE_PASSWORD", "nano-observability"),
-		ClickHouseMaxOpenConns:     16,
-		ClickHouseMaxIdleConns:     8,
-		ClickHouseDialTimeout:      clickHouseDialTimeout,
+		Addr:                   env("NANO_COLLECTOR_ADDR", ":8082"),
+		ServiceToken:           env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
+		QueryToken:             env("NANO_COLLECTOR_QUERY_TOKEN", "nano-local-collector-query-token"),
+		ProducerID:             env("NANO_COLLECTOR_PRODUCER_ID", "nano-worker"),
+		ProducerIDPrefix:       env("NANO_COLLECTOR_PRODUCER_ID_PREFIX", "nano-"),
+		MaxBodyBytes:           maxBodyBytes,
+		ClickHouseAddr:         strings.Split(env("NANO_CLICKHOUSE_ADDR", "127.0.0.1:59004"), ","),
+		ClickHouseDatabase:     env("NANO_CLICKHOUSE_DATABASE", "nano_observability"),
+		ClickHouseUser:         env("NANO_CLICKHOUSE_USER", "nano_observability"),
+		ClickHousePassword:     env("NANO_CLICKHOUSE_PASSWORD", "nano-observability"),
+		ClickHouseMaxOpenConns: 16,
+		ClickHouseMaxIdleConns: 8,
+		ClickHouseDialTimeout:  clickHouseDialTimeout,
 		ReplayStagingS3: objectstore.S3Config{
 			Endpoint:        env("NANO_REPLAY_STAGING_S3_ENDPOINT", "127.0.0.1:59000"),
 			AccessKeyID:     env("NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID", "nano"),
@@ -143,19 +102,12 @@ func loadConfig() (collectorConfig, error) {
 			Region:          env("NANO_REPLAY_S3_REGION", "us-east-1"), UseTLS: replayUseTLS,
 		},
 	}
-	postgresInvalid := config.StoreBackend == "postgres" && strings.TrimSpace(config.DatabaseURL) == ""
-	clickHouseInvalid := config.StoreBackend == "clickhouse" &&
-		(len(config.ClickHouseAddr) == 0 || strings.TrimSpace(config.ClickHouseAddr[0]) == "" || config.ClickHouseDatabase == "" ||
-			config.ClickHouseUser == "" || config.ClickHousePassword == "" || config.ClickHouseDialTimeout <= 0)
-	if (config.StoreBackend != "postgres" && config.StoreBackend != "clickhouse") || postgresInvalid || clickHouseInvalid || strings.TrimSpace(config.Addr) == "" ||
+	clickHouseInvalid := len(config.ClickHouseAddr) == 0 || strings.TrimSpace(config.ClickHouseAddr[0]) == "" || config.ClickHouseDatabase == "" ||
+		config.ClickHouseUser == "" || config.ClickHousePassword == "" || config.ClickHouseDialTimeout <= 0
+	if clickHouseInvalid || strings.TrimSpace(config.Addr) == "" ||
 		strings.TrimSpace(config.ServiceToken) == "" || strings.TrimSpace(config.QueryToken) == "" ||
 		(strings.TrimSpace(config.ProducerID) == "" && strings.TrimSpace(config.ProducerIDPrefix) == "") ||
-		config.DatabaseMaxConns < 1 || config.DatabaseMinConns < 0 ||
-		config.DatabaseMinConns > config.DatabaseMaxConns || config.MaxBodyBytes < 1 ||
-		config.ProjectionDatabaseMaxConns < 1 || config.ProjectionDatabaseMinConns < 0 ||
-		config.ProjectionDatabaseMinConns > config.ProjectionDatabaseMaxConns ||
-		config.QueryDatabaseMaxConns < 1 || config.QueryDatabaseMinConns < 0 ||
-		config.QueryDatabaseMinConns > config.QueryDatabaseMaxConns ||
+		config.MaxBodyBytes < 1 ||
 		strings.TrimSpace(config.ReplayStagingS3.Endpoint) == "" || strings.TrimSpace(config.ReplayStagingS3.AccessKeyID) == "" ||
 		strings.TrimSpace(config.ReplayStagingS3.SecretAccessKey) == "" || strings.TrimSpace(config.ReplayStagingS3.Bucket) == "" ||
 		strings.TrimSpace(config.ReplayS3.Endpoint) == "" || strings.TrimSpace(config.ReplayS3.AccessKeyID) == "" ||
@@ -166,72 +118,7 @@ func loadConfig() (collectorConfig, error) {
 }
 
 func run(ctx context.Context, config collectorConfig) error {
-	if config.StoreBackend == "clickhouse" {
-		return runClickHouseCollector(ctx, config)
-	}
-	pool, err := openCollectorPool(ctx, config.DatabaseURL, config.DatabaseMaxConns, config.DatabaseMinConns)
-	if err != nil {
-		return fmt.Errorf("open Collector ingestion database: %w", err)
-	}
-	defer pool.Close()
-	projectionPool, err := openCollectorPool(ctx, config.DatabaseURL, config.ProjectionDatabaseMaxConns, config.ProjectionDatabaseMinConns)
-	if err != nil {
-		return fmt.Errorf("open Collector projection database: %w", err)
-	}
-	defer projectionPool.Close()
-	queryPool, err := openCollectorPool(ctx, config.DatabaseURL, config.QueryDatabaseMaxConns, config.QueryDatabaseMinConns)
-	if err != nil {
-		return fmt.Errorf("open Collector query database: %w", err)
-	}
-	defer queryPool.Close()
-	analyticsConnection, err := openClickHouseConnection(config)
-	if err != nil {
-		return fmt.Errorf("open Collector analytics ClickHouse: %w", err)
-	}
-	defer analyticsConnection.Close()
-	if err := collector.RunClickHouseMigrations(ctx, analyticsConnection); err != nil {
-		return fmt.Errorf("run Collector analytics ClickHouse migrations: %w", err)
-	}
-	analyticsStore, err := collector.NewClickHouseTraceAnalyticsQueryStore(analyticsConnection)
-	if err != nil {
-		return err
-	}
-	if err := collector.RunMigrations(ctx, pool); err != nil {
-		return fmt.Errorf("run Collector migrations: %w", err)
-	}
-
-	shutdownTelemetry, err := telemetry.Start(ctx, "nano-collector")
-	if err != nil {
-		return fmt.Errorf("start Collector telemetry: %w", err)
-	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = shutdownTelemetry(shutdownCtx)
-	}()
-	telemetry.StartupSpan(ctx, "nano-collector")
-
-	metricsRegistry := metrics.NewRegistry()
-	metricsCatalog := metrics.NewCatalog(metricsRegistry)
-	instrumentedAnalyticsStore := collector.WithTraceAnalyticsMetrics(analyticsStore, metricsCatalog)
-	metricsAddr := env("NANO_COLLECTOR_METRICS_ADDR", "0.0.0.0:9093")
-	metricsServer := metrics.NewAdminServer(metricsAddr, metricsRegistry)
-	go func() {
-		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("Collector metrics listener failed", "error", err)
-		}
-	}()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = metricsServer.Shutdown(shutdownCtx)
-	}()
-	go metrics.ObservePoolStats(ctx, metricsCatalog, "collector_ingest", 15*time.Second, poolStatFunc(pool))
-	go metrics.ObservePoolStats(ctx, metricsCatalog, "collector_projection", 15*time.Second, poolStatFunc(projectionPool))
-	go metrics.ObservePoolStats(ctx, metricsCatalog, "collector_query", 15*time.Second, poolStatFunc(queryPool))
-	go metrics.ObserveProjectionQueueStats(ctx, metricsCatalog, 15*time.Second, projectionQueueStatFunc(projectionPool))
-
-	return runCollectorService(ctx, config, pool, projectionPool, queryPool, instrumentedAnalyticsStore)
+	return runClickHouseCollector(ctx, config)
 }
 
 func runClickHouseCollector(ctx context.Context, config collectorConfig) error {
@@ -311,7 +198,7 @@ func runClickHouseCollector(ctx context.Context, config collectorConfig) error {
 	if err != nil {
 		return fmt.Errorf("listen for Collector HTTP: %w", err)
 	}
-	slog.Info("Collector listening", "addr", config.Addr, "store", config.StoreBackend,
+	slog.Info("Collector listening", "addr", config.Addr, "store", "clickhouse",
 		"query_database_max_connections", config.ClickHouseMaxOpenConns)
 	return service.Run(ctx, listener)
 }
@@ -333,121 +220,6 @@ func openClickHouseConnection(config collectorConfig) (driver.Conn, error) {
 	})
 }
 
-func poolStatFunc(pool *pgxpool.Pool) func() metrics.PoolStat {
-	return func() metrics.PoolStat {
-		stat := pool.Stat()
-		return metrics.PoolStat{
-			AcquiredConns: stat.AcquiredConns(), IdleConns: stat.IdleConns(),
-			TotalConns: stat.TotalConns(), MaxConns: stat.MaxConns(),
-		}
-	}
-}
-
-func projectionQueueStatFunc(pool *pgxpool.Pool) func(context.Context) ([]metrics.ProjectionQueueErrorStat, error) {
-	return func(ctx context.Context) ([]metrics.ProjectionQueueErrorStat, error) {
-		stats, err := collector.ProjectionQueueStats(ctx, pool)
-		if err != nil {
-			return nil, err
-		}
-		converted := make([]metrics.ProjectionQueueErrorStat, len(stats))
-		for i, stat := range stats {
-			converted[i] = metrics.ProjectionQueueErrorStat{
-				ErrorCode: stat.ErrorCode, Count: stat.Count, OldestAgeSeconds: stat.OldestAgeSeconds,
-			}
-		}
-		return converted, nil
-	}
-}
-
-func openCollectorPool(ctx context.Context, databaseURL string, maxConns, minConns int32) (*pgxpool.Pool, error) {
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse Collector database configuration: %w", err)
-	}
-	poolConfig.MaxConns = maxConns
-	poolConfig.MinConns = minConns
-	poolConfig.MaxConnLifetime = time.Hour
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		return nil, err
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, err
-	}
-	return pool, nil
-}
-
-func runCollectorService(ctx context.Context, config collectorConfig, pool, projectionPool, queryPool *pgxpool.Pool, analyticsStore collector.TraceAnalyticsQueries) error {
-	stagingObjects, replayObjects, err := openCollectorReplayStores(ctx, config)
-	if err != nil {
-		return err
-	}
-	store, err := collector.NewPostgresStoreWithReplay(pool, stagingObjects, replayObjects)
-	if err != nil {
-		return err
-	}
-	replayMaintenance, err := collector.NewReplayMaintenance(pool, replayObjects, collector.ReplayMaintenanceConfig{
-		ReportError: func(err error) { slog.Error("Collector Replay maintenance failed", "error", err) },
-	})
-	if err != nil {
-		return err
-	}
-	projector, err := collector.NewProjector(projectionPool, collector.ProjectorConfig{
-		ReportError: func(err error) { slog.Error("Collector projection failed", "error", err) },
-	})
-	if err != nil {
-		return err
-	}
-	queryStore, err := collector.NewTraceQueryStore(queryPool, replayObjects)
-	if err != nil {
-		return err
-	}
-	ingestor, err := collector.NewIngestor(collector.IngestorConfig{
-		ProducerID: config.ProducerID, ProducerIDPrefix: config.ProducerIDPrefix, Store: store,
-	})
-	if err != nil {
-		return err
-	}
-	purger, err := collector.NewPurger(collector.PurgerConfig{ProducerID: config.ProducerID, Store: store})
-	if err != nil {
-		return err
-	}
-	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
-		Ingestor: ingestor, Purger: purger, ServiceToken: config.ServiceToken, MaxBodyBytes: config.MaxBodyBytes,
-		QueryStore: queryStore, AnalyticsStore: analyticsStore, QueryToken: config.QueryToken,
-		Readiness: func(readyCtx context.Context) error {
-			return errors.Join(pool.Ping(readyCtx), projectionPool.Ping(readyCtx), queryPool.Ping(readyCtx), stagingObjects.CheckReady(readyCtx), replayObjects.CheckReady(readyCtx))
-		},
-	})
-	if err != nil {
-		return err
-	}
-	service, err := collector.NewHTTPService(collector.HTTPServiceConfig{
-		Handler: otelhttp.NewHandler(handler, "collector"), ReadHeaderTimeout: 5 * time.Second,
-		ShutdownTimeout: 10 * time.Second,
-	})
-	if err != nil {
-		return err
-	}
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", config.Addr)
-	if err != nil {
-		return fmt.Errorf("listen for Collector HTTP: %w", err)
-	}
-	slog.Info("Collector listening", "addr", config.Addr, "producer_id", config.ProducerID, "producer_id_prefix", config.ProducerIDPrefix,
-		"ingestion_database_max_connections", config.DatabaseMaxConns,
-		"projection_database_max_connections", config.ProjectionDatabaseMaxConns,
-		"query_database_max_connections", config.QueryDatabaseMaxConns, "max_body_bytes", config.MaxBodyBytes)
-	maintenanceCtx, cancelMaintenance := context.WithCancel(ctx)
-	maintenanceDone := make(chan error, 2)
-	go func() { maintenanceDone <- replayMaintenance.Run(maintenanceCtx) }()
-	go func() { maintenanceDone <- projector.Run(maintenanceCtx) }()
-	serviceErr := service.Run(ctx, listener)
-	cancelMaintenance()
-	maintenanceErr := errors.Join(<-maintenanceDone, <-maintenanceDone)
-	return errors.Join(serviceErr, maintenanceErr)
-}
-
 func openCollectorReplayStores(ctx context.Context, config collectorConfig) (*objectstore.S3Store, *objectstore.S3Store, error) {
 	stagingObjects, err := objectstore.NewS3Store(config.ReplayStagingS3)
 	if err != nil {
@@ -464,18 +236,6 @@ func openCollectorReplayStores(ctx context.Context, config collectorConfig) (*ob
 		return nil, nil, fmt.Errorf("check Collector Replay object Store: %w", err)
 	}
 	return stagingObjects, replayObjects, nil
-}
-
-func envInt32(key string, fallback int32) (int32, error) {
-	value := os.Getenv(key)
-	if value == "" {
-		return fallback, nil
-	}
-	parsed, err := strconv.ParseInt(value, 10, 32)
-	if err != nil {
-		return 0, fmt.Errorf("parse %s: %w", key, err)
-	}
-	return int32(parsed), nil
 }
 
 func envInt64(key string, fallback int64) (int64, error) {

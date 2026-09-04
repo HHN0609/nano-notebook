@@ -129,12 +129,8 @@ services:
     image: ${ECR_REGISTRY:-localhost}/nano-notebook-collector:${IMAGE_TAG:-latest}
     environment:
       NANO_COLLECTOR_ADDR: ":8082"
-      NANO_COLLECTOR_STORE: clickhouse
       NANO_COLLECTOR_SERVICE_TOKEN: nano-prod-collector-token
       NANO_COLLECTOR_QUERY_TOKEN: nano-prod-collector-query-token
-      NANO_COLLECTOR_DATABASE_MAX_CONNS: "16"
-      NANO_COLLECTOR_PROJECTION_DATABASE_MAX_CONNS: "4"
-      NANO_COLLECTOR_QUERY_DATABASE_MAX_CONNS: "8"
       NANO_COLLECTOR_PRODUCER_ID: nano-worker
       NANO_CLICKHOUSE_ADDR: clickhouse:9000
       NANO_CLICKHOUSE_DATABASE: nano_observability
@@ -164,7 +160,6 @@ services:
   agent-trace-processor-clickhouse:
     image: ${ECR_REGISTRY:-localhost}/nano-notebook-agent-trace-processor:${IMAGE_TAG:-latest}
     environment:
-      NANO_AGENT_TRACE_PROCESSOR_STORE: clickhouse
       NANO_CLICKHOUSE_ADDR: clickhouse:9000
       NANO_CLICKHOUSE_DATABASE: nano_observability
       NANO_CLICKHOUSE_USER: nano_observability
@@ -251,22 +246,6 @@ services:
       retries: 20
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    restart: unless-stopped
-
-  observability-postgres:
-    image: postgres:16-alpine
-    profiles: ["postgres-trace-rollback"]
-    environment:
-      POSTGRES_USER: nano_observability
-      POSTGRES_PASSWORD: nano-observability
-      POSTGRES_DB: nano_observability
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nano_observability -d nano_observability"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    volumes:
-      - observability-postgres-data:/var/lib/postgresql/data
     restart: unless-stopped
 
   kafka-1:
@@ -498,7 +477,6 @@ services:
 
 volumes:
   postgres-data:
-  observability-postgres-data:
   kafka-1-data:
   kafka-2-data:
   kafka-3-data:

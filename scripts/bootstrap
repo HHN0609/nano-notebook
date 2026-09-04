@@ -11,5 +11,5 @@ fi
 if [ -d services/web-reader ]; then
   npm --prefix services/web-reader install
 fi
-docker compose -f infra/compose/compose.yaml pull postgres observability-postgres minio qdrant bifrost jaeger prometheus grafana
+docker compose -f infra/compose/compose.yaml pull postgres clickhouse kafka minio qdrant bifrost jaeger prometheus grafana
 docker compose -f infra/compose/compose.yaml build document-renderer web-reader

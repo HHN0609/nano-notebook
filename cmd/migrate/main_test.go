@@ -1,8 +1,11 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
-func TestLoadMigrationConfigKeepsApplicationAndCollectorDatabasesSeparate(t *testing.T) {
+func TestLoadMigrationConfigUsesOnlyApplicationDatabase(t *testing.T) {
 	t.Setenv("NANO_DATABASE_URL", "postgres://application")
 	t.Setenv("NANO_COLLECTOR_DATABASE_URL", "postgres://observability")
 
@@ -10,10 +13,7 @@ func TestLoadMigrationConfigKeepsApplicationAndCollectorDatabasesSeparate(t *tes
 	if config.ApplicationDatabaseURL != "postgres://application" {
 		t.Fatalf("ApplicationDatabaseURL = %q", config.ApplicationDatabaseURL)
 	}
-	if config.CollectorDatabaseURL != "postgres://observability" {
-		t.Fatalf("CollectorDatabaseURL = %q", config.CollectorDatabaseURL)
-	}
-	if config.ApplicationDatabaseURL == config.CollectorDatabaseURL {
-		t.Fatal("Application and Collector migration DSNs are coupled")
+	if _, found := reflect.TypeOf(config).FieldByName("CollectorDatabaseURL"); found {
+		t.Fatal("migration config still exposes the retired Collector database")
 	}
 }

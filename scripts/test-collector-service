@@ -5,12 +5,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano?sslmode=disable}"
-export NANO_COLLECTOR_DATABASE_URL="${NANO_COLLECTOR_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55433/nano_observability?sslmode=disable}"
 export NANO_COLLECTOR_ADDR="${NANO_COLLECTOR_ADDR:-127.0.0.1:18082}"
 export NANO_COLLECTOR_SERVICE_TOKEN="${NANO_COLLECTOR_SERVICE_TOKEN:-nano-local-collector-token}"
 export NANO_COLLECTOR_QUERY_TOKEN="${NANO_COLLECTOR_QUERY_TOKEN:-nano-local-collector-query-token}"
 
-docker compose -f infra/compose/compose.yaml up -d postgres minio minio-init >/dev/null
+docker compose -f infra/compose/compose.yaml up -d postgres clickhouse minio minio-init >/dev/null
 docker compose -f infra/compose/compose.yaml wait minio-init >/dev/null
 for _ in $(seq 1 60); do
   if docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null 2>&1; then
@@ -19,7 +18,6 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
-scripts/prepare-observability-db
 go run ./cmd/migrate
 
 collector_tmp_dir="$(mktemp -d)"

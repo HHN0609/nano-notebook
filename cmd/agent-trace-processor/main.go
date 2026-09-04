@@ -19,13 +19,9 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/metrics"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type config struct {
-	StoreBackend           string
-	DatabaseURL            string
-	DatabaseMaxConns       int32
 	ClickHouseAddr         []string
 	ClickHouseDatabase     string
 	ClickHouseUser         string
@@ -87,10 +83,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		return parsed, nil
 	}
-	databaseMaxConns, err := parseInt("NANO_AGENT_TRACE_PROCESSOR_DATABASE_MAX_CONNS", 16)
-	if err != nil {
-		return config{}, err
-	}
 	clickHouseMaxOpenConns, err := parseInt("NANO_CLICKHOUSE_MAX_OPEN_CONNS", 16)
 	if err != nil {
 		return config{}, err
@@ -124,8 +116,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 	parsed := config{
-		StoreBackend: value("NANO_AGENT_TRACE_PROCESSOR_STORE", "clickhouse"),
-		DatabaseURL:  value("NANO_AGENT_TRACE_PROCESSOR_DATABASE_URL", ""), DatabaseMaxConns: int32(databaseMaxConns),
 		ClickHouseAddr:     strings.Split(value("NANO_CLICKHOUSE_ADDR", ""), ","),
 		ClickHouseDatabase: value("NANO_CLICKHOUSE_DATABASE", "nano_observability"),
 		ClickHouseUser:     value("NANO_CLICKHOUSE_USER", ""), ClickHousePassword: value("NANO_CLICKHOUSE_PASSWORD", ""),
@@ -153,13 +143,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 		},
 		MetricsAddr: value("NANO_AGENT_TRACE_PROCESSOR_METRICS_ADDR", "0.0.0.0:9096"),
 	}
-	postgresInvalid := parsed.StoreBackend == "postgres" && (parsed.DatabaseURL == "" || parsed.DatabaseMaxConns < 1 || parsed.DatabaseMaxConns > 256)
-	clickHouseInvalid := parsed.StoreBackend == "clickhouse" &&
-		(len(parsed.ClickHouseAddr) == 0 || strings.TrimSpace(parsed.ClickHouseAddr[0]) == "" || parsed.ClickHouseDatabase == "" ||
-			parsed.ClickHouseUser == "" || parsed.ClickHousePassword == "" || parsed.ClickHouseMaxOpenConns < 1 ||
-			parsed.ClickHouseMaxOpenConns > 256 || parsed.ClickHouseMaxIdleConns < 0 ||
-			parsed.ClickHouseMaxIdleConns > parsed.ClickHouseMaxOpenConns || parsed.ClickHouseDialTimeout <= 0)
-	if (parsed.StoreBackend != "postgres" && parsed.StoreBackend != "clickhouse") || postgresInvalid || clickHouseInvalid ||
+	clickHouseInvalid := len(parsed.ClickHouseAddr) == 0 || strings.TrimSpace(parsed.ClickHouseAddr[0]) == "" || parsed.ClickHouseDatabase == "" ||
+		parsed.ClickHouseUser == "" || parsed.ClickHousePassword == "" || parsed.ClickHouseMaxOpenConns < 1 ||
+		parsed.ClickHouseMaxOpenConns > 256 || parsed.ClickHouseMaxIdleConns < 0 ||
+		parsed.ClickHouseMaxIdleConns > parsed.ClickHouseMaxOpenConns || parsed.ClickHouseDialTimeout <= 0
+	if clickHouseInvalid ||
 		len(parsed.Brokers) == 0 || strings.TrimSpace(parsed.Brokers[0]) == "" || parsed.Topic == "" || parsed.PurgeTopic == "" ||
 		parsed.PurgeTopic == parsed.Topic || parsed.PurgeProducerID == "" || parsed.QuarantineTopic == "" ||
 		parsed.GroupID == "" || parsed.ClientID == "" || parsed.ProducerIDPrefix == "" || parsed.MaxPollRecords < 1 ||
@@ -196,62 +184,35 @@ func run(ctx context.Context, config config) error {
 	if err := errors.Join(stagingObjects.CheckReady(ctx), replayObjects.CheckReady(ctx)); err != nil {
 		return err
 	}
-	var store collector.Store
-	switch config.StoreBackend {
-	case "postgres":
-		poolConfig, err := pgxpool.ParseConfig(config.DatabaseURL)
-		if err != nil {
-			return fmt.Errorf("parse Agent Trace Processor PostgreSQL configuration: %w", err)
-		}
-		poolConfig.MaxConns = config.DatabaseMaxConns
-		pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-		if err != nil {
-			return fmt.Errorf("open Agent Trace Processor PostgreSQL: %w", err)
-		}
-		defer pool.Close()
-		if err := pool.Ping(ctx); err != nil {
-			return fmt.Errorf("ping Agent Trace Processor PostgreSQL: %w", err)
-		}
-		if err := collector.RunMigrations(ctx, pool); err != nil {
-			return fmt.Errorf("migrate Agent Trace Processor PostgreSQL: %w", err)
-		}
-		store, err = collector.NewPostgresStoreWithReplay(pool, stagingObjects, replayObjects)
-		if err != nil {
-			return err
-		}
-	case "clickhouse":
-		connection, err := clickhouse.Open(&clickhouse.Options{
-			Addr: config.ClickHouseAddr,
-			Auth: clickhouse.Auth{
-				Database: config.ClickHouseDatabase,
-				Username: config.ClickHouseUser,
-				Password: config.ClickHousePassword,
-			},
-			Compression:     &clickhouse.Compression{Method: clickhouse.CompressionZSTD},
-			DialTimeout:     config.ClickHouseDialTimeout,
-			MaxOpenConns:    config.ClickHouseMaxOpenConns,
-			MaxIdleConns:    config.ClickHouseMaxIdleConns,
-			ConnMaxLifetime: time.Hour,
-			BlockBufferSize: 10,
-		})
-		if err != nil {
-			return fmt.Errorf("open Agent Trace Processor ClickHouse: %w", err)
-		}
-		defer connection.Close()
-		if err := connection.Ping(ctx); err != nil {
-			return fmt.Errorf("ping Agent Trace Processor ClickHouse: %w", err)
-		}
-		if err := collector.RunClickHouseMigrations(ctx, connection); err != nil {
-			return fmt.Errorf("migrate Agent Trace Processor ClickHouse: %w", err)
-		}
-		clickHouseStore, storeErr := collector.NewClickHouseStoreWithReplay(connection, stagingObjects, replayObjects)
-		if storeErr != nil {
-			return storeErr
-		}
-		store = clickHouseStore.WithMetrics(metricsCatalog)
-	default:
-		return fmt.Errorf("unsupported Agent Trace Processor Store %q", config.StoreBackend)
+	connection, err := clickhouse.Open(&clickhouse.Options{
+		Addr: config.ClickHouseAddr,
+		Auth: clickhouse.Auth{
+			Database: config.ClickHouseDatabase,
+			Username: config.ClickHouseUser,
+			Password: config.ClickHousePassword,
+		},
+		Compression:     &clickhouse.Compression{Method: clickhouse.CompressionZSTD},
+		DialTimeout:     config.ClickHouseDialTimeout,
+		MaxOpenConns:    config.ClickHouseMaxOpenConns,
+		MaxIdleConns:    config.ClickHouseMaxIdleConns,
+		ConnMaxLifetime: time.Hour,
+		BlockBufferSize: 10,
+	})
+	if err != nil {
+		return fmt.Errorf("open Agent Trace Processor ClickHouse: %w", err)
 	}
+	defer connection.Close()
+	if err := connection.Ping(ctx); err != nil {
+		return fmt.Errorf("ping Agent Trace Processor ClickHouse: %w", err)
+	}
+	if err := collector.RunClickHouseMigrations(ctx, connection); err != nil {
+		return fmt.Errorf("migrate Agent Trace Processor ClickHouse: %w", err)
+	}
+	clickHouseStore, err := collector.NewClickHouseStoreWithReplay(connection, stagingObjects, replayObjects)
+	if err != nil {
+		return err
+	}
+	var store collector.Store = clickHouseStore.WithMetrics(metricsCatalog)
 	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerIDPrefix: config.ProducerIDPrefix, Store: store})
 	if err != nil {
 		return err
@@ -307,6 +268,6 @@ func run(ctx context.Context, config config) error {
 	if err != nil {
 		return err
 	}
-	slog.Info("Agent Trace Processor started", "topic", config.Topic, "group_id", config.GroupID, "brokers", config.Brokers, "store", config.StoreBackend)
+	slog.Info("Agent Trace Processor started", "topic", config.Topic, "group_id", config.GroupID, "brokers", config.Brokers, "store", "clickhouse")
 	return runner.Run(ctx)
 }

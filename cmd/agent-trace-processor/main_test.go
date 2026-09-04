@@ -1,40 +1,15 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
 
-func TestLoadConfigBuildsBoundedStageBProcessor(t *testing.T) {
+func TestLoadConfigBuildsClickHouseProcessor(t *testing.T) {
 	env := map[string]string{
 		"NANO_AGENT_TRACE_PROCESSOR_STORE":         "postgres",
-		"NANO_AGENT_TRACE_PROCESSOR_DATABASE_URL":  "postgres://nano@postgres/nano",
-		"NANO_KAFKA_BROKERS":                       "kafka-a:9092,kafka-b:9092",
-		"NANO_REPLAY_STAGING_S3_ENDPOINT":          "minio:9000",
-		"NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID":     "nano",
-		"NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY": "password",
-		"NANO_REPLAY_STAGING_S3_BUCKET":            "staging",
-		"NANO_REPLAY_S3_ENDPOINT":                  "minio:9000",
-		"NANO_REPLAY_S3_ACCESS_KEY_ID":             "nano",
-		"NANO_REPLAY_S3_SECRET_ACCESS_KEY":         "password",
-		"NANO_REPLAY_S3_BUCKET":                    "replay",
-	}
-	config, err := loadConfig(func(key string) string { return env[key] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(config.Brokers) != 2 || config.Topic != "nano.observability.agent-trace.v1" ||
-		config.StoreBackend != "postgres" ||
-		config.QuarantineTopic != "nano.observability.agent-trace-quarantine.v1" ||
-		config.GroupID != "nano-agent-trace-storage-v1" || config.MaxPollRecords != 128 ||
-		config.FetchMaxBytes != 8*1024*1024 || config.FetchMaxWait != 100*time.Millisecond {
-		t.Fatalf("config=%#v", config)
-	}
-}
-
-func TestLoadConfigBuildsClickHouseStageCProcessor(t *testing.T) {
-	env := map[string]string{
-		"NANO_AGENT_TRACE_PROCESSOR_STORE":         "clickhouse",
+		"NANO_AGENT_TRACE_PROCESSOR_DATABASE_URL":  "postgres://retired",
 		"NANO_CLICKHOUSE_ADDR":                     "clickhouse-a:9000,clickhouse-b:9000",
 		"NANO_CLICKHOUSE_DATABASE":                 "nano_observability",
 		"NANO_CLICKHOUSE_USER":                     "nano-observability",
@@ -53,7 +28,7 @@ func TestLoadConfigBuildsClickHouseStageCProcessor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.StoreBackend != "clickhouse" || len(config.ClickHouseAddr) != 2 ||
+	if len(config.ClickHouseAddr) != 2 ||
 		config.ClickHouseDatabase != "nano_observability" || config.ClickHouseUser != "nano-observability" ||
 		config.ClickHousePassword != "password" || config.ClickHouseMaxOpenConns != 16 ||
 		config.ClickHouseMaxIdleConns != 8 || config.ClickHouseDialTimeout != 10*time.Second {
@@ -62,36 +37,14 @@ func TestLoadConfigBuildsClickHouseStageCProcessor(t *testing.T) {
 	if config.PurgeTopic != "nano.observability.agent-trace-purge.v1" || config.PurgeProducerID != "nano-worker" {
 		t.Fatalf("purge config=%#v", config)
 	}
-	if config.DatabaseURL != "" {
-		t.Fatalf("ClickHouse Stage C unexpectedly requires PostgreSQL: %#v", config)
+	for _, retired := range []string{"StoreBackend", "DatabaseURL", "DatabaseMaxConns"} {
+		if _, found := reflect.TypeOf(config).FieldByName(retired); found {
+			t.Errorf("Agent Trace Processor config still exposes retired field %s", retired)
+		}
 	}
 }
 
-func TestLoadConfigDefaultsToClickHouse(t *testing.T) {
-	env := map[string]string{
-		"NANO_CLICKHOUSE_ADDR":                     "clickhouse:9000",
-		"NANO_CLICKHOUSE_USER":                     "nano_observability",
-		"NANO_CLICKHOUSE_PASSWORD":                 "password",
-		"NANO_KAFKA_BROKERS":                       "kafka:19092",
-		"NANO_REPLAY_STAGING_S3_ENDPOINT":          "minio:9000",
-		"NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID":     "nano",
-		"NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY": "password",
-		"NANO_REPLAY_STAGING_S3_BUCKET":            "staging",
-		"NANO_REPLAY_S3_ENDPOINT":                  "minio:9000",
-		"NANO_REPLAY_S3_ACCESS_KEY_ID":             "nano",
-		"NANO_REPLAY_S3_SECRET_ACCESS_KEY":         "password",
-		"NANO_REPLAY_S3_BUCKET":                    "replay",
-	}
-	config, err := loadConfig(func(key string) string { return env[key] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.StoreBackend != "clickhouse" {
-		t.Fatalf("default StoreBackend = %q, want clickhouse", config.StoreBackend)
-	}
-}
-
-func TestLoadConfigRejectsIncompleteSelectedStore(t *testing.T) {
+func TestLoadConfigRejectsIncompleteClickHouse(t *testing.T) {
 	env := map[string]string{
 		"NANO_AGENT_TRACE_PROCESSOR_STORE": "clickhouse",
 		"NANO_CLICKHOUSE_ADDR":             "clickhouse:9000",

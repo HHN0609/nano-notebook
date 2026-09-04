@@ -6,8 +6,6 @@ cd "$ROOT"
 
 docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null
 echo '{"status":"ready","service":"postgres"}'
-docker compose -f infra/compose/compose.yaml exec -T observability-postgres pg_isready -U nano_observability -d nano_observability >/dev/null
-echo '{"status":"ready","service":"observability-postgres"}'
 curl -fsS http://localhost:59000/minio/health/live >/dev/null
 echo '{"status":"ready","service":"minio"}'
 curl -fsS http://localhost:56333/readyz >/dev/null
@@ -26,7 +24,7 @@ curl -fsS http://localhost:8081/health/live
 echo
 curl -fsS http://localhost:8081/health/ready
 echo
-curl -fsS http://localhost:8082/internal/agent-observability/v1/health
+curl -fsS http://127.0.0.1:58082/internal/agent-observability/v1/health
 echo
 curl -fsS http://localhost:5173 >/dev/null
 echo '{"status":"ready","service":"web"}'

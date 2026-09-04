@@ -147,42 +147,48 @@ func TestDefaultTraceTopologyUsesKafkaAndClickHouse(t *testing.T) {
 	if err := yaml.Unmarshal(data, &file); err != nil {
 		t.Fatal(err)
 	}
-	stageB, ok := file.Services["agent-trace-processor-postgres"]
-	if !ok {
-		t.Fatal("compose has no Stage B Agent Trace Processor")
+	for _, retired := range []string{"observability-postgres", "agent-trace-processor-postgres"} {
+		if _, ok := file.Services[retired]; ok {
+			t.Errorf("compose still declares retired service %q", retired)
+		}
+	}
+	if _, ok := file.Volumes["observability-postgres-data"]; ok {
+		t.Error("compose still declares retired observability-postgres-data volume")
 	}
 	stageC, ok := file.Services["agent-trace-processor-clickhouse"]
 	if !ok {
 		t.Fatal("compose has no Stage C Agent Trace Processor")
 	}
-	if !contains(stageB.Profiles, "postgres-trace-rollback") || stageB.Environment["NANO_AGENT_TRACE_PROCESSOR_STORE"] != "postgres" ||
-		stageB.DependsOn["observability-postgres"].Condition != "service_healthy" {
-		t.Fatalf("PostgreSQL rollback processor=%#v", stageB)
-	}
-	if len(stageC.Profiles) != 0 || stageC.Environment["NANO_AGENT_TRACE_PROCESSOR_STORE"] != "clickhouse" ||
+	if len(stageC.Profiles) != 0 ||
 		stageC.Environment["NANO_CLICKHOUSE_ADDR"] != "clickhouse:9000" || stageC.DependsOn["clickhouse"].Condition != "service_healthy" {
 		t.Fatalf("default ClickHouse processor=%#v", stageC)
 	}
-	for name, service := range map[string]composeService{"postgres-rollback": stageB, "clickhouse-default": stageC} {
-		if service.Build.Context != "../.." || service.Build.Dockerfile != "infra/agent-trace-processor/Dockerfile" ||
-			service.DependsOn["kafka-init"].Condition != "service_completed_successfully" ||
-			service.DependsOn["minio-init"].Condition != "service_completed_successfully" {
-			t.Fatalf("%s processor dependencies/build=%#v", name, service)
-		}
+	if _, ok := stageC.Environment["NANO_AGENT_TRACE_PROCESSOR_STORE"]; ok {
+		t.Error("Agent Trace Processor still exposes a storage backend selector")
+	}
+	if stageC.Build.Context != "../.." || stageC.Build.Dockerfile != "infra/agent-trace-processor/Dockerfile" ||
+		stageC.DependsOn["kafka-init"].Condition != "service_completed_successfully" ||
+		stageC.DependsOn["minio-init"].Condition != "service_completed_successfully" {
+		t.Fatalf("ClickHouse processor dependencies/build=%#v", stageC)
 	}
 	collector := file.Services["collector"]
-	if len(collector.Profiles) != 0 || collector.Environment["NANO_COLLECTOR_STORE"] != "clickhouse" ||
+	if len(collector.Profiles) != 0 ||
 		collector.DependsOn["clickhouse"].Condition != "service_healthy" {
 		t.Fatalf("default Collector=%#v", collector)
+	}
+	if _, ok := collector.Environment["NANO_COLLECTOR_STORE"]; ok {
+		t.Error("Collector still exposes a storage backend selector")
+	}
+	for key := range collector.Environment {
+		if strings.HasPrefix(key, "NANO_COLLECTOR_DATABASE_") || strings.HasPrefix(key, "NANO_COLLECTOR_PROJECTION_DATABASE_") || strings.HasPrefix(key, "NANO_COLLECTOR_QUERY_DATABASE_") {
+			t.Errorf("Collector still exposes retired PostgreSQL pool setting %s", key)
+		}
 	}
 	if _, ok := collector.DependsOn["observability-postgres"]; ok {
 		t.Fatal("default Collector still depends on Observability PostgreSQL")
 	}
 	if got := strings.Join(collector.Healthcheck.Test, " "); !strings.Contains(got, "127.0.0.1:9093/metrics") {
 		t.Fatalf("default Collector health does not cover its metrics listener: %q", got)
-	}
-	if !contains(file.Services["observability-postgres"].Profiles, "postgres-trace-rollback") {
-		t.Fatal("Observability PostgreSQL is still part of the default Compose topology")
 	}
 }
 
@@ -219,14 +225,26 @@ func TestProductionTraceTopologyUsesKafkaAndClickHouse(t *testing.T) {
 		t.Fatalf("production topic min ISR = %q", init.Environment["NANO_KAFKA_MIN_INSYNC_REPLICAS"])
 	}
 	processor, ok := file.Services["agent-trace-processor-clickhouse"]
-	if !ok || processor.Environment["NANO_AGENT_TRACE_PROCESSOR_STORE"] != "clickhouse" ||
+	if !ok ||
 		processor.DependsOn["kafka-init"].Condition != "service_completed_successfully" ||
 		processor.DependsOn["clickhouse"].Condition != "service_healthy" {
 		t.Fatalf("production ClickHouse processor=%#v", processor)
 	}
 	collector := file.Services["collector"]
-	if collector.Environment["NANO_COLLECTOR_STORE"] != "clickhouse" || collector.DependsOn["clickhouse"].Condition != "service_healthy" {
+	if collector.DependsOn["clickhouse"].Condition != "service_healthy" {
 		t.Fatalf("production Collector=%#v", collector)
+	}
+	for serviceName, service := range map[string]composeService{"Agent Trace Processor": processor, "Collector": collector} {
+		for _, selector := range []string{"NANO_AGENT_TRACE_PROCESSOR_STORE", "NANO_COLLECTOR_STORE"} {
+			if _, ok := service.Environment[selector]; ok {
+				t.Errorf("production %s still exposes %s", serviceName, selector)
+			}
+		}
+	}
+	for key := range collector.Environment {
+		if strings.HasPrefix(key, "NANO_COLLECTOR_DATABASE_") || strings.HasPrefix(key, "NANO_COLLECTOR_PROJECTION_DATABASE_") || strings.HasPrefix(key, "NANO_COLLECTOR_QUERY_DATABASE_") {
+			t.Errorf("production Collector still exposes retired PostgreSQL pool setting %s", key)
+		}
 	}
 	if got := strings.Join(collector.Healthcheck.Test, " "); !strings.Contains(got, "127.0.0.1:9093/metrics") {
 		t.Fatalf("production Collector health does not cover its metrics listener: %q", got)
@@ -234,8 +252,11 @@ func TestProductionTraceTopologyUsesKafkaAndClickHouse(t *testing.T) {
 	if _, ok := collector.DependsOn["observability-postgres"]; ok {
 		t.Fatal("production Collector still depends on Observability PostgreSQL")
 	}
-	if !contains(file.Services["observability-postgres"].Profiles, "postgres-trace-rollback") {
-		t.Fatal("production Observability PostgreSQL is still enabled by default")
+	if _, ok := file.Services["observability-postgres"]; ok {
+		t.Error("production Compose still declares retired Observability PostgreSQL")
+	}
+	if _, ok := file.Volumes["observability-postgres-data"]; ok {
+		t.Error("production Compose still declares retired observability-postgres-data volume")
 	}
 }
 
@@ -263,6 +284,24 @@ func TestStartAndGoGateUseDefaultClickHouseTraceTopology(t *testing.T) {
 	testScript := string(testGo)
 	if !strings.Contains(testScript, "NANO_TEST_CLICKHOUSE_ADDR") || !strings.Contains(testScript, "clickhouse") {
 		t.Error("scripts/test-go does not provision and exercise ClickHouse")
+	}
+	for _, scriptName := range []string{"start", "migrate", "health", "bootstrap", "test-go", "test-collector-service"} {
+		contents, err := os.ReadFile("../../scripts/" + scriptName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, retired := range []string{"observability-postgres", "NANO_COLLECTOR_DATABASE_URL", "NANO_TEST_OBSERVABILITY_DATABASE_URL", "cmd/collector-rebuild", "prepare-observability-db"} {
+			if strings.Contains(string(contents), retired) {
+				t.Errorf("scripts/%s still references retired %s", scriptName, retired)
+			}
+		}
+	}
+	health, err := os.ReadFile("../../scripts/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(health), "127.0.0.1:58082/internal/agent-observability/v1/health") {
+		t.Error("scripts/health does not probe the Compose-published Collector endpoint")
 	}
 }
 
