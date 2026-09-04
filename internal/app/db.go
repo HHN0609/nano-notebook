@@ -3328,6 +3328,38 @@ $$;
 revoke all on function nano_run_owned(text) from public;
 grant execute on function nano_run_owned(text) to nano_app;
 
+-- Public Run activity is derived from Checkpoints, but nano_app must never
+-- receive table-level access to the internal checkpoint ledger. This bounded
+-- function exposes only one principal-owned Run to the server-side sanitizer.
+create or replace function nano_owned_run_checkpoints(candidate_run_id text)
+returns table(
+	sequence_no integer,
+	identity_key text,
+	kind text,
+	decision_no integer,
+	action_index integer,
+	action_id text,
+	payload_version integer,
+	payload_text text,
+	payload_sha256 text,
+	created_at timestamptz
+)
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select checkpoint.sequence_no,checkpoint.identity_key,checkpoint.kind,checkpoint.decision_no,
+		checkpoint.action_index,checkpoint.action_id,checkpoint.payload_version,checkpoint.payload::text,
+		checkpoint.payload_sha256,checkpoint.created_at
+	from public.agent_run_checkpoints checkpoint
+	where checkpoint.run_id=candidate_run_id
+	  and public.nano_run_owned(candidate_run_id)
+	order by checkpoint.sequence_no
+$$;
+revoke all on function nano_owned_run_checkpoints(text) from public;
+grant execute on function nano_owned_run_checkpoints(text) to nano_app;
+
 drop policy if exists agent_runs_private on agent_runs;
 create policy agent_runs_private on agent_runs
 	for all to nano_app

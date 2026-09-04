@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps 
 import remarkGfm from "remark-gfm";
 import { MaterialSymbol } from "../icons/material-symbol";
 import { Button } from "../ui/button";
-import { appendMessageText, type ChatController, type ChatMessage, type Citation, type ResearchPlan } from "./private-chat";
+import { appendMessageText, type AgentActivity, type AgentRun, type ChatController, type ChatMessage, type Citation, type ResearchPlan } from "./private-chat";
 import { SourceOpenTarget } from "./source-open-target";
 import type { MemberSource } from "./sources";
 
@@ -25,6 +25,17 @@ export type ChatPanelCopy = {
   sendLabel: string;
   waitingLabel: string;
   generatingLabel: string;
+  agentWorkingLabel: string;
+  agentWorkedLabel: string;
+  analyzingLabel: string;
+  searchingSourcesLabel: string;
+  discoveringSourcesLabel: string;
+  inspectingSourceLabel: string;
+  readingPDFLabel: string;
+  readingWebpageLabel: string;
+  savingSourceLabel: string;
+  calculatingLabel: string;
+  organizingStepsLabel: string;
   sourceDisclosure: string;
   selectedSourceDisclosure: string;
   failedLabel: string;
@@ -116,12 +127,7 @@ export function ChatPanelContent({ copy, controller, sources, onOpenSource, sele
               }} />
             </div>
             <ResearchStatusCard copy={copy} controller={controller} />
-            {run ? (
-              <div className="chat-activity" role="status">
-                <span>{run.status === "queued" ? copy.waitingLabel : copy.generatingLabel}</span>
-                <Button variant="ghost" size="sm" onClick={() => void controller.stop(run.id)}>{copy.stopLabel}</Button>
-              </div>
-            ) : null}
+            {run ? <AgentActivityCard run={run} copy={copy} onStop={() => void controller.stop(run.id)} /> : null}
             {controller.error ? <div className="chat-error" role="alert">{controller.error}</div> : null}
           </ThreadPrimitive.Viewport>
           <ComposerPrimitive.Root className="chat-composer">
@@ -138,6 +144,67 @@ export function ChatPanelContent({ copy, controller, sources, onOpenSource, sele
       </div>
     </AssistantRuntimeProvider>
   );
+}
+
+function AgentActivityCard({ run, copy, onStop }: { run: AgentRun; copy: ChatPanelCopy; onStop: () => void }) {
+  const now = useCurrentTime(run.status === "running");
+  const duration = run.started_at ? formatDuration(run.started_at, undefined, now) : "";
+  const activities = run.activities ?? [];
+  return (
+    <div className="chat-activity" role="status">
+      <div className="chat-activity-content">
+        <strong>{run.status === "queued" ? copy.waitingLabel : copy.agentWorkingLabel.replace("{time}", duration || "0s")}</strong>
+        {run.status === "running" ? (
+          <div className="chat-activity-list">
+            {(activities.length ? activities : [{ kind: "working" as const, started_at: run.started_at ?? "" }]).map((activity, index) => (
+              <div className="chat-activity-item" key={`${activity.started_at}:${index}`}>
+                <span>{activityLabel(activity, copy)}</span>
+                {activity.detail ? <small>{activity.detail}</small> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <Button variant="ghost" size="sm" onClick={onStop}>{copy.stopLabel}</Button>
+    </div>
+  );
+}
+
+function activityLabel(activity: AgentActivity, copy: ChatPanelCopy) {
+  const labels: Record<AgentActivity["kind"], string> = {
+    searching_sources: copy.searchingSourcesLabel,
+    discovering_sources: copy.discoveringSourcesLabel,
+    inspecting_source: copy.inspectingSourceLabel,
+    reading_pdf: copy.readingPDFLabel,
+    reading_webpage: copy.readingWebpageLabel,
+    saving_source: copy.savingSourceLabel,
+    calculating: copy.calculatingLabel,
+    organizing_steps: copy.organizingStepsLabel,
+    working: copy.analyzingLabel
+  };
+  return labels[activity.kind] ?? copy.analyzingLabel;
+}
+
+function useCurrentTime(active: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return now;
+}
+
+function formatDuration(startedAt: string, finishedAt?: string, now = Date.now()) {
+  const start = Date.parse(startedAt);
+  const end = finishedAt ? Date.parse(finishedAt) : now;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return "0s";
+  const seconds = Math.max(0, Math.floor((end - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 function ResearchStatusCard({ copy, controller }: { copy: ChatPanelCopy; controller: ChatController }) {
@@ -201,6 +268,7 @@ function UserMessage({ controller, copy, latestMessageID }: { controller: ChatCo
   const run = controller.snapshot?.runs.find((item) => item.input_message_id === messageID);
   const isResearch = controller.snapshot?.research_sessions.some((session) => session.input_message_id === messageID);
   const canRetry = !isResearch && messageID === latestMessageID && (run?.status === "failed" || run?.status === "cancelled");
+  const duration = run?.started_at && run.finished_at ? formatDuration(run.started_at, run.finished_at) : "";
   return (
     <MessagePrimitive.Root className="chat-message chat-message--user">
       <MessagePrimitive.Parts />
@@ -210,6 +278,7 @@ function UserMessage({ controller, copy, latestMessageID }: { controller: ChatCo
           {canRetry ? <Button variant="ghost" size="sm" onClick={() => void controller.retry(run.id)}>{copy.retryLabel}</Button> : null}
         </span>
       ) : null}
+      {duration ? <span className="chat-run-duration">{copy.agentWorkedLabel.replace("{time}", duration)}</span> : null}
     </MessagePrimitive.Root>
   );
 }

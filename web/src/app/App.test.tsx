@@ -740,15 +740,28 @@ test("submits one durable Message and projects the final answer from Run SSE", a
 
   act(() => {
     runEvents?.emit("run", {
-      run: { id: "run_test", input_message_id: admittedMessageID, status: "running", error_code: null },
+      run: {
+        id: "run_test", input_message_id: admittedMessageID, status: "running", error_code: null,
+        started_at: new Date(Date.now() - 65_000).toISOString(),
+        activities: [
+          { kind: "discovering_sources", detail: "latest Go release", started_at: new Date(Date.now() - 5_000).toISOString() },
+          { kind: "reading_pdf", detail: "Roadmap.pdf · 3–5", started_at: new Date(Date.now() - 3_000).toISOString() }
+        ]
+      },
       message: null
     });
   });
-  await waitFor(() => expect(within(chat).getByRole("status")).toHaveTextContent("Generating answer…"));
+  await waitFor(() => expect(within(chat).getByRole("status")).toHaveTextContent("Agent working · 1m 5s"));
+  expect(within(chat).getByRole("status")).toHaveTextContent("Searching the weblatest Go release");
+  expect(within(chat).getByRole("status")).toHaveTextContent("Reading PDFRoadmap.pdf · 3–5");
+  expect(within(chat).queryByText(/discovering_sources|reading_pdf/)).not.toBeInTheDocument();
 
   act(() => {
     runEvents?.emit("run", {
-      run: { id: "run_test", input_message_id: admittedMessageID, status: "completed", error_code: null },
+      run: {
+        id: "run_test", input_message_id: admittedMessageID, status: "completed", error_code: null,
+        started_at: "2026-07-14T12:00:00Z", finished_at: "2026-07-14T12:01:10Z", activities: []
+      },
       message: {
         id: "msg_answer",
         role: "assistant",
@@ -759,6 +772,7 @@ test("submits one durable Message and projects the final answer from Run SSE", a
   });
 
   expect(await within(chat).findByText("It reuses the keys and values already computed for earlier tokens.")).toBeInTheDocument();
+  expect(within(chat).getByText("Worked for 1m 10s")).toBeVisible();
   expect(within(chat).getByText("Answers use model knowledge and are not based on Notebook Sources.")).toBeInTheDocument();
   expect(within(chat).queryByRole("status")).not.toBeInTheDocument();
   expect(runEvents?.closed).toBe(true);

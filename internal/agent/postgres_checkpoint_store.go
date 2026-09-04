@@ -165,6 +165,9 @@ func (r *PostgresRuntime) appendCheckpointOnce(ctx context.Context, attempt Atte
 	if err := RecordCheckpointAcceptedInTx(traceCtx, tx, attempt, checkpoint); err != nil {
 		return Checkpoint{}, err
 	}
+	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs',$1)`, attempt.RunID); err != nil {
+		return Checkpoint{}, err
+	}
 	if err := r.commit(ctx, tx); err != nil {
 		return Checkpoint{}, err
 	}
@@ -399,7 +402,7 @@ func checkpointByIdentity(ctx context.Context, tx pgx.Tx, runID, identityKey str
 	return checkpoint, true, nil
 }
 
-func loadRunCheckpoints(ctx context.Context, tx pgx.Tx, runID string) ([]Checkpoint, error) {
+func loadRunCheckpoints(ctx context.Context, tx DBTX, runID string) ([]Checkpoint, error) {
 	rows, err := tx.Query(ctx, `
 		select `+selectCheckpointColumns+`
 		from agent_run_checkpoints

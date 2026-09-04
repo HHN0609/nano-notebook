@@ -40,11 +40,14 @@ type RunRef struct {
 }
 
 type RunSnapshot struct {
-	ID                 string  `json:"id"`
-	InputMessageID     string  `json:"input_message_id"`
-	Status             string  `json:"status"`
-	ErrorCode          *string `json:"error_code"`
-	DiscoverySessionID *string `json:"discovery_session_id,omitempty"`
+	ID                 string           `json:"id"`
+	InputMessageID     string           `json:"input_message_id"`
+	Status             string           `json:"status"`
+	ErrorCode          *string          `json:"error_code"`
+	DiscoverySessionID *string          `json:"discovery_session_id,omitempty"`
+	StartedAt          *time.Time       `json:"started_at,omitempty"`
+	FinishedAt         *time.Time       `json:"finished_at,omitempty"`
+	Activities         []PublicActivity `json:"activities"`
 }
 
 type AssistantMessageSnapshot struct {
@@ -267,15 +270,21 @@ func (s *Store) ProjectionForUser(ctx context.Context, userID, runID string) (Ru
 	var outputMessageID *string
 	err := s.db.QueryRow(ctx, `
 		select run.id,coalesce(run.input_message_id,product.input_message_id),run.status,run.error_code,
-			coalesce(run.output_message_id,product.output_message_id),run.discovery_session_id
+			coalesce(run.output_message_id,product.output_message_id),run.discovery_session_id,
+			run.started_at,run.finished_at
 		from agent_runs run
 		left join chat_runs product on product.root_agent_run_id=run.id
 		where run.id=$1 and coalesce(run.user_id,product.user_id)=$2
 		  and ((run.runtime_kind='legacy_role' and run.agent_role='leader') or run.runtime_kind='configured')`, runID, userID).
-		Scan(&projection.Run.ID, &projection.Run.InputMessageID, &projection.Run.Status, &projection.Run.ErrorCode, &outputMessageID, &projection.Run.DiscoverySessionID)
+		Scan(&projection.Run.ID, &projection.Run.InputMessageID, &projection.Run.Status, &projection.Run.ErrorCode,
+			&outputMessageID, &projection.Run.DiscoverySessionID, &projection.Run.StartedAt, &projection.Run.FinishedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunProjection{}, ErrRunNotFound
 	}
+	if err != nil {
+		return RunProjection{}, err
+	}
+	projection.Run.Activities, err = s.publicActivitiesForRun(ctx, runID, projection.Run.Status)
 	if err != nil {
 		return RunProjection{}, err
 	}
@@ -430,11 +439,11 @@ func (s *Store) CitationViewForUser(ctx context.Context, userID, citationID stri
 
 func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]RunSnapshot, error) {
 	rows, err := s.db.Query(ctx, `
-		select id, input_message_id, status, error_code, discovery_session_id
+		select id, input_message_id, status, error_code, discovery_session_id, started_at, finished_at
 		from (
 			select distinct on (coalesce(r.input_message_id,product.input_message_id))
 				r.id,coalesce(r.input_message_id,product.input_message_id) as input_message_id,
-				r.status,r.error_code,r.discovery_session_id,
+				r.status,r.error_code,r.discovery_session_id,r.started_at,r.finished_at,
 				m.created_at as input_created_at
 			from agent_runs r
 			left join chat_runs product on product.root_agent_run_id=r.id
@@ -451,7 +460,11 @@ func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]Run
 	runs := make([]RunSnapshot, 0)
 	for rows.Next() {
 		var run RunSnapshot
-		if err := rows.Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &run.DiscoverySessionID); err != nil {
+		if err := rows.Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &run.DiscoverySessionID, &run.StartedAt, &run.FinishedAt); err != nil {
+			return nil, err
+		}
+		run.Activities, err = s.publicActivitiesForRun(ctx, run.ID, run.Status)
+		if err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)

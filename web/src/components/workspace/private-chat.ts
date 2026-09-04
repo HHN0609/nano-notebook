@@ -23,6 +23,15 @@ export type AgentRun = {
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   error_code?: string | null;
   discovery_session_id?: string;
+  started_at?: string;
+  finished_at?: string;
+  activities?: AgentActivity[];
+};
+
+export type AgentActivity = {
+  kind: "searching_sources" | "discovering_sources" | "inspecting_source" | "reading_pdf" | "reading_webpage" | "saving_source" | "calculating" | "organizing_steps" | "working";
+  detail?: string;
+  started_at: string;
 };
 
 export type ChatMode = "chat" | "research";
