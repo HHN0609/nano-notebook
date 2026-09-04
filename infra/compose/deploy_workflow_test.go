@@ -54,8 +54,11 @@ func TestDeployWorkflowValidatesBeforeReconcileAndWaitsForHealth(t *testing.T) {
 func TestDeployWorkflowUsesProductionEnvironmentForComposeInterpolation(t *testing.T) {
 	workflow := readDeploymentFile(t, "../../.github/workflows/deploy.yml")
 	commandPrefix := `docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml`
-	if got := strings.Count(workflow, commandPrefix); got != 4 {
-		t.Fatalf("production Compose commands using explicit environment file = %d, want 4", got)
+	if got := strings.Count(workflow, commandPrefix); got < 4 {
+		t.Fatalf("production Compose commands using explicit environment file = %d, want at least 4", got)
+	}
+	if strings.Contains(workflow, "docker compose -f infra/compose/compose.prod.yaml") {
+		t.Fatal("deploy workflow contains a production Compose command without the explicit environment file")
 	}
 }
 
@@ -69,6 +72,19 @@ func TestDeployWorkflowPersistsGrafanaCredentialsWithoutPrintingThem(t *testing.
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("deploy workflow is missing Grafana credential handling %q", required)
+		}
+	}
+}
+
+func TestDeployWorkflowCapturesBoundedControlPlaneDiagnosticsOnFailure(t *testing.T) {
+	workflow := readDeploymentFile(t, "../../.github/workflows/deploy.yml")
+	for _, required := range []string{
+		`if ! docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml up -d --remove-orphans --wait`,
+		`docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml ps`,
+		`docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml logs --no-color --tail=200 control-plane`,
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("deploy workflow is missing bounded failure diagnostic %q", required)
 		}
 	}
 }

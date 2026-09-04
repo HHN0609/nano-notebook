@@ -155,7 +155,11 @@ jobs:
 
             docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml config --quiet
             docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml pull
-            docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml up -d --remove-orphans --wait --wait-timeout 300
+            if ! docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml up -d --remove-orphans --wait --wait-timeout 300; then
+              docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml ps || true
+              docker compose --env-file "$compose_env" -f infra/compose/compose.prod.yaml logs --no-color --tail=200 control-plane || true
+              exit 1
+            fi
 
             curl --fail --silent --show-error http://127.0.0.1/health >/dev/null
             curl --fail --silent --show-error http://127.0.0.1/version >/dev/null
